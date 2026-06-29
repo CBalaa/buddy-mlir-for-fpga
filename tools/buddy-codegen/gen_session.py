@@ -832,7 +832,11 @@ def gen_impl(config: dict) -> str:
     )
     p("//")
     p("// _mlir_ciface_forward_decode writes:")
-    p(f"//   [kv0..kv{kv_layers - 1} : {kv_memref} x {kv_layers}]")
+    p("//   [cache_position_out : MemRef<long long, 1>]")
+    p(
+        f"//   [(kv, kv, cache_position) x {dummy_groups}, "
+        f"kv{kv_layers - 2}, kv{kv_layers - 1}]"
+    )
     p(f"//   [logits : {logits_memref}]")
     p("//")
     p(
@@ -867,12 +871,34 @@ def gen_impl(config: dict) -> str:
     p("};")
     p()
     p("struct DecodeABI {")
-    p(f"  alignas(KV4Ref) char kv_[sizeof(KV4Ref) * {mp}_KV_LAYERS];")
+    p("  alignas(Dummy1Ref) char cache_position_out_[sizeof(Dummy1Ref)];")
+    for i in range(kv_layers):
+        p(f"  alignas(KV4Ref) char kv{i}_[sizeof(KV4Ref)];")
+        if i % 2 == 1 and i < kv_layers - 2:
+            p(f"  alignas(Dummy1Ref) char dummy{i // 2}_[sizeof(Dummy1Ref)];")
     p("  alignas(Logits3Ref) char logits_[sizeof(Logits3Ref)];")
     p()
+    p("  Dummy1Ref &cachePositionOut() {")
+    p("    return *std::launder(")
+    p("        reinterpret_cast<Dummy1Ref *>(cache_position_out_));")
+    p("  }")
     p("  KV4Ref &kv(int i) {")
-    p("    return *std::launder(reinterpret_cast<KV4Ref *>(")
-    p("        kv_ + i * sizeof(KV4Ref)));")
+    p("    switch (i) {")
+    for i in range(kv_layers):
+        p(f"    case {i}:")
+        p(f"      return *std::launder(reinterpret_cast<KV4Ref *>(kv{i}_));")
+    p("    default:")
+    p('      throw std::out_of_range("DecodeABI KV index out of range");')
+    p("    }")
+    p("  }")
+    p("  Dummy1Ref &dummy(int i) {")
+    p("    switch (i) {")
+    for i in range(dummy_groups):
+        p(f"    case {i}:")
+        p(f"      return *std::launder(reinterpret_cast<Dummy1Ref *>(dummy{i}_));")
+    p("    default:")
+    p('      throw std::out_of_range("DecodeABI dummy index out of range");')
+    p("    }")
     p("  }")
     p("  Logits3Ref &logits() {")
     p("    return *std::launder(reinterpret_cast<Logits3Ref *>(logits_));")
@@ -907,7 +933,10 @@ def gen_impl(config: dict) -> str:
         "MemRef<long long, 2> *",
         "MemRef<long long, 1> *",
     ]
-    decode_sig_parts.extend(["KV4" for _i in range(kv_layers)])
+    for i in range(kv_layers):
+        decode_sig_parts.append("KV4")
+        if i % 2 == 1 and i < kv_layers - 2:
+            decode_sig_parts.append("Dummy1Ref *")
     p("using DecodeFn = void (*)(")
     line = "    "
     for idx, part in enumerate(decode_sig_parts):
@@ -949,8 +978,11 @@ def gen_impl(config: dict) -> str:
     p(f"      for (int i = 0; i < {mp}_KV_LAYERS; ++i)")
     p(f"        prefillAbi.kv(i).~{kv_memref}();")
     p(f"      prefillAbi.logits().~{logits_memref}();")
+    p("      decodeAbi.cachePositionOut().~Dummy1Ref();")
     p(f"      for (int i = 0; i < {mp}_KV_LAYERS; ++i)")
     p(f"        decodeAbi.kv(i).~{kv_memref}();")
+    p(f"      for (int i = 0; i < {dummy_groups}; ++i)")
+    p("        decodeAbi.dummy(i).~Dummy1Ref();")
     p(f"      decodeAbi.logits().~{logits_memref}();")
     p("    }")
     p("    if (soHandle) {")
@@ -1068,6 +1100,11 @@ def gen_impl(config: dict) -> str:
     p("    new (&impl_->decodeAbi.kv(i))")
     p(f"        {kv_memref}(reinterpret_cast<{kv_cpp} *>(bv.data), kvShape);")
     p("  }")
+    p()
+    p("  new (&impl_->decodeAbi.cachePositionOut())")
+    p("      MemRef<long long, 1>(pshape, 0LL);")
+    p(f"  for (int i = 0; i < {dummy_groups}; ++i)")
+    p("    new (&impl_->decodeAbi.dummy(i)) MemRef<long long, 1>(pshape, 0LL);")
     p()
     p("  // --- Logits: prefill shape {1, maxTokenLen, vocabSize} ---")
     p("  const uint64_t prefillLogitsBytes =")
@@ -1199,6 +1236,9 @@ def gen_impl(config: dict) -> str:
     p("  cachePosition_->getData()[0] = (long long)position_;")
     p()
     p("  auto &a = impl_->decodeAbi;")
+    p("  a.cachePositionOut().getData()[0] = (long long)position_;")
+    p(f"  for (int i = 0; i < {dummy_groups}; ++i)")
+    p("    a.dummy(i).getData()[0] = (long long)position_;")
 
     call_parts = ["&a"]
     for w in weights:
@@ -1207,6 +1247,8 @@ def gen_impl(config: dict) -> str:
     call_parts.append("cachePosition_.get()")
     for i in range(kv_layers):
         call_parts.append(f"&a.kv({i})")
+        if i % 2 == 1 and i < kv_layers - 2:
+            call_parts.append(f"&a.dummy({i // 2})")
 
     p("  impl_->decodeFn(")
     line = "      "

@@ -25,6 +25,7 @@ set(LinkedLibs
   LowerDAPPass
   LowerDIPPass
   LowerGemminiPass
+  LowerLinalgToBOSCAMEPass
   LowerLinalgToGemminiPass
   LowerLinalgToIMEPass
   LowerIMEPass

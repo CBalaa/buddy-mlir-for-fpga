@@ -42,6 +42,7 @@ void registerLowerBudPass();
 void registerLowerDAPPass();
 void registerLowerDIPPass();
 void registerLowerGemminiPass();
+void registerLowerLinalgToBOSCAMEPass();
 void registerLowerLinalgToGemminiPass();
 void registerLowerLinalgToIMEPass();
 void registerLowerIMEPass();
@@ -88,6 +89,7 @@ void mlir::buddy::registerAllPasses() {
   mlir::buddy::registerLowerDAPPass();
   mlir::buddy::registerLowerDIPPass();
   mlir::buddy::registerLowerGemminiPass();
+  mlir::buddy::registerLowerLinalgToBOSCAMEPass();
   mlir::buddy::registerLowerLinalgToGemminiPass();
   mlir::buddy::registerLowerLinalgToIMEPass();
   mlir::buddy::registerLowerIMEPass();

@@ -36,6 +36,7 @@
 # ===----------------------------------------------------------------------===//
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -669,10 +670,39 @@ def link_shared_lib(
                 f"-Wl,-rpath,{llvm_lib_dir}",
             ]
         )
-    cmd.extend(["-lomp", "-lmlir_c_runner_utils", "-lm"])
+    cmd.extend(_openmp_link_flags(cxx, llvm_lib_dir))
+    cmd.extend(["-lmlir_c_runner_utils", "-lm"])
 
     print(f"[link] {os.path.basename(output_so)}", file=sys.stderr)
     subprocess.check_call(cmd)
+
+
+def _openmp_link_flags(cxx: str, llvm_lib_dir: str = "") -> list[str]:
+    """Return OpenMP runtime linker flags for the current host toolchain."""
+    if llvm_lib_dir:
+        for name in ("libomp.so", "libomp.dylib", "libomp.a"):
+            if os.path.exists(os.path.join(llvm_lib_dir, name)):
+                return ["-lomp"]
+
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        candidates = [
+            os.path.join(conda_prefix, "lib", "libomp.so"),
+            os.path.join(conda_prefix, "lib", "libiomp5.so"),
+        ]
+        conda_root = os.path.dirname(os.path.dirname(conda_prefix))
+        candidates.extend(
+            glob.glob(
+                os.path.join(
+                    conda_root, "pkgs", "intel-openmp-*", "lib", "libiomp5.so"
+                )
+            )
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                return [path, f"-Wl,-rpath,{os.path.dirname(path)}"]
+
+    return ["-lomp"]
 
 
 def partitioned_runtime_objects(
