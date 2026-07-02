@@ -18,9 +18,11 @@
 #
 # ===---------------------------------------------------------------------------
 
+import contextlib
 import ctypes
 import functools
 from enum import Enum, auto
+from pathlib import Path
 from types import FunctionType
 
 import buddy_mlir.dialects.func as func
@@ -111,6 +113,7 @@ class Graph:
         func_name: str,
         device: DeviceType = DeviceType.CPU,
         verbose=False,
+        verbose_path: str | Path | None = None,
         enable_external_calls: bool = False,
     ) -> None:
         """
@@ -135,8 +138,13 @@ class Graph:
         self._fake_params = []
         self.device = device
         self._imported_module = None
+        self._ttir_module = None
+        self._tt_ctx = None
         self._params_ref = None
         self._verbose = verbose
+        self._verbose_path = (
+            Path(verbose_path) if verbose_path is not None else None
+        )
         self._ops_registry = ops_registry
         self._func_name = func_name
         self._ctx = ir.Context()
@@ -146,6 +154,11 @@ class Graph:
         self.op_groups: dict[str, list[Op]] = {}
         self.group_map_device: dict[str, DeviceType] = {}
         self._enable_external_calls = enable_external_calls
+
+    @property
+    def ttir_module(self):
+        """TTIR ``ttmlir.ir.Module`` after ``lower_to_ttir()``; else ``None``."""
+        return self._ttir_module
 
     @property
     def body(self):
@@ -300,6 +313,7 @@ class Graph:
         newnode._keyword_arguments = node.kwargs
         newnode._tensor_meta = node.tensor_meta
         newnode._op_type = node._op_type
+        newnode.trace_meta = node.trace_meta
 
         for i in node._children:
             newnode.add_children(i)
@@ -337,6 +351,7 @@ class Graph:
         # chain[0] is to be head of the chain:
         chain[0]._arguments = node.args
         chain[0]._keyword_arguments = node.kwargs
+        chain[0].trace_meta = node.trace_meta
         # we do not set the op type, because it might have changed.
 
         for i in node._parents:
@@ -548,6 +563,7 @@ class Graph:
                 False,
                 self.device,
                 verbose=self._verbose,
+                verbose_path=self._verbose_path,
                 enable_external_calls=self._enable_external_calls,
             )
             self._imported_module = fx_importer.import_graph()
@@ -597,6 +613,39 @@ class Graph:
             output_dtypes.append(rt.as_ctype(np_type))
         self._output_descriptor = make_output_memref_descriptor(
             output_ranks, output_dtypes
+        )
+
+    def lower_to_ttir(
+        self,
+        ops_registry=None,
+        *,
+        element_dtype: str = "bf16",
+    ):
+        """
+        Lower the graph to a TTIR MLIR module using the ``ttmlir`` Python bindings.
+
+        Does not populate ``self._imported_module`` (Buddy/TOSA/etc.); the result
+        is stored in ``self._ttir_module``. Requires ``ttmlir`` on ``PYTHONPATH``.
+
+        Args:
+            ops_registry: Like ``tosa.ops_registry``; defaults to
+                ``buddy.compiler.ops.ttir.ops_registry``.
+            element_dtype: ``"bf16"`` (default) or ``"f32"`` for tensor types.
+        """
+        from ..ops.ttir import ops_registry as default_ttir_registry
+        from .ttir_import import build_ttir_module_for_graph
+
+        reg = (
+            ops_registry if ops_registry is not None else default_ttir_registry
+        )
+        self._ttir_module, self._tt_ctx = build_ttir_module_for_graph(
+            self._body,
+            self.params_shapes,
+            self.inputs_shapes,
+            self._func_name,
+            reg,
+            verbose=self._verbose,
+            element_dtype=element_dtype,
         )
 
     def lower_to_llvm_ir(self):
@@ -685,6 +734,7 @@ class GraphImporter:
         do_param_pack: bool = False,
         device: DeviceType = DeviceType.CPU,
         verbose=False,
+        verbose_path: str | Path | None = None,
         enable_external_calls: bool = False,
     ):
         """
@@ -707,13 +757,44 @@ class GraphImporter:
         self._params_shapes = params_shapes
         self._inputs_shapes = inputs_shapes
         self._verbose = verbose
+        self._verbose_path = (
+            Path(verbose_path) if verbose_path is not None else None
+        )
         self._do_param_pack = do_param_pack
         self._param_packs = []
         self._num_input_visited = 0
         self._module = ir.Module.create()
+        self._module.context.allow_unregistered_dialects = True
         self._ops_registry = ops_registry
         self._current_param_pack_offset = None
         self._enable_external_calls = enable_external_calls
+
+    def _verbose_output(self):
+        if self._verbose_path is None:
+            return contextlib.nullcontext()
+        self._verbose_path.parent.mkdir(parents=True, exist_ok=True)
+        return self._verbose_path.open("a")
+
+    def _print_verbose_node(self, node: Op, old_ops: list, new_ops: list):
+        old_op_set = set(old_ops)
+        with self._verbose_output() as stream:
+            ctx = (
+                contextlib.redirect_stdout(stream)
+                if stream
+                else contextlib.nullcontext()
+            )
+            with ctx:
+                print("=" * 20 + "Graph Node" + "=" * 20)
+                print("Node: " + node.name)
+                print("Type: " + str(node._op_type))
+                print("Arguments: " + str(node.args))
+                print("Parents: " + str(node._parents))
+                print("Children: " + str(node._children))
+                print("-" * 20 + "MLIR OPS" + "-" * 20)
+                for op in new_ops:
+                    if op not in old_op_set:
+                        print(op)
+                print("")
 
     def _str_to_mlir_dtype(self, dtype: str) -> ir.Type:
         """
@@ -822,26 +903,15 @@ class GraphImporter:
                     elif isinstance(node, PlaceholderOp):
                         self._import_placeholder(node, args_list)
                     elif isinstance(node, GetItemOp):
-                        self._symbol_table[(str(node.name), 0)] = (
-                            self._symbol_table[
-                                (str(node.args[0]), node.args[1])
-                            ]
-                        )
+                        value = self._symbol_table[
+                            (str(node.args[0]), node.args[1])
+                        ]
+                        self._symbol_table[(str(node.name), 0)] = value
                     else:
                         self._import_op(node)
                     new_ops = [op for op in func_op.body.blocks[0].operations]
                     if self._verbose:
-                        print("=" * 20 + "Graph Node" + "=" * 20)
-                        print("Node: " + node.name)
-                        print("Type: " + str(node._op_type))
-                        print("Arguments: " + str(node.args))
-                        print("Parents: " + str(node._parents))
-                        print("Children: " + str(node._children))
-                        print("-" * 20 + "MLIR OPS" + "-" * 20)
-                        for op in new_ops:
-                            if op not in old_ops:
-                                print(op)
-                        print("")
+                        self._print_verbose_node(node, old_ops, new_ops)
 
                 return self._symbol_table.get(("output", 0))
 
@@ -903,11 +973,10 @@ class GraphImporter:
                             )
                         self._import_placeholder(node, args_list)
                     elif isinstance(node, GetItemOp):
-                        self._symbol_table[(str(node.name), 0)] = (
-                            self._symbol_table[
-                                (str(node.args[0]), node.args[1])
-                            ]
-                        )
+                        value = self._symbol_table[
+                            (str(node.args[0]), node.args[1])
+                        ]
+                        self._symbol_table[(str(node.name), 0)] = value
                     else:
                         self._import_op(node)
 
@@ -1051,6 +1120,7 @@ class GraphImporter:
         op_ret: ir.Operation | ir.Value | tuple | list | ir.OpResult = (
             self._ops_registry[op_name](node, self._symbol_table)
         )
+
         if isinstance(op_ret, tuple | list | ir.OpResultList):
             for i, operation in enumerate(op_ret):
                 if isinstance(operation, ir.Operation) or isinstance(

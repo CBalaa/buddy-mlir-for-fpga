@@ -85,6 +85,7 @@ class Op:
         self._children: list[str] = []
         self._parents: list[str] = []
         self._args_index = []
+        self._trace_meta = None
 
     def add_argument(self, arg, arg_index=0):
         """
@@ -160,6 +161,14 @@ class Op:
     @tensor_meta.setter
     def tensor_meta(self, new_tensor_meta):
         self._tensor_meta.update(new_tensor_meta)
+
+    @property
+    def trace_meta(self):
+        return self._trace_meta
+
+    @trace_meta.setter
+    def trace_meta(self, new_trace_meta):
+        self._trace_meta = new_trace_meta
 
 
 class PlaceholderOp(Op):
@@ -1082,6 +1091,18 @@ class BitwiseAndTensorOp(Op):
 
 
 class IndexPutOp(Op):
+    def __init__(self) -> None:
+        super().__init__()
+        self._op_type = OpType.ElementwiseType
+
+
+class FillCacheOp(Op):
+    def __init__(self) -> None:
+        super().__init__()
+        self._op_type = OpType.ElementwiseType
+
+
+class UpdateCacheOp(Op):
     def __init__(self) -> None:
         super().__init__()
         self._op_type = OpType.ElementwiseType

@@ -712,7 +712,7 @@ def MsomaHbmmOp : BOSCAME_MMA_Op<"msoma.hb.mm", "Saturated oct-widening signed 4
 class BOSCAME_IntrOpBase<string mnemonic, int numRes = 0, list<Trait> traits = []> :
   LLVM_IntrOpBase</*Dialect dialect=*/BOSCAME_Dialect,
                   /*string opName=*/"intr." # mnemonic,
-                  /*string enumName=*/"riscv_buddy_bosc_" # !subst(".", "_", mnemonic),
+                  /*string enumName=*/"riscv_bosc_" # !subst(".", "_", mnemonic),
                   /*list<int> overloadedResults=*/[],
                   /*list<int> overloadedOperands=*/[],
                   /*list<Trait> traits=*/traits,

@@ -4,12 +4,22 @@ set(LLVM_OPTIONAL_SOURCES
   ConvertBuddyToLLVMIR.cpp
   )
 
-add_mlir_translation_library(BuddyToLLVMIRTranslationRegistration
-  ConvertBuddyToLLVMIR.cpp
-
-  LINK_LIBS PUBLIC
+set(LinkedLibs
   BuddyRVVToLLVMIRTranslation
   BuddyGemminiToLLVMIRTranslation
   MLIRIMEToLLVMIRTranslation
   MLIRAMEToLLVMIRTranslation
+  )
+
+if(BUDDY_ENABLE_EXTERNAL_DIALECTS)
+  list(APPEND LinkedLibs
+    BuddyBuckyballToLLVMIRTranslation
+    )
+endif()
+
+add_mlir_translation_library(BuddyToLLVMIRTranslationRegistration
+  ConvertBuddyToLLVMIR.cpp
+
+  LINK_LIBS PUBLIC
+  ${LinkedLibs}
   )
