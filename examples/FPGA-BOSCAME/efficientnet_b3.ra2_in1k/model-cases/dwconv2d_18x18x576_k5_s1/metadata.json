@@ -1,0 +1,66 @@
+{
+  "name": "dwconv2d_18x18x576_k5_s1",
+  "kind": "dwconv2d_f32",
+  "dtype": "f32",
+  "description": "NCHW depthwise, weight [C,1,KH,KW]",
+  "entry": "kernel_dwconv2d_18x18x576_k5_s1",
+  "workspace_bytes": 1552896,
+  "buffers": [
+    {
+      "name": "x",
+      "shape": [
+        1,
+        576,
+        18,
+        18
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "weight",
+      "shape": [
+        576,
+        1,
+        5,
+        5
+      ],
+      "dtype": "f32",
+      "offset": 746496
+    },
+    {
+      "name": "bias",
+      "shape": [
+        576
+      ],
+      "dtype": "f32",
+      "offset": 804096
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        576,
+        18,
+        18
+      ],
+      "dtype": "f32",
+      "offset": 806400
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision.",
+  "conv": {
+    "H": 18,
+    "W": 18,
+    "C": 576,
+    "OC": 576,
+    "KH": 5,
+    "KW": 5,
+    "SH": 1,
+    "SW": 1,
+    "PH": 2,
+    "PW": 2,
+    "OH": 18,
+    "OW": 18
+  }
+}

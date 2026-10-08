@@ -1,0 +1,43 @@
+{
+  "count": 25,
+  "smoke": [
+    "silu_1x256",
+    "sigmoid_1x32",
+    "add_1x256",
+    "mul_1x32",
+    "gap_9x9x32",
+    "se_scale_9x9x32",
+    "linear_1x16x32",
+    "conv2d_stem_tiny",
+    "conv2d_1x1_9x9_32x16",
+    "dwconv2d_9x9x32_k3",
+    "dwconv2d_10x10x16_k5"
+  ],
+  "cases": [
+    "silu_1x256",
+    "silu_1x1536",
+    "silu_1x384x9x9",
+    "sigmoid_1x32",
+    "sigmoid_1x384",
+    "add_1x256",
+    "add_1x384x9x9",
+    "mul_1x32",
+    "gap_9x9x32",
+    "gap_9x9x384",
+    "gap_9x9x1536",
+    "se_scale_9x9x32",
+    "se_scale_9x9x384",
+    "linear_1x16x32",
+    "linear_1x16x384",
+    "linear_1x384x16",
+    "linear_1x1000x1536",
+    "conv2d_stem_tiny",
+    "conv2d_1x1_9x9_32x16",
+    "conv2d_head_1x1",
+    "conv2d_18x18_96x576_k1_s1",
+    "conv2d_18x18_576x96_k1_s1",
+    "dwconv2d_9x9x32_k3",
+    "dwconv2d_10x10x16_k5",
+    "dwconv2d_18x18x576_k3_s1"
+  ]
+}

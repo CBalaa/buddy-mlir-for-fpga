@@ -1,0 +1,51 @@
+{
+  "name": "linear_1x1000x1536",
+  "kind": "linear_f32",
+  "dtype": "f32",
+  "description": "A[M,K] * W[N,K]^T + bias -> [M,N]",
+  "entry": "kernel_linear_1x1000x1536",
+  "workspace_bytes": 6158176,
+  "buffers": [
+    {
+      "name": "a",
+      "shape": [
+        1,
+        1536
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "w",
+      "shape": [
+        1000,
+        1536
+      ],
+      "dtype": "f32",
+      "offset": 6144
+    },
+    {
+      "name": "bias",
+      "shape": [
+        1000
+      ],
+      "dtype": "f32",
+      "offset": 6150144
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        1000
+      ],
+      "dtype": "f32",
+      "offset": 6154176
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision.",
+  "shape": [
+    1,
+    1000,
+    1536
+  ]
+}

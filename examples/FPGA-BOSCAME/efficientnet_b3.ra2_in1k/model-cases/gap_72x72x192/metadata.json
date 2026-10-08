@@ -1,0 +1,31 @@
+{
+  "name": "gap_72x72x192",
+  "kind": "gap",
+  "dtype": "f32",
+  "description": "Global average pool NCHW [1,C,H,W] -> [1,C]",
+  "entry": "kernel_gap_72x72x192",
+  "workspace_bytes": 3982080,
+  "buffers": [
+    {
+      "name": "x",
+      "shape": [
+        1,
+        192,
+        72,
+        72
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        192
+      ],
+      "dtype": "f32",
+      "offset": 3981312
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision."
+}

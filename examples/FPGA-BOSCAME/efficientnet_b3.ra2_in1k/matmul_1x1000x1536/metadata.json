@@ -1,0 +1,15 @@
+{
+  "kind": "matmul_i8",
+  "shape": [
+    1,
+    1000,
+    1536
+  ],
+  "roles": [
+    "classifier"
+  ],
+  "dtype": "i8 x i8 -> i32",
+  "target": "nr-fpga",
+  "checked_elements": 1000,
+  "model_operator": true
+}

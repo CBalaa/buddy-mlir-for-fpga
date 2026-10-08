@@ -1,0 +1,42 @@
+{
+  "name": "se_scale_9x9x32",
+  "kind": "se_scale",
+  "dtype": "f32",
+  "description": "Broadcast channel scale onto NCHW activations",
+  "entry": "kernel_se_scale_9x9x32",
+  "workspace_bytes": 20864,
+  "buffers": [
+    {
+      "name": "x",
+      "shape": [
+        1,
+        32,
+        9,
+        9
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "scale",
+      "shape": [
+        1,
+        32
+      ],
+      "dtype": "f32",
+      "offset": 10368
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        32,
+        9,
+        9
+      ],
+      "dtype": "f32",
+      "offset": 10496
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision."
+}

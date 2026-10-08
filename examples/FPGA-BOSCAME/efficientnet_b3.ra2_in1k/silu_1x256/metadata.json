@@ -1,0 +1,29 @@
+{
+  "name": "silu_1x256",
+  "kind": "silu",
+  "dtype": "f32",
+  "description": "silu NCHW/flattened elementwise",
+  "entry": "kernel_silu_1x256",
+  "workspace_bytes": 2048,
+  "buffers": [
+    {
+      "name": "x",
+      "shape": [
+        1,
+        256
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        256
+      ],
+      "dtype": "f32",
+      "offset": 1024
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision."
+}

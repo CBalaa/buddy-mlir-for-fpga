@@ -1,0 +1,15 @@
+{
+  "kind": "matmul_f32",
+  "shape": [
+    1,
+    1000,
+    1536
+  ],
+  "roles": [
+    "classifier"
+  ],
+  "dtype": "f32",
+  "target": "nr-rvv",
+  "checked_elements": 1000,
+  "model_operator": true
+}

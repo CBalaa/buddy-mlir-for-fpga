@@ -1,0 +1,44 @@
+{
+  "name": "add_1x232x9x9",
+  "kind": "add",
+  "dtype": "f32",
+  "description": "add NCHW/flattened elementwise",
+  "entry": "kernel_add_1x232x9x9",
+  "workspace_bytes": 225568,
+  "buffers": [
+    {
+      "name": "x",
+      "shape": [
+        1,
+        232,
+        9,
+        9
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "y",
+      "shape": [
+        1,
+        232,
+        9,
+        9
+      ],
+      "dtype": "f32",
+      "offset": 75200
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        232,
+        9,
+        9
+      ],
+      "dtype": "f32",
+      "offset": 150400
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision."
+}

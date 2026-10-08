@@ -1,0 +1,5 @@
+{
+  "model": "timm/efficientnet_b3.ra2_in1k",
+  "note": "Run operator_inventory.py on import/raw-ops.json; final mapping via final_operator_mapping.py",
+  "status": "template"
+}

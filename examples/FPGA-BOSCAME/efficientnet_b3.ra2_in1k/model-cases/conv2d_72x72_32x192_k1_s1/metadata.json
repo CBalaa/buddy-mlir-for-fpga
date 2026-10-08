@@ -1,0 +1,66 @@
+{
+  "name": "conv2d_72x72_32x192_k1_s1",
+  "kind": "conv2d_f32",
+  "dtype": "f32",
+  "description": "NCHW conv, FCHW weight, fused bias",
+  "entry": "kernel_conv2d_72x72_32x192_k1_s1",
+  "workspace_bytes": 4670208,
+  "buffers": [
+    {
+      "name": "x",
+      "shape": [
+        1,
+        32,
+        72,
+        72
+      ],
+      "dtype": "f32",
+      "offset": 0
+    },
+    {
+      "name": "weight",
+      "shape": [
+        192,
+        32,
+        1,
+        1
+      ],
+      "dtype": "f32",
+      "offset": 663552
+    },
+    {
+      "name": "bias",
+      "shape": [
+        192
+      ],
+      "dtype": "f32",
+      "offset": 688128
+    },
+    {
+      "name": "out",
+      "shape": [
+        1,
+        192,
+        72,
+        72
+      ],
+      "dtype": "f32",
+      "offset": 688896
+    }
+  ],
+  "validation": "All output elements versus an independent C oracle; host oracle uses libm double precision.",
+  "conv": {
+    "H": 72,
+    "W": 72,
+    "C": 32,
+    "OC": 192,
+    "KH": 1,
+    "KW": 1,
+    "SH": 1,
+    "SW": 1,
+    "PH": 0,
+    "PW": 0,
+    "OH": 72,
+    "OW": 72
+  }
+}

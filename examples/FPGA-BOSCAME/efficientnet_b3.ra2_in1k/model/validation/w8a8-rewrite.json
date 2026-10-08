@@ -1,0 +1,7 @@
+{
+  "model": "timm/efficientnet_b3.ra2_in1k",
+  "rewrite_linear_to_w8a8": {},
+  "uncovered_ops": [],
+  "status": "template",
+  "note": "Populate from triton_call_replace.py W8A8 replacement report when enabled"
+}

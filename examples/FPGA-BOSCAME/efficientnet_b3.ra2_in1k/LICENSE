@@ -1,0 +1,15 @@
+Apache License 2.0
+==================
+
+This EfficientNet-B3 FPGA-BOSCAME example is licensed under the Apache
+License, Version 2.0, the same terms as the rest of buddy-mlir.
+
+The full license text is the LICENSE file at the repository root:
+
+    ../../../LICENSE
+
+SPDX-License-Identifier: Apache-2.0
+
+Upstream model weights (`timm/efficientnet_b3.ra2_in1k`) are not part of
+this tree. They remain under their own terms on Hugging Face / timm and
+must not be committed.
