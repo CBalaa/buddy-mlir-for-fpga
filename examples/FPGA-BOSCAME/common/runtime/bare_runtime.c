@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #ifndef UART_FREQ_HZ
-#define UART_FREQ_HZ 50000000u
+#define UART_FREQ_HZ 5529600u
 #endif
 
 #ifndef UART_BAUD
@@ -742,7 +742,7 @@ static inline int ame_msettilem(int rem)
 {
     register size_t in asm("a0") = (size_t)rem;
     register size_t out asm("a6");
-    __asm__ volatile (".word 0x04055877" : "+r"(in), "=r"(out) :: "memory");
+    __asm__ volatile (".word 0x04055077" : "+r"(in), "=r"(out) :: "memory");
     return (int)out;
 }
 
@@ -750,14 +750,14 @@ static inline int ame_msettilen(int rem)
 {
     register size_t in asm("a0") = (size_t)rem;
     register size_t out asm("t2");
-    __asm__ volatile (".word 0x040543f7" : "+r"(in), "=r"(out) :: "memory");
+    __asm__ volatile (".word 0x04054077" : "+r"(in), "=r"(out) :: "memory");
     return (int)out;
 }
 
 static inline int ame_msettilek(int rem)
 {
-    register size_t inout asm("a3") = (size_t)rem;
-    __asm__ volatile (".word 0x0406e6f7" : "+r"(inout) :: "memory");
+    register size_t inout asm("a0") = (size_t)rem;
+    __asm__ volatile (".word 0x04056077" : "+r"(inout) :: "memory");
     return (int)inout;
 }
 
@@ -786,7 +786,7 @@ static inline void ame_mlbt8(const int8_t *base, int stride_bytes)
      * identical layout. NR FPGA0 traps on the transposed form. */
     __asm__ volatile (".word 0x08b500f7" :: "r"(a0), "r"(a1) : "memory");
 #else
-    __asm__ volatile (".word 0x08b508f7" :: "r"(a0), "r"(a1) : "memory");
+    __asm__ volatile (".word 0x08b500f7" :: "r"(a0), "r"(a1) : "memory");
 #endif
 }
 
@@ -797,16 +797,16 @@ static inline void ame_mqma_b(void)
 
 static inline void ame_mlce32(const float *base, int stride_bytes)
 {
-    register const float *t3 asm("t3") = base;
-    register size_t t0 asm("t0") = (size_t)stride_bytes;
-    __asm__ volatile (".word 0x005e2077" :: "r"(t3), "r"(t0) : "memory");
+    register const float *a0 asm("a0") = base;
+    register size_t a1 asm("a1") = (size_t)stride_bytes;
+    __asm__ volatile (".word 0x00b52077" :: "r"(a0), "r"(a1) : "memory");
 }
 
 static inline void ame_msce32(float *base, int stride_bytes)
 {
-    register float *t3 asm("t3") = base;
-    register size_t t0 asm("t0") = (size_t)stride_bytes;
-    __asm__ volatile (".word 0x025e2077" :: "r"(t3), "r"(t0) : "memory");
+    register float *a0 asm("a0") = base;
+    register size_t a1 asm("a1") = (size_t)stride_bytes;
+    __asm__ volatile (".word 0x02b52077" :: "r"(a0), "r"(a1) : "memory");
 }
 
 static void ame_resync_state(void)

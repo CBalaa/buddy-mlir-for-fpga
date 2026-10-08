@@ -34,17 +34,24 @@ CALLER_SAVED_GPRS = [
     "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
     "t0", "t1", "t2", "t3", "t4", "t5", "t6",
 ]
+# Canonical patch6 NR operand encodings.  The updated AME image accepts
+# tile configuration with a0 as the source and no architectural return,
+# memory operations with a0/a1 as address/stride, and the tr0/tr1 pair for
+# signed-i8 matrix multiply.  The previous ModelZoo words used return and
+# operand fields from an older AME image (for example tr4 for B); they can
+# leave the current engine waiting indefinitely even though they pass a
+# syntactic AME audit.
 CONFIG = {
     "msettype": ("a0", None, 0x00054077),
-    "msettilem": ("a0", "a6", 0x04055877),
-    "msettilen": ("a0", "t2", 0x040543F7),
-    "msettilek": ("a3", "a3", 0x0406E6F7),
+    "msettilem": ("a0", None, 0x04055077),
+    "msettilen": ("a0", None, 0x04054077),
+    "msettilek": ("a0", None, 0x04056077),
 }
 MEMORY = {
     "mlae8.m": ("tr", "a0", "a1", 0x04B50077),
-    "mlbe8.m": ("tr", "a0", "a1", 0x08B50077),
-    "mlce32.m": ("acc", "t3", "t0", 0x005E2077),
-    "msce32.m": ("acc", "t3", "t0", 0x025E2077),
+    "mlbe8.m": ("tr", "a0", "a1", 0x08B500F7),
+    "mlce32.m": ("acc", "a0", "a1", 0x00B52077),
+    "msce32.m": ("acc", "a0", "a1", 0x02B52077),
 }
 GPR_MODES = ("fixed", "direct")
 # Historical switches are deliberately rejected, including a value of "0":
@@ -117,12 +124,22 @@ def emit_fixed_reg_sequence(indent, live_regs, moves, word, comment,
     return "\n".join(lines)
 
 
-def encode_mma(mnemonic, accumulator, lhs, rhs):
+def encode_mma(mnemonic, accumulator, lhs, rhs, gpr_mode="fixed"):
     if mnemonic != "mqma.b.mm":
         raise ValueError(f"NR only supports signed i8 mqma.b.mm, got {mnemonic}")
-    word = (0x28080877 | (matrix_register(accumulator, "acc") << 7) |
-            (matrix_register(lhs, "tr") << 15) |
-            (matrix_register(rhs, "tr") << 20))
+    if gpr_mode == "fixed":
+        # Validate the source banks even though the virtual RHS register is
+        # remapped to tr1 below.  This catches malformed lowering while
+        # accepting the historical tr4 spelling emitted for B.
+        matrix_register(accumulator, "acc")
+        matrix_register(lhs, "tr")
+        matrix_register(rhs, "tr")
+        # patch6's validated signed-i8 operation is acc0 += tr0 * tr1.
+        word = 0x28180877
+    else:
+        word = (0x28080877 | (matrix_register(accumulator, "acc") << 7) |
+                (matrix_register(lhs, "tr") << 15) |
+                (matrix_register(rhs, "tr") << 20))
     validate_ame_word(word)
     return word
 
@@ -171,9 +188,12 @@ def convert_line(line, gpr_mode="fixed"):
             word |= GPR[fixed_rd] << 7
         if fixed_rd:
             live.append(fixed_rd)
+        # patch6 tile configuration has no usable destination register.  Keep
+        # the source value live in a0, but discard the compiler's historical
+        # pseudo-result instead of encoding the stale a6/t2/a3 return fields.
         return emit_fixed_reg_sequence(
-            indent, live, [(fixed_rs1, rs1)], word, code,
-            (fixed_rd, rd) if rd != "zero" else None), True
+            indent, live, [(fixed_rs1, rs1)], word,
+            code, None), True
     if mnemonic in MEMORY:
         if len(operands) != 3:
             raise ValueError(f"{mnemonic} expects matrix register, (base), stride")
@@ -186,18 +206,22 @@ def convert_line(line, gpr_mode="fixed"):
         if gpr_mode == "direct":
             # AME v0.5 software contract section 2.2: rs2 is FIVE bits.
             # Bit 24 belongs to the GPR field, not to an eight-bit opcode.
-            word = ((word & ~((31 << 20) | (31 << 15))) |
+            word = ((word & ~((31 << 20) | (31 << 15) | (15 << 7))) |
                     (GPR[stride] << 20) | (GPR[base] << 15) | (matrix << 7))
             validate_ame_word(word)
             return f"{indent}.word 0x{word:08x} # {code} [nr direct]", True
+        # The patch6 contract uses tr0 for A, tr1 for B and acc0 for the
+        # accumulator.  Matrix names in the generated LLVM are virtual and
+        # may still say tr4/acc7; map them to the canonical physical banks.
+        canonical_matrix = 1 if mnemonic == "mlbe8.m" else 0
         return emit_fixed_reg_sequence(
             indent, [fixed_base, fixed_stride],
-            [(fixed_base, base), (fixed_stride, stride)], word | (matrix << 7),
-            code), True
+            [(fixed_base, base), (fixed_stride, stride)],
+            word | (canonical_matrix << 7), code), True
     if mnemonic == "mqma.b.mm":
         if len(operands) != 3:
             raise ValueError("mqma.b.mm expects acc, tr, tr")
-        word = encode_mma(mnemonic, *operands)
+        word = encode_mma(mnemonic, *operands, gpr_mode=gpr_mode)
         return f"{indent}.word 0x{word:08x} # {code}", True
     if mnemonic.startswith(("mlbte", "mlbt")):
         raise ValueError("NR does not support transposed B loads; pack B as [N,K]")

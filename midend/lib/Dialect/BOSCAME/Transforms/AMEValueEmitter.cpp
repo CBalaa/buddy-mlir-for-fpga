@@ -316,8 +316,8 @@ LogicalResult configureTiles(OpBuilder &builder, Location loc, Value m, Value n,
   Type i64Type = builder.getI64Type();
   MSettilemOp::create(builder, loc, i64Type, castToI64(builder, loc, m));
   MSettilenOp::create(builder, loc, i64Type, castToI64(builder, loc, n));
-  if (k)
-    configureTileK(builder, loc, k);
+  if (k && failed(configureTileK(builder, loc, k)))
+    return failure();
   return success();
 }
 

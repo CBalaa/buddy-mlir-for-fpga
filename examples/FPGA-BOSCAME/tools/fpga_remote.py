@@ -166,10 +166,21 @@ def verify_readback(run_dir, runtime_output, expected_sha):
     if not match:
         raise RuntimeError('platform did not report UV_RUN_IMAGE')
     image = Path(os.fsdecode(match[1])).resolve()
-    if image.parent != run_dir:
+    if not within(image, run_dir):
         raise RuntimeError('platform selected an image outside this run directory')
-    readback = Path(str(image) + '.readback')
-    if readback.is_symlink() or not readback.is_file():
+    # The patch6 single-image helper writes image.readback.bin beside an
+    # image_padded.bin; the older test doubles and layout loader use the
+    # conventional image_padded.bin.readback spelling. Accept either while
+    # keeping both files confined to this run directory.
+    readback_candidates = [
+        Path(str(image) + '.readback'),
+        image.with_name('image.readback.bin'),
+        image.with_suffix('.readback.bin'),
+    ]
+    readback = next((candidate for candidate in readback_candidates
+                     if within(candidate, run_dir) and not candidate.is_symlink()
+                     and candidate.is_file()), None)
+    if readback is None:
         raise RuntimeError('missing DDR readback')
     raw = run_dir / 'image.bin'
     if digest(raw) != expected_sha:
@@ -463,12 +474,24 @@ def run(args, root=None, run_dir=None, device=None, control_fd=0):
         log(f'UART ready: {device}, {args.baud}, 8N1, no flow control')
         master, slave = pty.openpty()
         env = os.environ.copy()
-        # Use the known platform defaults, regardless of the login environment.
+        # Keep the legacy 14.7456 MHz default for the older Qwen workspaces,
+        # but select patch6's 5.5296 MHz profile when this workdir's platform
+        # Makefile resolves to the patch6 release. An explicit environment
+        # override remains authoritative for another bitstream revision.
+        try:
+            platform_makefile = (root / 'Makefile').resolve()
+            default_sys_clk_hz = ('5529600' if 'nr-patch6' in str(platform_makefile)
+                                  else '14745600')
+        except OSError:
+            default_sys_clk_hz = '14745600'
+        sys_clk_hz = os.environ.get('UV_RUN_SYS_CLK_HZ', default_sys_clk_hz)
+        if not sys_clk_hz.isdecimal() or int(sys_clk_hz) <= 0:
+            raise RuntimeError('UV_RUN_SYS_CLK_HZ must be a positive integer')
         for key in ('UV_RUN_PLAN_TCL', 'UV_RUN_PREP_ONLY'):
             env.pop(key, None)
-        env.update(UV_RUN_READBACK='1', UV_RUN_SYS_CLK_HZ='14745600',
+        env.update(UV_RUN_READBACK='1', UV_RUN_SYS_CLK_HZ=sys_clk_hz,
                    UV_RUN_ALIGN_BYTES='1048576', UV_RUN_MIN_BYTES='1048576',
-                   TMPDIR=str(run_dir))
+                   UV_RUN_OUT_ROOT=str(run_dir), TMPDIR=str(run_dir))
         try:
             if layout is not None:
                 # run_uv_layout.sh resolves the plan relative to the platform

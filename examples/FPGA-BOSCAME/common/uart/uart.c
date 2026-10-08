@@ -1,10 +1,8 @@
 #include "uart.h"
 
 void init_uart(uint32_t freq, uint32_t baud) {
-  /* NR supplies a fixed divisor in uart_init; its input clock is not given. */
-  (void)freq;
-  (void)baud;
-  uart_init();
+  /* Keep the NR word-wide MMIO map and use the upstream init contract. */
+  uart_configure(uart_divisor_for(freq, baud));
 }
 
 void write_serial(char value) { uart_putc(value); }

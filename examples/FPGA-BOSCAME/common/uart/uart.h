@@ -10,6 +10,21 @@ void print_uart(const char *text);
 void print_uart_int(uint32_t value);
 void print_uart_addr(uint64_t value);
 
+#ifndef UART_DEFAULT_FREQ_HZ
+#ifdef UART_FREQ_HZ
+#define UART_DEFAULT_FREQ_HZ UART_FREQ_HZ
+#else
+#define UART_DEFAULT_FREQ_HZ 5529600u
+#endif
+#endif
+#ifndef UART_DEFAULT_BAUD
+#ifdef UART_BAUD
+#define UART_DEFAULT_BAUD UART_BAUD
+#else
+#define UART_DEFAULT_BAUD 115200u
+#endif
+#endif
+
 #define UART_BASE 0x310b0000UL
 #define UART_REG(offset) (*(volatile uint32_t *)(UART_BASE + (offset)))
 
@@ -22,7 +37,22 @@ void print_uart_addr(uint64_t value);
 #define UART_USR UART_REG(0x7c)
 #define UART_THR UART_REG(0x20)
 
-static void uart_init(void) {
+static __attribute__((unused)) uint32_t uart_divisor_for(uint32_t freq,
+                                                          uint32_t baud) {
+  const uint64_t denominator = (uint64_t)(baud ? baud : UART_DEFAULT_BAUD) * 16u;
+  uint64_t divisor;
+
+  if (freq == 0u)
+    freq = UART_DEFAULT_FREQ_HZ;
+  divisor = ((uint64_t)freq + denominator / 2u) / denominator;
+  if (divisor < 1u)
+    divisor = 1u;
+  if (divisor > 0xffffu)
+    divisor = 0xffffu;
+  return (uint32_t)divisor;
+}
+
+static __attribute__((unused)) void uart_configure(uint32_t divisor) {
   /* 关闭串口中断，此时 DLAB=0，所以 +0x04 是 IER。 */
   UART_IER_DLH = 0;
 
@@ -36,15 +66,9 @@ static void uart_init(void) {
   while (UART_USR & 0x01)
     ;
 
-  /*
-   * DLAB=1 时：
-   *   +0x04 = DLH
-   *   +0x00 = DLL
-   *
-   * 波特率除数为 0x0008。
-   */
-  UART_IER_DLH = 0;
-  UART_RBR_THR_DLL = 8;
+  /* DLAB=1 时 +0x04 是 DLH，+0x00 是 DLL。 */
+  UART_IER_DLH = (divisor >> 8) & 0xffu;
+  UART_RBR_THR_DLL = divisor & 0xffu;
 
   /* DLAB=0，8 数据位、无校验、1 停止位，即 8N1。 */
   UART_LCR = 0x03;
@@ -54,6 +78,10 @@ static void uart_init(void) {
 
   /* 置位 DTR 和 RTS。 */
   UART_MCR = 0x03;
+}
+
+static __attribute__((unused)) void uart_init(void) {
+  uart_configure(uart_divisor_for(UART_DEFAULT_FREQ_HZ, UART_DEFAULT_BAUD));
 }
 
 static void uart_putc(char c) {
@@ -68,7 +96,7 @@ static __attribute__((unused)) char uart_getc(void) {
   return (char)(UART_RBR_THR_DLL & 0xffu);
 }
 
-static void uart_puts(char *s) {
+static __attribute__((unused)) void uart_puts(char *s) {
   while (*s != '\0') {
     uart_putc(*(s++));
   }

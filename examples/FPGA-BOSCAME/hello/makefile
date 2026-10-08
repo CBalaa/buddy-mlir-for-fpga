@@ -17,16 +17,22 @@ LD_SCRIPT       := platform/hello_nr.ld
 CRT_S           := $(RUNTIME_DIR)/crt_uart.S
 UART_C          := $(UART_DIR)/uart.c
 
+# Keep the board-specific line rate configurable.  The NR driver uses these
+# values to derive the UART divisor; callers can override either value on the
+# make command line when a different bitstream clock or host baud is used.
+UART_FREQ_HZ    ?= 5529600u
+UART_BAUD       ?= 115200u
+
 SRC             := hello.c
 BUILD_DIR       := build
 BIN             := $(BUILD_DIR)/hello.bin
 OBJECTS         := $(addprefix $(BUILD_DIR)/,crt_uart.o hello.o bare_runtime.o uart.o)
 
-RISCV_CFLAGS    := -march=rv64gc -mabi=lp64d -mcmodel=medany -nostdlib \
+RISCV_CFLAGS    := -march=rv64gc -mabi=lp64d -mcmodel=medany -mno-relax -nostdlib \
                    -fno-builtin -ffreestanding -fno-pie -O2 \
                    -ffunction-sections -fdata-sections -MMD -MP \
                    -DBARE_RUNTIME_ENABLE_AME=0 \
-                   -DUART_FREQ_HZ=14745600u -DUART_BAUD=115200u \
+                   -DUART_FREQ_HZ=$(UART_FREQ_HZ) -DUART_BAUD=$(UART_BAUD) \
                    -I$(UART_DIR) -I$(RUNTIME_DIR)
 
 all: $(BIN)

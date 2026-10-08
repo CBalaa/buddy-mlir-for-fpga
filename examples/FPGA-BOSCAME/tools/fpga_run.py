@@ -328,6 +328,12 @@ temporary.replace(path)
             log('Pending UART input retained; use --resume-run with --interactive to retry the same request IDs.')
         try:
             with (local_dir / 'uart.raw.log').open('ab' if args.resume_run else 'wb') as uart:
+                # Python's append mode does not guarantee that tell() starts at
+                # EOF before the first write.  Resume relays must request only
+                # bytes that are not already present locally, otherwise every
+                # reconnect duplicates the earlier UART trace.
+                if args.resume_run:
+                    uart.seek(0, os.SEEK_END)
                 for attempt in range(args.retries + 1):
                     relay = ['python3', '-u', '-B', remote_dir+'/runner.py', '--relay', str(uart.tell())]
                     process = subprocess.Popen([*ssh, command(relay)], stdin=subprocess.DEVNULL,

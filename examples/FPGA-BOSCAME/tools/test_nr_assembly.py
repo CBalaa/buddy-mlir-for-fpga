@@ -67,8 +67,8 @@ class NrAssemblyTests(unittest.TestCase):
 
     def test_verified_reference_words(self):
         # Fixed words from ModelZoo's bare_runtime.c, not recomputed encodings.
-        for word in (0x00054077, 0x04055877, 0x040543f7, 0x0406e6f7,
-                     0x04b50077, 0x08b500f7, 0x005e2077, 0x025e2077,
+        for word in (0x00054077, 0x04055077, 0x04054077, 0x04056077,
+                     0x04b50077, 0x08b500f7, 0x00b52077, 0x02b52077,
                      0x28180877):
             with self.subTest(word=hex(word)):
                 validate_ame_word(word)
@@ -99,8 +99,9 @@ class NrAssemblyTests(unittest.TestCase):
                     assembly, _ = encoder.convert_line(f'{mnemonic} {rd}, {rs1}')
                     regs, seen = execute_wrapper(assembly, original)
                     self.assertEqual(seen[0][1], original[rs1])
+                    # patch6 config words encode rd=x0; no pseudo return
+                    # register is observable by the C callers.
                     expected = dict(original)
-                    if rd != 'zero': expected[rd] = 13
                     self.assertEqual(regs, expected, (mnemonic, rd, rs1))
         self.assertEqual(encoder.convert_line('msettilem x16, x10')[0],
                          encoder.convert_line('msettilem a6, a0')[0].replace(
@@ -115,9 +116,13 @@ class NrAssemblyTests(unittest.TestCase):
             for matrix in range(8):
                 for base in encoder.ABI_NAMES:
                     for stride in encoder.ABI_NAMES:
-                        assembly, changed = encoder.convert_line(
-                            f'{mnemonic} {bank}{matrix}, ({base}), {stride}',
-                            gpr_mode='direct')
+                        try:
+                            assembly, changed = encoder.convert_line(
+                                f'{mnemonic} {bank}{matrix}, ({base}), {stride}',
+                                gpr_mode='direct')
+                        except ValueError as error:
+                            self.assertIn('legacy pre-patch6', str(error))
+                            continue
                         self.assertTrue(changed)
                         self.assertEqual(len(assembly.splitlines()), 1)
                         regs, seen = execute_wrapper(assembly, original)
@@ -138,8 +143,14 @@ class NrAssemblyTests(unittest.TestCase):
         for mnemonic in ('msettilem', 'msettilen', 'msettilek'):
             for rd in encoder.ABI_NAMES:
                 for rs1 in encoder.ABI_NAMES:
-                    assembly, _ = encoder.convert_line(
-                        f'{mnemonic} {rd}, {rs1}', gpr_mode='direct')
+                    try:
+                        assembly, _ = encoder.convert_line(
+                            f'{mnemonic} {rd}, {rs1}', gpr_mode='direct')
+                    except ValueError as error:
+                        # A source spelling that recreates a pre-patch6 raw
+                        # word must be rejected by the new static contract.
+                        self.assertIn('legacy pre-patch6', str(error))
+                        continue
                     self.assertEqual(len(assembly.splitlines()), 1)
                     regs, seen = execute_wrapper(assembly, original)
                     self.assertEqual(seen[0][1], original[rs1])
@@ -211,7 +222,9 @@ class NrAssemblyTests(unittest.TestCase):
                 encoder.transform(text)
 
     def test_reject_unsupported_raw_words_and_bypasses(self):
-        for text in ('.word 0x08b508f7', '.Lx: .word 0x08b508f7',
+        for text in ('.word 0x04055877', '.word 0x040543f7', '.word 0x0406e6f7',
+                     '.word 0x08b50277', '.word 0x005e2077', '.word 0x025e2077',
+                     '.word 0x28480877', '.word 0x08b508f7', '.Lx: .word 0x08b508f7',
                      '.word 0x04b50077, 0x08b508f7', '.word 0x04b51077',
                      '.word 0x2a180877', '.word 0xc2202573', '.word 0x57',
                      '.insn r 0x77, 0, 0, a0, a1, a2',

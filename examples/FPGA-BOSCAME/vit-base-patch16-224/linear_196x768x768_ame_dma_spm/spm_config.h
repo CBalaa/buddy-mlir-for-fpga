@@ -1,0 +1,23 @@
+#ifndef NH_E6_DMA_SPM_CONFIG_H
+#define NH_E6_DMA_SPM_CONFIG_H
+
+/* Keep these values aligned with soc_spm/dma_spm_subsystem parameters. */
+#define SPM_SIZE_BYTES UINT64_C(0x20000) /* 128 KiB per bank */
+#define SPM_PAGE_SIZE  UINT64_C(0x1000)
+#define SPM_PAGE_COUNT (SPM_SIZE_BYTES / SPM_PAGE_SIZE)
+
+#define SPM0  UINT64_C(0x20000000)
+#define SPM1  UINT64_C(0x20400000)
+#define VSPM0 UINT64_C(0x50000000)
+#define VSPM1 UINT64_C(0x50400000)
+
+#define SPM_COMPUTE_A  UINT64_C(0x4000)
+#define SPM_COMPUTE_B  UINT64_C(0x5000)
+#define SPM_COMPUTE_O  UINT64_C(0x6000)
+#define SPM_COMPUTE_MA UINT64_C(0x7000)
+#define SPM_COMPUTE_MB UINT64_C(0x8000)
+#define SPM_COMPUTE_MC UINT64_C(0x9000)
+#define SPM_COMPUTE_MO UINT64_C(0xa000)
+#define SPM_INIT_BASE  UINT64_C(0x10000)
+
+#endif

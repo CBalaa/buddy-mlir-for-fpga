@@ -208,3 +208,11 @@ RISC-V 对象 → 裸机二进制流程，覆盖 FP32 模型公式及独立的 N
 Qwen算子的 [Triton 版本](qwen3-0.6b/triton/) 使用独立的 `triton-riscv`
 编译器将真实 `@triton.jit` 内核导出为TTIR、linalg，再进入本仓库Buddy lowering。
 两种前端复用同一套C launch、NR运行时和数值参考。
+
+## ViT-Base/Patch16-224
+
+[`vit-base-patch16-224/`](vit-base-patch16-224/) contains a fixed-shape
+HuggingFace ViT-B/16 adaptation.  It follows the Triton → Buddy graph capture
+→ external-call replacement → NR lowering flow independently of the Qwen
+example.  The model input is normalized FP32 `1x3x224x224`; run its host kernel
+suite before using the shared FPGA runner.

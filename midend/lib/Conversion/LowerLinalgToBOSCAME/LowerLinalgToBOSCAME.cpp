@@ -1615,7 +1615,8 @@ static LogicalResult lowerFpgaMatmul(linalg::MatmulOp op,
   Value strideA = ame::createByteStride(rewriter, loc, subA, 0);
   Value strideB = ame::createByteStride(rewriter, loc, subB, transposedB ? 1 : 0);
 
-  ame::configureTileK(rewriter, loc, currK);
+  if (failed(ame::configureTileK(rewriter, loc, currK)))
+    return failure();
 
   FailureOr<Value> activation =
       ame::createLoadA(rewriter, loc, i8Type, subA, strideA, op);
@@ -1665,6 +1666,21 @@ static bool isNrMatmul(linalg::MatmulOp op, bool transposeB) {
       !b.getElementType().isSignlessInteger(8) ||
       !c.getElementType().isSignlessInteger(32))
     return false;
+
+  // Keep this classifier in sync with the rewrite pattern and the dynamic
+  // legality predicate below.  If C is a proven alias of A or B, the resident
+  // accumulator schedule is not valid; returning false here leaves the
+  // original linalg.matmul legal for the fallback pipeline instead of making
+  // conversion fail after the pattern declines it.
+  AliasAnalysis aliasAnalysis(op->getParentOp());
+  AliasResult cAliasA = aliasAnalysis.alias(
+      op.getDpsInitOperand(0)->get(), op.getDpsInputOperand(0)->get());
+  AliasResult cAliasB = aliasAnalysis.alias(
+      op.getDpsInitOperand(0)->get(), op.getDpsInputOperand(1)->get());
+  if (cAliasA.isMust() || cAliasA.isPartial() || cAliasB.isMust() ||
+      cAliasB.isPartial())
+    return false;
+
   int64_t m = a.getDimSize(0), k = a.getDimSize(1);
   int64_t n = b.getDimSize(transposeB ? 0 : 1);
   return m > 0 && n > 0 && k > 0 &&
@@ -1674,6 +1690,45 @@ static bool isNrMatmul(linalg::MatmulOp op, bool transposeB) {
          hasSupportedRowMajor2DLayout(c) &&
          (transposeB ? hasSupportedRowMajor2DLayout(b)
                      : hasSupportedBLayout(b));
+}
+
+/// Triton pads a physical [N,K] weight tile into a contiguous temporary before
+/// the linalg.matmul is formed.  The copy's source still carries the original
+/// [K,N] logical view with strides [1,K], which is exactly the layout consumed
+/// by NR's mlbe8 instruction.  Returning that source avoids a second scalar
+/// [N,K] packing loop in every K tile.  The fallback remains the conservative
+/// scratch pack when this producer pattern is absent.
+static Value findNrPhysicalBSource(Value packed, Operation *matmul,
+                                   int64_t expectedN, int64_t expectedK) {
+  auto packedType = dyn_cast<MemRefType>(packed.getType());
+  if (!packedType || packedType.getRank() != 2)
+    return {};
+  for (Operation *user : packed.getUsers()) {
+    auto view = dyn_cast<memref::SubViewOp>(user);
+    // Only consume a producer-side packing view.  A later copy is not part of
+    // the value available at this matmul and must not be mistaken for the
+    // physical weight source merely because it happens to use the same
+    // temporary.
+    if (!view || view.getSource() != packed ||
+        view->getBlock() != matmul->getBlock() ||
+        !view->isBeforeInBlock(matmul))
+      continue;
+    for (Operation *viewUser : view->getUsers()) {
+      auto copy = dyn_cast<memref::CopyOp>(viewUser);
+      if (!copy || copy.getTarget() != view.getResult() ||
+          copy->getBlock() != matmul->getBlock() ||
+          !copy->isBeforeInBlock(matmul))
+        continue;
+      auto sourceType = dyn_cast<MemRefType>(copy.getSource().getType());
+      if (sourceType && sourceType.getRank() == 2 &&
+          hasSupportedTransposed2DLayout(sourceType) &&
+          sourceType.getElementType().isSignlessInteger(8) &&
+          sourceType.getDimSize(0) == expectedN &&
+          sourceType.getDimSize(1) == expectedK)
+        return copy.getSource();
+    }
+  }
+  return {};
 }
 
 class NrMatmulToBOSCAMELowering : public OpRewritePattern<linalg::MatmulOp> {
@@ -1691,9 +1746,46 @@ public:
     Value b = op.getDpsInputOperand(1)->get();
     Value c = op.getDpsInitOperand(0)->get();
     auto bType = cast<MemRefType>(b.getType());
+    const int64_t expectedK = bType.getDimSize(transposeB ? 1 : 0);
+    const int64_t expectedN = bType.getDimSize(transposeB ? 0 : 1);
+    Value physicalB = findNrPhysicalBSource(b, op, expectedN, expectedK);
+    auto physicalBType = physicalB ? dyn_cast<MemRefType>(physicalB.getType())
+                                   : MemRefType();
+    if (!physicalB || !physicalBType) {
+      physicalB = b;
+      physicalBType = bType;
+    }
+
+    // The generated schedule keeps C resident in the AME accumulator while
+    // the K loop runs and writes it back only after the reduction.  That is
+    // equivalent to the linalg contract only when C does not overlap either
+    // input: an aliased A/C or B/C would let the AME store clobber values that
+    // a later K tile still has to read.  Linalg permits such views to reach
+    // this pass (for example, through subview/reinterpret_cast), so reject a
+    // definite overlap and leave it for the conservative CPU/VIR lowering.
+    AliasAnalysis aliasAnalysis(op->getParentOp());
+    AliasResult cAliasA = aliasAnalysis.alias(c, a);
+    AliasResult cAliasB = aliasAnalysis.alias(c, b);
+    // Distinct function arguments are conservatively MayAlias in MLIR even
+    // when callers normally pass disjoint buffers.  Reject only a *proven*
+    // overlap here; otherwise this safety check would disable the NR path for
+    // every ordinary three-argument kernel.  A MayAlias result is left to the
+    // caller's existing linalg aliasing contract, while Must/PartialAlias
+    // would invalidate the AME schedule and must fall back.
+    if (cAliasA.isMust() || cAliasA.isPartial() || cAliasB.isMust() ||
+        cAliasB.isPartial())
+      return rewriter.notifyMatchFailure(
+          op, "NR AME matmul requires a non-overlapping destination");
+    if (physicalB != b) {
+      AliasResult cAliasPhysicalB = aliasAnalysis.alias(c, physicalB);
+      if (cAliasPhysicalB.isMust() || cAliasPhysicalB.isPartial())
+        return rewriter.notifyMatchFailure(
+            op, "NR AME matmul requires a non-overlapping destination");
+    }
+
     bool physicalNK = transposeB ||
-                      (!hasSupportedRowMajor2DLayout(bType) &&
-                       hasSupportedTransposed2DLayout(bType));
+                      (!hasSupportedRowMajor2DLayout(physicalBType) &&
+                       hasSupportedTransposed2DLayout(physicalBType));
     Type i8 = rewriter.getI8Type(), i32 = rewriter.getI32Type();
     constexpr AmeTargetProfile profile = AmeTargetProfile::NrFpga;
     auto index = [&](int64_t value) -> Value {
@@ -1741,8 +1833,10 @@ public:
     Value subB, strideB;
     if (physicalNK) {
       subB = transposeB
-                 ? createSubView(rewriter, loc, b, {n, k}, {columns, depth})
-                 : createSubView(rewriter, loc, b, {k, n}, {depth, columns});
+                 ? createSubView(rewriter, loc, physicalB, {n, k},
+                                {columns, depth})
+                 : createSubView(rewriter, loc, physicalB, {k, n},
+                                {depth, columns});
       strideB = ame::createByteStride(rewriter, loc, subB, transposeB ? 0 : 1);
     } else {
       // Complete the preceding B load before reusing its scratch, and publish

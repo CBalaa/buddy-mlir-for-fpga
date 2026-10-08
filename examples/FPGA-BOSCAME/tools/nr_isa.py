@@ -43,6 +43,20 @@ VECTOR_MEMORY = frozenset({"vle8.v", "vse8.v", "vle32.v", "vse32.v",
                            "vle64.v", "vse64.v"})
 FENCE_RW_RW = 0x0330000F
 
+# Words emitted by the pre-patch6 fixed-register encoder.  They are kept
+# explicit so an old generated object cannot silently pass a syntactic audit
+# after being copied to the new board image.  In particular, the old B load
+# selected tr4 and the old tile/store forms used non-canonical GPR fields.
+PATCH6_AME_WORDS = frozenset({
+    0x00054077, 0x04055077, 0x04054077, 0x04056077,
+    0x04B50077, 0x08B500F7, 0x00B52077, 0x02B52077,
+    0x28180877,
+})
+LEGACY_AME_WORDS = frozenset({
+    0x04055877, 0x040543F7, 0x0406E6F7,
+    0x08B50277, 0x005E2077, 0x025E2077, 0x28480877,
+})
+
 
 def is_ame(word):
     return word & 0x7F == 0x77
@@ -57,6 +71,8 @@ def validate_ame_word(word):
     """Reject instructions outside NR's verified i8-to-i32 AME subset."""
     if not 0 <= word <= 0xFFFFFFFF or not is_ame(word):
         raise ValueError(f"not a 32-bit AME instruction: {word:#x}")
+    if word in LEGACY_AME_WORDS:
+        raise ValueError(f"legacy pre-patch6 AME encoding: {word:#010x}")
     if is_transposed_b_load(word):
         raise ValueError("NR does not support transposed B loads; pack B as [N,K]")
     funct6 = word >> 26
