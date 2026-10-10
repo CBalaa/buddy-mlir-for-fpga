@@ -30,4 +30,4 @@ check:
 list:
 	$(TRITON_PYTHON) export.py --list
 run: all
-	../../../fpga_run.sh $(IMAGE) --fpga=$(FPGA) --capture-seconds=$(CAPTURE_SECONDS) --completion-marker='[nr] RA returned:'
+	../../fpga_run.sh $(IMAGE) --fpga=$(FPGA) --capture-seconds=$(CAPTURE_SECONDS) --completion-marker='[nr] RA returned:'

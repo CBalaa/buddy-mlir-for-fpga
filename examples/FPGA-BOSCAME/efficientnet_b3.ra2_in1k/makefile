@@ -34,6 +34,6 @@ suite-host:
 	$(PYTHON) -B tools/build_suite.py --group=$(or $(GROUP),all) --host
 	./build/suite-$(or $(GROUP),all)-host/suite
 run: suite
-	../../fpga_run.sh build/suite-$(or $(GROUP),all)/suite.bin --fpga=$(or $(FPGA),5) --capture-seconds=$(or $(CAPTURE_SECONDS),1800) --completion-marker='[nr] RA returned:'
+	../fpga_run.sh build/suite-$(or $(GROUP),all)/suite.bin --fpga=$(or $(FPGA),5) --capture-seconds=$(or $(CAPTURE_SECONDS),1800) --completion-marker='[nr] RA returned:'
 model-help:
 	$(MAKE) -C model help

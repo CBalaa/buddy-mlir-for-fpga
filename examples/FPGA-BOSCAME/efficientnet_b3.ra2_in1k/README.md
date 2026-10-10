@@ -41,7 +41,7 @@ Host：本机 Triton smoke 的 11 个 case（`case-index.json` 的 smoke 列表�
 在仓库根目录，先 `source` 本目录的 `env.sh`。算子 Triton 镜像和计算图是两条产物，输出目录分开。
 
 ```bash
-EFF=examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k
+EFF=examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k
 source "$EFF/env.sh"
 # 只编整模镜像，默认写到 model/build/fp32-full/
 bash "$EFF/model/tools/run_full.sh"
@@ -75,7 +75,7 @@ cd triton && make check GROUP=smoke JOBS=4
 
 ```bash
 python3 tools/record_run.py build/suite-smoke/manifest.json \
-  ../../build/fpga-runs/run-ACTUAL --output validation/smoke
+  ../build/fpga-runs/run-ACTUAL --output validation/smoke
 ```
 
 本目录目前没有这样的归档。

@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0.
 top-logit 位型。
 
 结构与算子形状见 [../MODEL.md](../MODEL.md)。公共 NR runtime / 上板脚本见
-`../../../common/nr` 与 `../../../fpga_run.sh`。
+`../../common/nr` 与 `../../fpga_run.sh`。
 
 整模阶段与 `vit-base-patch16-224` 相同：Buddy 捕获真实计算图，按形状把图节点替换成已有 Triton 调用，再 lowering 成 NR 镜像上板。**FP32** 为默认路径。分类器和 SE linear 另有 W8A8 工具（`quant_reference` / `build_nr_w8a8_*` / `triton_call_replace --w8a8`）。视觉模型没有 tokenizer、KV 和 attention：
 
@@ -33,8 +33,8 @@ make -C model replace W8A8=1 TRITON_BUILD=../triton/build
 
 ```bash
 REPO="$(git rev-parse --show-toplevel)"
-MODEL="$REPO/examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k/model"
-EFF="$REPO/examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k"
+MODEL="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k/model"
+EFF="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
 source "$EFF/env.sh"
 "$MODEL/tools/run_model.sh" "$MODEL/build/fp32-full/prepared" \
   --fpga=5 --capture-seconds=1800 --startup-timeout=900
@@ -63,7 +63,7 @@ verify efficientnet_b3.ra2_in1k: PASS
 ```bash
 set -euo pipefail
 REPO="$(git rev-parse --show-toplevel)"
-EFF="$REPO/examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k"
+EFF="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
 source "$EFF/env.sh"
 
 # 截断 1 个 stage，先确认替换与镜像（快）→ model/build/stage0/

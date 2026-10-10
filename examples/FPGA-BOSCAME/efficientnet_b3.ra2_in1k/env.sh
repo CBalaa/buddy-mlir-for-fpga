@@ -24,8 +24,8 @@
 #
 # ===----------------------------------------------------------------------===//
 
-# Example lives at examples/FPGA-BOSCAME/timm/<model>/, four levels under the repo.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# Example lives at examples/FPGA-BOSCAME/<model>/, three levels under the repo.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 export BUDDY_SOURCE_DIR="$REPO"
 
 # Interpreter must be a filesystem path, not "python -P".

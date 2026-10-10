@@ -15,7 +15,7 @@ not from LM vocabulary width.
 Example shape family (replace paths after a local build):
 
 ```bash
-MODEL=examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k/model
+MODEL=examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k/model
 python3 "$MODEL/optimization/build_dequant_ab.py" \
   --baseline "$MODEL/build/ame-v05/baseline/dequantize_1x1000" \
   --optimized "$MODEL/build/ame-v05/rvv/dequantize_1x1000"

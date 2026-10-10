@@ -169,7 +169,7 @@ def build(args, layout, golden):
     llvm_bin = args.repo_root / "llvm/build-2d26/bin"
     common = args.repo_root / "examples/FPGA-BOSCAME/common"
     nr = common / "nr"
-    effnet = args.repo_root / "examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k"
+    effnet = args.repo_root / "examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
     tools = args.repo_root / "examples/FPGA-BOSCAME/tools"
     model_tools = Path(__file__).resolve().parent
     params_bytes = aligned(layout["bytes"])

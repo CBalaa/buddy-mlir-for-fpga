@@ -19,7 +19,7 @@ kernels.py 中的 @triton.jit
 ## 准备
 
 ```bash
-source ../../../common/triton/triton-env.sh
+source ../../common/triton/triton-env.sh
 "$TRITON_PYTHON" export.py --list
 ```
 

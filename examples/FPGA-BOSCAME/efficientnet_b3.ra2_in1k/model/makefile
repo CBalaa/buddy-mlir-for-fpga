@@ -103,7 +103,7 @@ host-run: host-bridge
 
 image:
 	$(PYTHON) -B tools/build_model_image.py \
-	  --repo-root $(abspath ../../../../..) \
+	  --repo-root $(abspath ../../../..) \
 	  --layout $(or $(LOWER_DIR),build/nr-forward)/weight-layout.json \
 	  --graph-ir $(or $(LOWER_DIR),build/nr-forward)/forward.ll \
 	  --archive $(or $(LIB_DIR),build/model-lib)/libeffnet_triton.a \

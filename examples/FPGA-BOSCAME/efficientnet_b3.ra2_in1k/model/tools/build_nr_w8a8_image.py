@@ -647,7 +647,7 @@ def build(args, output):
     use, so the graph object gets the AME encoding and the fence insertion that
     the FPGA ELF audit requires."""
     llvm = args.repo_root / "llvm/build-2d26/bin"
-    qwen = args.repo_root / "examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k"
+    qwen = args.repo_root / "examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
     common = args.repo_root / "examples/FPGA-BOSCAME/common"
     nr = common / "nr"
     tools = args.repo_root / "examples/FPGA-BOSCAME/tools"

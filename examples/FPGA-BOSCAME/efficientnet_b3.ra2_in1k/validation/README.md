@@ -7,7 +7,7 @@ From this example directory, after a suite run:
 
 ```bash
 python3 tools/record_run.py build/suite-smoke/manifest.json \
-  ../../build/fpga-runs/run-ACTUAL --output validation/smoke
+  ../build/fpga-runs/run-ACTUAL --output validation/smoke
 ```
 
 Requirements: image SHA256 match, DDR readback OK, one PASS line per case,

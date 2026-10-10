@@ -13,8 +13,8 @@
 #
 # ===----------------------------------------------------------------------===//
 set -euo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)"
-EFF="$REPO/examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+EFF="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
 MODEL="$EFF/model"
 CONFIG="${CONFIG:-stage0}"
 OUT="${OUT:-$MODEL/build/$CONFIG}"

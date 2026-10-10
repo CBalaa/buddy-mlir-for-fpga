@@ -12,9 +12,9 @@
 # ===----------------------------------------------------------------------===//
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)"
-MODEL="$REPO/examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k/model"
-EFF="$REPO/examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
+MODEL="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k/model"
+EFF="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
 TRITON_BUILD="${TRITON_BUILD:-$EFF/triton/build}"
 CC="${HOST_CC:-$REPO/llvm/build-2d26/bin/clang}"
 OUT="${OUT:-$MODEL/build/host-bridge}"

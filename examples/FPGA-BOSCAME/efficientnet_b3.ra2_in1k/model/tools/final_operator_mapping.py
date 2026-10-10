@@ -375,7 +375,7 @@ def main():
     for name,count in Counter(x['classification'] for x in kernels.values()).items():lines.append(f'| {name} | {count} |')
     lines+=['','Scalar arithmetic with RVV memory movement is explicitly distinct from RVV arithmetic. The archive contains kernel/ABI objects only; runtime, launch/test data and graph generic fallback are excluded.','',
         'Actual per-call descriptor offset/sizes/strides are resolved from final LLVM. Runtime fields retain entry-argument provenance, and unknown fields remain explicit. Logical tensor shapes are never substituted for unknown physical descriptors. The top-level JSON also states the exact W8A8 contract.','',
-        'Reproduce from the repository root with the Python 3.11 environment matching the Buddy bindings:', '```bash',f'PYTHONPATH=build-python/python_packages python3 -B examples/FPGA-BOSCAME/timm/efficientnet_b3.ra2_in1k/model/tools/final_operator_mapping.py --build {args.build} --layout {args.layout} --output {args.output}','```','']
+        'Reproduce from the repository root with the Python 3.11 environment matching the Buddy bindings:', '```bash',f'PYTHONPATH=build-python/python_packages python3 -B examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k/model/tools/final_operator_mapping.py --build {args.build} --layout {args.layout} --output {args.output}','```','']
     (args.output/'coverage.md').write_text('\n'.join(lines))
     print(json.dumps({'status':mapping['status'],'calls':{k:g['external_call_count'] for k,g in graphs.items()},'unclassified':unclassified,'large_uncovered':large,'kernels':len(kernels)},indent=2))
     if mapping['status']!='PASS':return 1

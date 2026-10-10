@@ -7,7 +7,7 @@
 ## Host check, Buddy lowering of kernel.mlir (or Triton-produced linalg),
 ## encode, link launch.c + NR runtime. Paths are taken from this file's
 ## location so both example-root cases and model-cases/ resolve the same
-## FPGA-BOSCAME tree after the example lives under timm/.
+## FPGA-BOSCAME tree. The example sits directly under FPGA-BOSCAME.
 ##
 ##===----------------------------------------------------------------------===//
 
@@ -15,7 +15,7 @@
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 EXAMPLE_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-FPGA_ROOT := $(abspath $(EXAMPLE_ROOT)/../..)
+FPGA_ROOT := $(abspath $(EXAMPLE_ROOT)/..)
 # Later `override` wins over case makefiles that still set relative paths.
 override ROOT := $(EXAMPLE_ROOT)
 override COMMON := $(FPGA_ROOT)/common
