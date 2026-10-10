@@ -1,0 +1,1 @@
+../../../qwen3-0.6b/tools/vectorize_nr.py

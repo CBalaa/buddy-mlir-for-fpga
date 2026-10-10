@@ -1,0 +1,1 @@
+../../../qwen3-0.6b/tools/host_main.c

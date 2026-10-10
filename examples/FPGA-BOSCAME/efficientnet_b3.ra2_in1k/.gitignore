@@ -1,8 +1,0 @@
-# Local build trees, checkpoints and Python caches. None of these belong in
-# a source pull request. SPDX-License-Identifier: Apache-2.0
-build/
-triton/build/
-model/build/
-model/assets/
-model/validation/board/
-**/__pycache__/
