@@ -46,7 +46,11 @@ def configure_environment():
 
 
 def make_adapter(case):
-    """Descriptor/grid ABI glue only; all numerical work is in the JIT kernel."""
+    """Descriptor/grid ABI glue only; all numerical work is in the JIT kernel.
+
+    Board builds print ``[tile] enter/leave`` on the first program and every
+    64th program. Host checks define ``HOST_TEST`` and skip those writes.
+    """
     arguments = case["arguments"]
     signature = ", ".join(f"MemRef{arg['rank']} *a{i}" for i, arg in enumerate(arguments))
     raw_signature = ", ".join(["int64_t, MemRef0 *"] * len(arguments) + ["int32_t"] * 6)
@@ -60,10 +64,32 @@ def make_adapter(case):
                   f"  MemRef0 m{i} = {{p{i}, p{i}, 0}};"]
     gx, gy, gz = case["grid"]
     params = ", ".join(f"0, &m{i}" for i in range(len(arguments)))
-    lines += [f"  for (int32_t x=0; x<{gx}; ++x)",
+    name = case["name"]
+    lines += ["#ifndef HOST_TEST",
+              "  int32_t tile = 0;",
+              "#endif",
+              f"  for (int32_t x=0; x<{gx}; ++x)",
               f"    for (int32_t y=0; y<{gy}; ++y)",
-              f"      for (int32_t z=0; z<{gz}; ++z)",
+              f"      for (int32_t z=0; z<{gz}; ++z) {{",
+              "#ifndef HOST_TEST",
+              "        if (tile == 0) {",
+              f'          nr_puts("[tile] enter {name} x="); nr_hex32((uint32_t)x);',
+              '          nr_puts(" y="); nr_hex32((uint32_t)y);',
+              '          nr_puts(" z="); nr_hex32((uint32_t)z);',
+              '          nr_puts("\\r\\n");',
+              "        }",
+              "#endif",
               f"        {case['symbol']}({params}, {gx}, {gy}, {gz}, x, y, z);",
+              "#ifndef HOST_TEST",
+              "        if ((tile % 64) == 0) {",
+              f'          nr_puts("[tile] leave {name} x="); nr_hex32((uint32_t)x);',
+              '          nr_puts(" y="); nr_hex32((uint32_t)y);',
+              '          nr_puts(" z="); nr_hex32((uint32_t)z);',
+              '          nr_puts("\\r\\n");',
+              "        }",
+              "        ++tile;",
+              "#endif",
+              "      }",
               "}", ""]
     return "\n".join(lines)
 
