@@ -4,8 +4,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/*
+ * Public ABI of the NR platform runtime.  The implementation is split by
+ * responsibility: nr_runtime.c owns the NH/RA platform side (boot, console
+ * forwarding, mailbox, traps, result report) and nr_memory.c owns the RA heap,
+ * the scalar memory helpers and memrefCopy.  Both are linked into every NR
+ * image; the module contract is in common/nr/README.md.  Declarations below
+ * are grouped by the module that implements them.
+ */
+
 /* The application implements this entry point; it runs on RA, not NH. */
 int launch(void);
+/* ---- platform log/forwarding entries (nr_runtime.c, RA side) ---- */
 void nr_puts(const char *text);
 void nr_write(const void *bytes, size_t length);
 /* UART input, read on RA. The NH core owns the UART, so this consumes the ring NH
@@ -40,11 +50,13 @@ void nr_diag_memref(unsigned operand, uintptr_t descriptor, uintptr_t aligned,
                     int64_t offset, int64_t rows, int64_t cols,
                     int64_t stride0, int64_t stride1);
 #endif
-/* RA-only scoped scratch allocator. free() is a no-op. A reset invalidates
+/* RA-only scoped scratch allocator, implemented by nr_memory.c. free() is a
+ * no-op. A reset invalidates
  * EVERY allocation after mark: first copy graph results/KV into persistent
  * caller-owned buffers and complete asynchronous kernel accesses. */
 uintptr_t nr_heap_mark(void);
 void nr_heap_reset(uintptr_t mark);
+/* ---- operator support: ame_sync.c and nr_copy.S ---- */
 void ame_fence(void);
 /* Non-overlapping memcpy semantics. Aligned words use verified NR RVV copy;
  * unaligned addresses and the last 0..3 bytes use scalar loads/stores. */
@@ -55,6 +67,7 @@ void nr_copy_bytes(void *destination, const void *source, size_t bytes);
 extern unsigned char __workspace_start[], __workspace_end[];
 #define NR_WORKSPACE __attribute__((section(".workspace"), aligned(64)))
 
+/* ---- freestanding math helpers (nr_math.c) ---- */
 float expf(float);
 float logf(float);
 float powf(float, float);
@@ -64,6 +77,8 @@ float sqrtf(float);
 float sinf(float);
 float cosf(float);
 
+/* ---- runtime memory support (nr_memory.c). memrefCopy is defined there too;
+ * the lowered kernels declare its CRunner ABI themselves. ---- */
 void *memcpy(void *destination, const void *source, size_t count);
 void *memmove(void *destination, const void *source, size_t count);
 void *memset(void *destination, int value, size_t count);

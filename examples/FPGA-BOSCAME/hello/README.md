@@ -44,6 +44,15 @@ UART 使用 [`../common/uart`](../common/uart)；通用 CRT 和 C 运行时使�
 5.5296 MHz／115200。[独立链接脚本](platform/hello_nr.ld)
 提供地址布局、BSS 边界和 1 MiB 栈。
 
+bare 运行时按职责拆分：`bare_runtime.c` 提供 `_init`、weak 钩子和终止 trap
+入口，`bare_runtime_memory.c`、`bare_runtime_memref.c`、`bare_runtime_trace.c`、
+`bare_runtime_ame.c`、`bare_runtime_w8a8.c` 分别提供堆与内存、memrefCopy、
+trace、AME 和 W8A8 helper ABI，共享的编译宏默认值在
+`bare_runtime_internal.h`。hello 链接这些模块，但用
+`-DBARE_RUNTIME_ENABLE_AME=0` 关闭 AME，并由 `--gc-sections` 丢弃未使用的
+函数和数据；只调用启动路径时它们不进入镜像。模块表见
+[`../common/README.md`](../common/README.md)。
+
 时钟和波特率也可以在构建时覆盖，例如：
 
 ```bash

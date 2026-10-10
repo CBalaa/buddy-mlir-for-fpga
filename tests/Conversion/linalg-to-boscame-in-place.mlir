@@ -18,11 +18,13 @@ func.func @buddy_in_place(
   return %value : f32
 }
 
-// CHECK-LABEL: func.func @buddy_in_place
+// `--lower-bosc-ame` now owns the whole LLVM lowering, so the function has
+// already become an `llvm.func` and the residual scalar load is an `llvm.load`.
+// CHECK-LABEL: llvm.func @buddy_in_place
 // CHECK-NOT: linalg.matmul
 // The destination is reused in place: the accumulator is seeded from the
 // original allocation and the result stays visible to the consumer.
 // CHECK: bosc_ame.intr.fpga.mlce32.m
 // CHECK: bosc_ame.intr.fpga.mqma.b.mm
 // CHECK: bosc_ame.intr.fpga.msce32.m
-// CHECK: memref.load
+// CHECK: llvm.load

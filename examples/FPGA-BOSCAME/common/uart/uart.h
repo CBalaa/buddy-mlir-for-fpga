@@ -9,6 +9,13 @@ void write_serial(char value);
 void print_uart(const char *text);
 void print_uart_int(uint32_t value);
 void print_uart_addr(uint64_t value);
+/*
+ * Lowercase fixed-width hex and unsigned decimal text, used by the NH/E6
+ * report paths.  print_uart_int keeps the upstream uppercase convention.
+ */
+void print_uart_hex32(uint32_t value);
+void print_uart_hex64(uint64_t value);
+void print_uart_dec32(uint32_t value);
 
 #ifndef UART_DEFAULT_FREQ_HZ
 #ifdef UART_FREQ_HZ
@@ -25,7 +32,14 @@ void print_uart_addr(uint64_t value);
 #endif
 #endif
 
+/*
+ * The board value is fixed, but a host test may predefine UART_BASE as an
+ * in-memory fake register file, the same way the DMA helper lets tests
+ * override BOSC_AME_DMAx_BASE.
+ */
+#ifndef UART_BASE
 #define UART_BASE 0x310b0000UL
+#endif
 #define UART_REG(offset) (*(volatile uint32_t *)(UART_BASE + (offset)))
 
 #define UART_RBR_THR_DLL UART_REG(0x00)
@@ -84,11 +98,19 @@ static __attribute__((unused)) void uart_init(void) {
   uart_configure(uart_divisor_for(UART_DEFAULT_FREQ_HZ, UART_DEFAULT_BAUD));
 }
 
+/*
+ * Character sink hook.  It defaults to the real MMIO path; a host test can
+ * predefine UART_PUTC(c) before including uart.h/uart.c to capture the exact
+ * byte stream that the print_uart* helpers produce.
+ */
+#ifndef UART_PUTC
 static void uart_putc(char c) {
   while ((UART_LSR & 0x20) == 0)
     ;
   UART_THR = c;
 }
+#define UART_PUTC(c) uart_putc(c)
+#endif
 
 static __attribute__((unused)) int uart_rx_ready(void) { return (UART_LSR & 0x01) != 0; }
 static __attribute__((unused)) char uart_getc(void) {
@@ -98,7 +120,7 @@ static __attribute__((unused)) char uart_getc(void) {
 
 static __attribute__((unused)) void uart_puts(char *s) {
   while (*s != '\0') {
-    uart_putc(*(s++));
+    UART_PUTC(*(s++));
   }
 }
 

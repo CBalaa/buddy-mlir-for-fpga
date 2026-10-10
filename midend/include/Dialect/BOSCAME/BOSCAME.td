@@ -9,6 +9,7 @@
 #ifndef BOSCAME_DIALECT
 #define BOSCAME_DIALECT
 
+include "mlir/IR/AttrTypeBase.td"
 include "mlir/IR/OpBase.td"
 include "mlir/IR/BuiltinTypes.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
@@ -28,6 +29,10 @@ def BOSCAME_Dialect : Dialect {
     BOSCAME provides matrix multiply-accumulate instructions with tile-based computation,
     supporting various data types and widening modes for AI/ML workloads.
   }];
+  // `#bosc_ame.spm<bank>` and `!bosc_ame.dma_token<channel>` use the generic
+  // attribute/type printers driven by their own `assemblyFormat`.
+  let useDefaultAttributePrinterParser = 1;
+  let useDefaultTypePrinterParser = 1;
 }
 
 // High-level BOSC AME tiles are ordinary MLIR vectors.  For example,
@@ -42,6 +47,166 @@ def BOSCAME_MatrixType : Type<
 
 class BOSCAME_Op<string mnemonic, list<Trait> traits = []> :
   Op<BOSCAME_Dialect, mnemonic, traits> {}
+
+//===----------------------------------------------------------------------===//
+// SPM storage space and DMA request handle
+//===----------------------------------------------------------------------===//
+
+// Memory space attribute attached to a `memref` type.  It answers "where do
+// these bytes live", which is orthogonal to "which DMA engine moves them".
+// The bank is static type information, never a runtime SSA value: a value whose
+// storage space could change at run time cannot be verified statically.
+def BOSCAME_SPMAttr : AttrDef<BOSCAME_Dialect, "SPM"> {
+  let mnemonic = "spm";
+  let summary = "Storage space of one on-chip SPM bank";
+  let description = [{
+    Marks the storage space of a `memref` as one of the two SPM banks of the
+    patch7 platform:
+
+    ```mlir
+    memref<4096xi8, #bosc_ame.spm<0>>   // 4096 bytes in SPM0
+    memref<64x64xi8, #bosc_ame.spm<1>>  // the same storage, a 2-D logical view
+    ```
+
+    `bank` must be 0 or 1.  The attribute says nothing about whether the SSA
+    addresses inside that memref are physical or virtual; that is a runtime
+    address-mode property (see the SPM/DMA design notes).  It also says nothing
+    about element type or layout, so it never replaces the memref shape.
+  }];
+  let parameters = (ins "int64_t":$bank);
+  let assemblyFormat = [{
+    `<` $bank `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
+// Handle of one in-flight DMA request.  The channel is part of the type so that
+// `bosc_ame.dma.wait` can recover the register block (and therefore the
+// completion-barrier address) from its operand alone.
+def BOSCAME_DMATokenType : TypeDef<BOSCAME_Dialect, "DMAToken"> {
+  let mnemonic = "dma_token";
+  let summary = "Handle of an in-flight DMA request on one channel";
+  let description = [{
+    `!bosc_ame.dma_token<channel>` is the result type of
+    `bosc_ame.dma.start`.  `channel` must be 0 or 1 and matches the `channel`
+    attribute of the request that produced it.
+
+    A token is a single-use request handle, not a value that can be stored,
+    duplicated or transported: it must be consumed by exactly one
+    `bosc_ame.dma.wait` in the block that produced it.  The compiler-internal
+    shape of the type is deliberately opaque so that no other operation can
+    manufacture or inspect a live request.
+  }];
+  let parameters = (ins "int64_t":$channel);
+  let assemblyFormat = [{
+    `<` $channel `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// SPM / DMA operations
+//===----------------------------------------------------------------------===//
+
+def SpmViewOp : BOSCAME_Op<"spm.view", [Pure]> {
+  let summary = "View a byte range of an SPM bank as a memref";
+  let description = [{
+    Describes an SPM byte range as a standard `memref` so that ordinary
+    memory operations (including the existing matrix load/store operations) can
+    access it:
+
+    ```mlir
+    %b = bosc_ame.spm.view {bank = 0 : i32, offset = 4096 : i64}
+        : memref<64x64xi8, #bosc_ame.spm<0>>
+    ```
+
+    `offset` is the byte offset of the range inside the bank and is applied
+    exactly once.  The result type must carry `#bosc_ame.spm<bank>` with the
+    same bank, and its total element size (`product(shape) * size(element)`)
+    must keep `offset + size` inside the 128 KiB bank.
+
+    Element types are restricted to `i8/i16/i32/i64/f16/bf16/f32/f64` so the
+    byte size of the range is unambiguous.  The operation itself never
+    addresses or moves data: `-lower-bosc-ame` compiles the fixed bank base
+    address (`0x20000000` for bank 0, `0x20400000` for bank 1) plus `offset`
+    into the pointer, so no workspace root argument is needed and the kernel
+    ABI stays free of SPM parameters.
+  }];
+  let arguments = (ins I32Attr:$bank, I64Attr:$offset);
+  let results = (outs AnyMemRef:$view);
+  let assemblyFormat = "attr-dict `:` type($view)";
+  let hasVerifier = 1;
+}
+
+def DmaStartOp : BOSCAME_Op<"dma.start",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Start an asynchronous contiguous DMA transfer";
+  let description = [{
+    Starts one contiguous transfer on a DMA channel and returns a request
+    handle:
+
+    ```mlir
+    %t = bosc_ame.dma.start %src, %dst, %bytes {channel = 0 : i32}
+        : (memref<4096xi8>, memref<4096xi8, #bosc_ame.spm<0>>, index)
+          -> !bosc_ame.dma_token<0>
+    ```
+
+    `bytes` is a byte count, not an element count.  Both endpoints must be
+    1-D `i8` memrefs with unit stride and a static length; at least one endpoint
+    must be in an SPM bank.  The transfer starts at the effective address of the
+    memref (descriptor offset included) and is legal when:
+
+      * `bytes` is a positive multiple of 64,
+      * both effective addresses are 64 B aligned,
+      * both endpoints are at least `bytes` long,
+      * the SPM endpoint lies inside a single bank,
+      * the two ranges do not overlap.
+
+    The operation does not wait: the request completes when the matching
+    `bosc_ame.dma.wait` executes the completion barrier.  It therefore has
+    memory effects (a device write plus a conservative ordering barrier) and is
+    never `Pure`, so it cannot be moved, duplicated or dead-code eliminated.
+  }];
+  let arguments = (ins AnyMemRef:$src, AnyMemRef:$dst, Index:$bytes,
+                       I32Attr:$channel);
+  let results = (outs BOSCAME_DMATokenType:$token);
+  let assemblyFormat =
+      "$src `,` $dst `,` $bytes attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def DmaWaitOp : BOSCAME_Op<"dma.wait",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Wait for a DMA request and check its hardware status";
+  let description = [{
+    Completes the request started by the `bosc_ame.dma.start` that produced
+    `token`:
+
+    ```mlir
+    bosc_ame.dma.wait %t : !bosc_ame.dma_token<0>
+    ```
+
+    The operation executes the completion barrier (SRC write-back, fence, one
+    volatile `STATUS` read, fence) and then *checks* the status.  A normal
+    return means "the transfer completed and succeeded".  On failure the
+    runtime takes its error path (the shipped runtime traps); the operation
+    itself has no result, so a caller cannot accidentally ignore a failed
+    transfer and consume the destination as if it were data.
+
+    The channel and the completion barrier are recovered from the token type,
+    which is why a token may not be stored, duplicated or transported.  The
+    channel is busy exactly while it has an outstanding request; a new
+    `bosc_ame.dma.start` on the same channel is only legal after the previous
+    `bosc_ame.dma.wait` has completed it.
+
+    `STATUS` is live data, not a sticky done flag: bit 0 is `busy` and bit 1 is
+    `bus_error`.  The runtime rejects `bus_error` and an observable `busy`
+    after the barrier, an invalid channel, the `start` "not launched" sentinel
+    (token 0) and a token that does not match the channel's current `SRC`.
+  }];
+  let arguments = (ins BOSCAME_DMATokenType:$token);
+  let assemblyFormat = "$token attr-dict `:` qualified(type($token))";
+}
 
 //===----------------------------------------------------------------------===//
 // Qwen3 W8A8 semantic operations

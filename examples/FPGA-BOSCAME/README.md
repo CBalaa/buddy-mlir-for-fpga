@@ -8,8 +8,8 @@ FPGA-BOSCAME/
 ├── common/
 │   ├── toolchain.mk       # LLVM 工具选择，可通过 make 参数覆盖
 │   ├── uart/              # NR UART 驱动
-│   ├── runtime/           # hello 使用的 NH 单核运行时
-│   ├── nr/                # 算子使用的 NH→RA、AME/RVV 运行时
+│   ├── runtime/           # hello 使用的 NH 单核运行时（启动、内存、trace、AME、DMA）
+│   ├── nr/                # 算子使用的 NH→RA 平台运行时 + RA 内存支持
 │   └── triton/            # Triton 编译器安装、版本与兼容补丁
 ├── fpga_run.sh            # 公共上板入口
 ├── tools/                 # SSH 上传、远端执行、离线测试
@@ -182,14 +182,18 @@ Bash 入口与 `tools/` 下两个 Python 实现需一起保留；依赖 Bash、O
 ## 公共源码与验证
 
 UART 和启动／运行时的来源及适配范围见
-[`common/README.md`](common/README.md)。hello 的地址布局和输出说明见
-[`hello/README.md`](hello/README.md)。
+[`common/README.md`](common/README.md)。该文件同时给出按职责拆分的模块表和
+两个后端的链接方式；NR 平台侧见 [`common/nr/README.md`](common/nr/README.md)。
+hello 的地址布局和输出说明见 [`hello/README.md`](hello/README.md)。
 
 从仓库根目录运行离线脚本测试（模拟串口和加载进程，不操作 FPGA）：
 
 ```bash
 python3 -B -m unittest discover \
   -s examples/FPGA-BOSCAME/tools -p 'test_fpga*.py' -v
+
+# 运行时模块测试（含 NR 内存支持与跨模块调用，使用 host cc）
+python3 -m unittest discover -s examples/FPGA-BOSCAME/tools -p 'test_nr_*.py' -v
 ```
 
 ## Qwen3-0.6B 算子

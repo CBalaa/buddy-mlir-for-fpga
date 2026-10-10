@@ -22,6 +22,12 @@ config.suffixes = [".mlir", ".c", ".cpp", ".ll"]
 # convention LLVM's own suites use.
 if lit.util.which("bash"):
     config.available_features.add("shell")
+
+# Tests that compile and run a host-side runtime check need a C compiler; they
+# declare `REQUIRES: host-c-compiler` so they are skipped instead of failing in
+# environments that only run the MLIR tools.
+if lit.util.which("cc"):
+    config.available_features.add("host-c-compiler")
 if config.buddy_mlir_enable_python_packages:
     config.suffixes.append(".py")
 

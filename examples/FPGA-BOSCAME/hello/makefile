@@ -11,6 +11,11 @@ include $(COMMON)/toolchain.mk
 UART_DIR        := $(COMMON)/uart
 RUNTIME_DIR     := $(COMMON)/runtime
 COMMON_RUNTIME  := $(RUNTIME_DIR)/bare_runtime.c
+# The bare runtime is split by responsibility; the startup unit in
+# COMMON_RUNTIME keeps the entry point and the weak hooks, the modules below
+# provide the heap/memory, memrefCopy, trace, AME and W8A8 helper blocks.
+RUNTIME_MODULES := bare_runtime_memory.c bare_runtime_memref.c \
+                   bare_runtime_trace.c bare_runtime_ame.c bare_runtime_w8a8.c
 LD_SCRIPT       := platform/hello_nr.ld
 # This generic single-hart CRT clears BSS and calls the runtime's _init.
 # The NR dual-core CRT dispatches to nanhu_main / _ra_init; hello needs neither.
@@ -26,7 +31,9 @@ UART_BAUD       ?= 115200u
 SRC             := hello.c
 BUILD_DIR       := build
 BIN             := $(BUILD_DIR)/hello.bin
-OBJECTS         := $(addprefix $(BUILD_DIR)/,crt_uart.o hello.o bare_runtime.o uart.o)
+RUNTIME_OBJECTS := $(addprefix $(BUILD_DIR)/,$(notdir $(RUNTIME_MODULES:.c=.o)))
+OBJECTS         := $(addprefix $(BUILD_DIR)/,crt_uart.o hello.o bare_runtime.o uart.o) \
+                   $(RUNTIME_OBJECTS)
 
 RISCV_CFLAGS    := -march=rv64gc -mabi=lp64d -mcmodel=medany -mno-relax -nostdlib \
                    -fno-builtin -ffreestanding -fno-pie -O2 \
@@ -40,7 +47,10 @@ all: $(BIN)
 $(BUILD_DIR)/hello.o: $(SRC) $(MAKEFILE_LIST) | $(BUILD_DIR)
 	$(RISCV_CC) $(RISCV_CFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/bare_runtime.o: $(COMMON_RUNTIME) $(MAKEFILE_LIST) | $(BUILD_DIR)
+$(BUILD_DIR)/bare_runtime.o: $(COMMON_RUNTIME) $(RUNTIME_DIR)/bare_runtime.h $(RUNTIME_DIR)/bare_runtime_internal.h $(MAKEFILE_LIST) | $(BUILD_DIR)
+	$(RISCV_CC) $(RISCV_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/bare_runtime_%.o: $(RUNTIME_DIR)/bare_runtime_%.c $(RUNTIME_DIR)/bare_runtime.h $(RUNTIME_DIR)/bare_runtime_internal.h $(UART_DIR)/uart.h $(MAKEFILE_LIST) | $(BUILD_DIR)
 	$(RISCV_CC) $(RISCV_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/crt_uart.o: $(CRT_S) $(MAKEFILE_LIST) | $(BUILD_DIR)

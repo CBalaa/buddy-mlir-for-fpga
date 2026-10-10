@@ -400,7 +400,8 @@ def build(args, layout):
     if result.returncode:
         return {"status": "FAILED compiling adapters", "steps": steps}
 
-    runtime_sources = ["crt.S", "nr_runtime.c", "nr_math.c", "ame_sync.c", "nr_copy.S"]
+    runtime_sources = ["crt.S", "nr_runtime.c", "nr_memory.c", "nr_math.c",
+                       "ame_sync.c", "nr_copy.S"]
     runtime_objects = []
     for name in runtime_sources:
         obj = output / (Path(name).stem + ".o")

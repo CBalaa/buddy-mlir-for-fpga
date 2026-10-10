@@ -34,7 +34,9 @@ func.func @row_major_tails(%a: memref<17x65xi8>, %b: memref<65x19xi8>,
 // NR: bosc_ame.msce32.m {{.*}} : vector<4x4xi32>, memref<?x?xi32
 // NR: llvm.fence seq_cst
 // NR: return
-// EXPORT-LABEL: func.func @row_major_tails
+// `--lower-bosc-ame` now completes the LLVM lowering, so the exported function
+// is an `llvm.func` carrying the FPGA target feature.
+// EXPORT-LABEL: llvm.func @row_major_tails
 // EXPORT-SAME: +xboscame-fpga
 // EXPORT: bosc_ame.intr.fpga.mlce32.m
 // EXPORT: bosc_ame.intr.fpga.mlbe8.m

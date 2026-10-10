@@ -54,7 +54,7 @@ CFLAGS := -march=rv64gc_zicbom -mabi=lp64d -mcmodel=medany -O2 -nostdlib \
  -ffreestanding -fno-builtin -fno-pie -fno-vectorize -fno-slp-vectorize \
  -ffp-contract=off -ffunction-sections -fdata-sections -I$(ROOT) -I$(NR) -I$(COMMON)/uart
 HOST_CFLAGS := -O2 -ffp-contract=off -DHOST_TEST -I$(ROOT)
-RUNTIME_OBJS := $(addprefix $(BUILD)/,crt.o nr_runtime.o nr_math.o ame_sync.o nr_copy.o support.o)
+RUNTIME_OBJS := $(addprefix $(BUILD)/,crt.o nr_runtime.o nr_memory.o nr_math.o ame_sync.o nr_copy.o support.o)
 CONFIG_HELPER := $(ROOT)/tools/build_suite.py
 CONFIG_STAMP := $(BUILD)/config.json
 # Export configuration as data, without interpolating tool commands into Python
@@ -83,6 +83,11 @@ $(BUILD)/kernel.ame.mlir: kernel.mlir metadata.json | $(BUILD)
 $(BUILD)/kernel.vector.mlir: $(BUILD)/kernel.ame.mlir metadata.json $(ROOT)/tools/vectorize_nr.py
 	$(PYTHON) $(ROOT)/tools/vectorize_nr.py --input $< --metadata metadata.json --output $@
 $(BUILD)/kernel.llvm.mlir: $(BUILD)/kernel.vector.mlir
+	# `--lower-bosc-ame` is the single entry point: it runs the SPM/DMA
+	# contract checks, compiles `bosc_ame.spm.view` to the fixed bank base
+	# address and lowers AME / SPM / DMA together with the standard dialects
+	# to LLVM.  The generic LOWER stages stay as a safety net for any
+	# non-BOSCAME construct left by the vectorizer.
 	$(BUDDY_OPT) $< --lower-bosc-ame $(LOWER) -o $@
 $(BUILD)/kernel.raw.ll: $(BUILD)/kernel.llvm.mlir
 	$(BUDDY_TRANSLATE) --buddy-to-llvmir $< -o $@
@@ -99,7 +104,7 @@ $(BUILD)/launch.o: launch.c $(ROOT)/support.h $(NR)/nr_runtime.h | $(BUILD)
 	$(RISCV_CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/support.o: $(ROOT)/support.c $(ROOT)/support.h $(NR)/nr_runtime.h | $(BUILD)
 	$(RISCV_CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/%.o: $(NR)/%.c $(NR)/nr_runtime.h | $(BUILD)
+$(BUILD)/%.o: $(NR)/%.c $(NR)/nr_runtime.h $(NR)/nr_runtime_internal.h | $(BUILD)
 	$(RISCV_CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/nr_copy.o: $(NR)/nr_copy.S | $(BUILD)
 	$(RISCV_CC) $(CFLAGS) -march=rv64gcv_zicbom -c $< -o $@

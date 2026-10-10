@@ -9,8 +9,10 @@
 // a call boundary would need a calling convention that this lowering does not
 // define.
 //
-// CHECK-NOT: func.func @{{.*}}vector<4x4xi
-// CHECK: func.func @k128_single_chain
+// `--lower-bosc-ame` now lowers the function to LLVM in the same pass, so the
+// matrix values must still stay function-local at the `llvm.func` boundary.
+// CHECK-NOT: llvm.func @{{.*}}vector<4x4xi
+// CHECK: llvm.func @k128_single_chain
 module {
 
   // 4x128 * 128x4: the 16x64 hardware tile needs two K iterations.

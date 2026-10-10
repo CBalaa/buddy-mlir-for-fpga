@@ -6,7 +6,11 @@ NR_CFLAGS := --target=riscv64-unknown-elf -march=rv64gc_zicbom -mabi=lp64d \
   -mcmodel=medany -ffreestanding -fno-builtin -fno-pie -fno-stack-protector \
   -fno-vectorize -fno-slp-vectorize -ffp-contract=off \
   -ffunction-sections -fdata-sections -O2 -I$(NR_DIR) -I$(NR_DIR)/../uart
-NR_OBJECTS := $(addprefix $(NR_BUILD_DIR)/,crt.o nr_runtime.o nr_math.o ame_sync.o nr_copy.o)
+# nr_runtime.o is the platform runtime (NH/RA scheduling, console, traps) and
+# nr_memory.o its RA memory support; nr_math.c/ame_sync.c/nr_copy.S are the
+# already independent operator-support modules.  Every NR image links this one
+# set, so no image gets two startup, memory or logging implementations.
+NR_OBJECTS := $(addprefix $(NR_BUILD_DIR)/,crt.o nr_runtime.o nr_memory.o nr_math.o ame_sync.o nr_copy.o)
 
 $(NR_BUILD_DIR):
 	mkdir -p $@
@@ -17,7 +21,7 @@ $(NR_BUILD_DIR)/crt.o: $(NR_DIR)/crt.S | $(NR_BUILD_DIR)
 $(NR_BUILD_DIR)/nr_copy.o: $(NR_DIR)/nr_copy.S | $(NR_BUILD_DIR)
 	$(RISCV_CC) $(NR_CFLAGS) -march=rv64gcv -c $< -o $@
 
-$(NR_BUILD_DIR)/%.o: $(NR_DIR)/%.c $(NR_DIR)/nr_runtime.h $(NR_DIR)/../uart/uart.h | $(NR_BUILD_DIR)
+$(NR_BUILD_DIR)/%.o: $(NR_DIR)/%.c $(NR_DIR)/nr_runtime.h $(NR_DIR)/nr_runtime_internal.h $(NR_DIR)/../uart/uart.h | $(NR_BUILD_DIR)
 	$(RISCV_CC) $(NR_CFLAGS) -c $< -o $@
 
 $(NR_BUILD_DIR)/nr_runtime.o: $(NR_DIR)/nr_hang_watch.inc $(NR_DIR)/nr_console.inc

@@ -1211,6 +1211,7 @@ def build(args, output):
                                 ("adapters", args.adapters, []),
                                 ("crt", nr / "crt.S", []),
                                 ("nr_runtime", nr / "nr_runtime.c", console_flags),
+                                ("nr_memory", nr / "nr_memory.c", []),
                                 ("nr_math", nr / "nr_math.c", []),
                                 ("ame_sync", nr / "ame_sync.c", []),
                                 ("nr_copy", nr / "nr_copy.S",
@@ -1261,7 +1262,9 @@ def build(args, output):
         "linker": linker,
         "input_sha256": {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
                          for p in [args.graph_ir, args.adapters, args.archive,
-                                   Path(__file__), nr / "nr_runtime.c", nr / "nr.ld",
+                                   Path(__file__), nr / "nr_runtime.c",
+                                   nr / "nr_memory.c", nr / "nr.ld",
+                                   nr / "nr_runtime_internal.h",
                                    nr / "nr_hang_watch.inc",
                                    nr / "nr_console.inc",
                                    nr / "ame_sync.c", nr / "nr_runtime.h",

@@ -1,6 +1,15 @@
 #ifndef EXAMPLES_TOOLS_BARE_RUNTIME_H
 #define EXAMPLES_TOOLS_BARE_RUNTIME_H
 
+/*
+ * Public ABI of the bare single-hart runtime.  The implementation is split by
+ * responsibility across bare_runtime.c (C entry, weak hooks, trap handler),
+ * bare_runtime_memory.c (heap, malloc/free, memory and string helpers),
+ * bare_runtime_memref.c (memrefCopy), bare_runtime_trace.c (buddyTraceCycle*)
+ * and bare_runtime_ame.c (ame_fence); see common/README.md for the module
+ * table.
+ */
+
 #include <stddef.h>
 #include <stdint.h>
 

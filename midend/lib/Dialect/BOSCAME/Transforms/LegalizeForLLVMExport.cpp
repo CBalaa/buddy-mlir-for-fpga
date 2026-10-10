@@ -1,27 +1,123 @@
-//===- LegalizeForLLVMExport.cpp - Prepare BOSCAME for LLVM translation -===//
+//===- LegalizeForLLVMExport.cpp - Unified BOSCAME/SPM/DMA LLVM lowering -===//
 //
-// Lower the SSA-based BOSC AME dialect to bosc_ame.intr.* operations.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// This file deliberately uses LLVM::getVectorType instead of concrete
-// LLVMVectorType / LLVMScalableVectorType classes. getVectorType is the
-// stable LLVM-dialect API in the Buddy/MLIR branches where concrete class
-// names differ.
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+//===----------------------------------------------------------------------===//
+//
+// `-lower-bosc-ame` is the single BOSCAME lowering entry point.  It owns the
+// whole AME / SPM / DMA surface and finishes the module with the standard
+// MemRef/Func/Arith/CF/SCF/Vector/Math lowering so that its output is ready
+// for `buddy-translate --buddy-to-llvmir`.
+//
+// The pass runs in four stages:
+//
+//   1. Checks.  The cross-operation SPM/DMA contract (token lifetime, channel
+//      occupancy, aliasing), the SPM-typed-value rules and the FPGA capability
+//      contract are all verified while the `#bosc_ame.spm<bank>` type
+//      annotation is still present.  A module that cannot be lowered is
+//      rejected before any type information is lost.
+//
+//   2. Preparation.  Converter-agnostic rewrites that the standard lowering
+//      expects to have run first: linalg to loops, strided-metadata
+//      expansion, memref expansion and vector-to-SCF.  They only rewrite
+//      operations this pass sees through, never BOSCAME operations.
+//
+//   3. SCF structure.  Loop-carried BOSCAME matrix values (`vector<4x4xT>`)
+//      are converted to the scalable register type with the same type
+//      converter used by the final conversion.  Without this an `scf.for`
+//      accumulator chain would survive with a fixed vector type and a
+//      permanent `unrealized_conversion_cast` bridge.
+//
+//   4. Conversion.  A single LLVM conversion with one `LLVMTypeConverter`
+//      lowers, in one go:
+//
+//        * `bosc_ame.spm.view` to an LLVM memref descriptor whose base is the
+//          fixed bank base address plus the view offset.  The bank is
+//          compiled into the address and never has to be recovered, so no
+//          workspace root argument is needed and the kernel ABI stays clean.
+//          `#bosc_ame.spm<bank>` maps to LLVM address space 0: the two banks
+//          are two windows in one address space, not two address spaces.
+//        * `bosc_ame.dma.start` / `bosc_ame.dma.wait` to calls into the
+//          runtime ABI.  The DMA token becomes the `i64` returned by the
+//          start call (the effective source address), which the matching
+//          wait hands back to the runtime as its completion barrier.  The
+//          wait call returns void and the status check lives in the runtime,
+//          so the operation is simply erased.
+//        * AME matrix load/store to `bosc_ame.intr.*` intrinsics whose base
+//          pointer is decoded from the converted memref descriptor
+//          (`alignedPtr + offset * elementBytes`), so nested subviews and
+//          strided layouts are folded in exactly once.
+//        * the remaining BOSCAME operations to their `bosc_ame.intr.*`
+//          counterparts, keeping the existing FPGA scalable-vector mapping.
+//        * MemRef, Func, Arith, CF, SCF, Vector, Math, Index and UB to the
+//          LLVM dialect.
+//
+//      Leftover `unrealized_conversion_cast` operations are reconciled at the
+//      end, mirroring the `-reconcile-unrealized-casts` stage of the shipped
+//      pipeline.
+//
 //===----------------------------------------------------------------------===//
 
+#include "Dialect/BOSCAME/BOSCAMEAttrs.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
-#include "Dialect/BOSCAME/Transforms/FPGAAMETarget.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
+#include "Dialect/BOSCAME/BOSCAMETypes.h"
+#include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/BOSCAME/Transform.h"
+#include "Dialect/BOSCAME/Transforms/FPGAAMETarget.h"
+
+#include "mlir/Analysis/DataLayoutAnalysis.h"
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVM.h"
+#include "mlir/Conversion/IndexToLLVM/IndexToLLVM.h"
 #include "mlir/Conversion/LLVMCommon/ConversionTarget.h"
+#include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
+#include "mlir/Conversion/Passes.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Conversion/UBToLLVM/UBToLLVM.h"
+#include "mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h"
+#include "mlir/Conversion/VectorToSCF/VectorToSCF.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Index/IR/IndexDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/UB/IR/UBOps.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
+#include "mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+
+#include "llvm/ADT/STLExtras.h"
 
 #include <algorithm>
 #include <memory>
@@ -29,8 +125,13 @@
 
 using namespace mlir;
 using namespace buddy::boscame;
+using namespace buddy::boscame::spmdma;
 
 namespace {
+
+//===----------------------------------------------------------------------===//
+// BOSCAME matrix register types
+//===----------------------------------------------------------------------===//
 
 // The source vector shape, for example 4x4, represents active tile shape.
 // This type represents the storage capacity of one backend matrix register.
@@ -78,72 +179,199 @@ static Type getBOSCAMERegisterType(Type type) {
   }
 
   // i32 + 32 + scalable produces <vscale x 32 x i32> in LLVM IR, i.e.
-  // RISCV MVT::nxv32i32, registered to TileReg/AccReg by your backend code.
+  // RISCV MVT::nxv32i32, registered to TileReg/AccReg by the backend.
   return LLVM::getVectorType(elementType, lanes, /*isScalable=*/true);
 }
 
+//===----------------------------------------------------------------------===//
+// SPM storage space
+//===----------------------------------------------------------------------===//
+
+/// True when `type` is a ranked memref in an SPM memory space.
+bool hasSpmSpace(Type type) {
+  auto memref = dyn_cast_or_null<MemRefType>(type);
+  return memref && isa_and_nonnull<SPMAttr>(memref.getMemorySpace());
+}
+
+/// The fixed hardware base address of `bank`, as a byte address.
+uint64_t getBankBaseAddress(int64_t bank) {
+  assert(bank >= 0 && bank < kSpmBankCount && "bank out of range");
+  return kSpmBankBaseAddress[bank];
+}
+
+/// Operations whose result may legitimately keep an SPM memory space: they
+/// only re-describe a buffer `bosc_ame.spm.view` already anchored in a bank
+/// and never change the base address.  Anything else would need an SPM
+/// allocation the hardware does not hand out and is rejected.
+bool preservesSpmSpace(Operation *op) {
+  return isa<SpmViewOp, memref::ViewOp, memref::SubViewOp, memref::CastOp,
+             memref::CollapseShapeOp, memref::ExpandShapeOp,
+             memref::TransposeOp, memref::ReinterpretCastOp,
+             memref::MemorySpaceCastOp, memref::AssumeAlignmentOp,
+             memref::ExtractStridedMetadataOp, arith::SelectOp, scf::IfOp,
+             scf::ForOp, scf::WhileOp, scf::IndexSwitchOp>(op);
+}
+
+/// Reject SPM-typed values this pass cannot give an address to: an SPM-typed
+/// function argument has no statically known position inside its bank, and an
+/// SPM-typed value produced by an operation other than a view of an existing
+/// SPM buffer has no address at all.  SPM memory-space casts that change the
+/// bank are rejected too.
+LogicalResult validateSpmSurface(ModuleOp module) {
+  bool ok = true;
+  module.walk([&](Operation *op) {
+    for (Value result : op->getResults()) {
+      if (!hasSpmSpace(result.getType()) || preservesSpmSpace(op))
+        continue;
+      op->emitOpError()
+          << "produces an SPM-typed value, but only `bosc_ame.spm.view` and "
+             "memref view-like operations may carry `"
+          << SPMAttr::getMnemonic()
+          << "`; this value has no SPM address and cannot be lowered";
+      ok = false;
+    }
+    if (auto cast = dyn_cast<memref::MemorySpaceCastOp>(op)) {
+      std::optional<int64_t> sourceBank =
+          getSpmBank(cast.getSource().getType());
+      std::optional<int64_t> destBank = getSpmBank(cast.getDest().getType());
+      if (sourceBank && destBank && *sourceBank != *destBank) {
+        cast.emitOpError() << "cannot reinterpret an SPM buffer in bank "
+                           << *sourceBank << " as bank " << *destBank;
+        ok = false;
+      }
+    }
+    // SPM is a fixed hardware workspace: it is addressed through
+    // `bosc_ame.spm.view`, which compiles the bank base into the address.  A
+    // kernel that receives an SPM memref argument would need a runtime base
+    // address the ABI no longer carries.
+    if (auto function = dyn_cast<FunctionOpInterface>(op)) {
+      for (BlockArgument argument : function.getArguments()) {
+        if (!hasSpmSpace(argument.getType()))
+          continue;
+        function->emitOpError()
+            << "takes an SPM memref argument " << argument.getType()
+            << "; SPM is addressed through `bosc_ame.spm.view` at the fixed "
+               "bank base address and is not an ABI parameter";
+        ok = false;
+      }
+    }
+  });
+  return success(ok);
+}
+
+//===----------------------------------------------------------------------===//
+// DMA runtime declarations
+//===----------------------------------------------------------------------===//
+
+/// Declare the two runtime entry points the DMA lowering calls, but only when
+/// the module actually contains a request.  A module without DMA must not gain
+/// two external declarations.
+void declareDmaRuntimeHelpers(ModuleOp module) {
+  bool needed = false;
+  module.walk([&](Operation *op) {
+    needed |= isa<DmaStartOp, DmaWaitOp>(op);
+  });
+  if (!needed)
+    return;
+
+  MLIRContext *context = module.getContext();
+  Type i32Type = IntegerType::get(context, 32);
+  Type i64Type = IntegerType::get(context, 64);
+  Type voidType = LLVM::LLVMVoidType::get(context);
+  OpBuilder builder(module.getBodyRegion());
+  builder.setInsertionPointToStart(module.getBody());
+  if (!module.lookupSymbol<LLVM::LLVMFuncOp>(kDmaStartHelperName))
+    LLVM::LLVMFuncOp::create(
+        builder, module.getLoc(), kDmaStartHelperName,
+        LLVM::LLVMFunctionType::get(i64Type,
+                                    {i32Type, i64Type, i64Type, i64Type}),
+        LLVM::Linkage::External, /*dsoLocal=*/false, LLVM::CConv::C);
+  // The wait helper checks the hardware status itself: a normal return means
+  // "completed and succeeded", a failure takes the runtime error path.
+  if (!module.lookupSymbol<LLVM::LLVMFuncOp>(kDmaWaitHelperName))
+    LLVM::LLVMFuncOp::create(builder, module.getLoc(), kDmaWaitHelperName,
+                             LLVM::LLVMFunctionType::get(voidType,
+                                                         {i32Type, i64Type}),
+                             LLVM::Linkage::External, /*dsoLocal=*/false,
+                             LLVM::CConv::C);
+}
+
+//===----------------------------------------------------------------------===//
+// Type converter
+//===----------------------------------------------------------------------===//
+
 static void addBOSCAMETypeConversions(LLVMTypeConverter &converter) {
   // LLVMTypeConverter normally lowers a fixed 2-D vector to nested LLVM
-  // arrays. BOSCAME matrix registers are represented by scalable vectors in
+  // arrays.  BOSCAME matrix registers are represented by scalable vectors in
   // the backend, so keep those values in the register form throughout this
   // conversion instead of materializing unrealized array casts.
   //
-  // Vectors that are *not* matrix tiles must convert to themselves.  Returning
-  // a null type here would make the framework report "unable to convert type
-  // for operand" as soon as a loop carries an already-converted register type
-  // (the accumulator chain), which then fails to legalize the generated
-  // `scf.for` even though its types are correct.
-  converter.addConversion([](VectorType type) -> Type {
+  // Every other vector (including the already-converted scalable register
+  // type) is left to the base converter, which knows how to legalize it.
+  converter.addConversion([](VectorType type) -> std::optional<Type> {
     if (type.getRank() != 2)
-      return type;
-    Type registerType = getBOSCAMERegisterType(type);
-    return registerType ? registerType : type;
+      return std::nullopt;
+    if (Type registerType = getBOSCAMERegisterType(type))
+      return registerType;
+    return std::nullopt;
   });
+
+  // A DMA token is the effective source address of the request, i.e. an i64.
+  converter.addConversion([](DMATokenType type) -> Type {
+    return IntegerType::get(type.getContext(), 64);
+  });
+
+  // Both SPM banks are windows into the same address space, so the memory
+  // space annotation lowers to address space 0.  Mapping bank 0/1 to LLVM
+  // address spaces 0/1 would split one physical space into two.
+  converter.addTypeAttributeConversion(
+      [](MemRefType type,
+         SPMAttr attr) -> TypeConverter::AttributeConversionResult {
+        return IntegerAttr::get(IntegerType::get(attr.getContext(), 64), 0);
+      });
 }
+
+//===----------------------------------------------------------------------===//
+// Conversion helpers
+//===----------------------------------------------------------------------===//
 
 static bool isMemRefValue(Value value) {
   return isa<MemRefType, UnrankedMemRefType>(value.getType());
 }
 
-// Materialize the effective base address of `memref` as an LLVM pointer.
-//
-// The aligned pointer alone describes the allocation base; it ignores the
-// descriptor offset introduced by subviews, reinterpret_cast and strided
-// layouts. Feeding that pointer to a matrix load/store silently addresses the
-// wrong tile, so decode the strided metadata and fold the element offset in:
-//
-//   effective = alignedPointer(baseBuffer) + offset * bytesPerElement
-//
-// `memref.extract_strided_metadata` resolves arbitrarily nested
-// subview/reinterpret_cast chains into a single descriptor, so the offset is
-// applied exactly once even for multi-level views.
-static Value extractPointerFromMemref(ConversionPatternRewriter &rewriter,
-                                      Location loc, Value memref) {
-  MLIRContext *context = rewriter.getContext();
-  Type pointerType = LLVM::LLVMPointerType::get(context);
-  Type i64Type = IntegerType::get(context, 64);
+/// Decode the effective base pointer of a converted memref descriptor:
+///
+///   effective = alignedPtr + descriptorOffset * elementBytes
+///
+/// `MemRefDescriptor::bufferPtr` folds in the descriptor offset (dynamic
+/// layouts) or the type's static offset (static layouts), so arbitrarily
+/// nested subview/reinterpret_cast chains and strided layouts are resolved
+/// exactly once.
+static Value extractPointerFromDescriptor(OpBuilder &builder, Location loc,
+                                          Value descriptor,
+                                          Type originalMemRefType,
+                                          const LLVMTypeConverter &converter) {
+  auto memrefType = dyn_cast<MemRefType>(originalMemRefType);
+  if (!memrefType || !descriptor)
+    return Value();
+  MemRefDescriptor memref(descriptor);
+  return memref.bufferPtr(builder, loc, converter, memrefType);
+}
 
-  auto metadata =
-      memref::ExtractStridedMetadataOp::create(rewriter, loc, memref);
-  Value baseBuffer = metadata.getBaseBuffer();
-  Value offset = metadata.getOffset();
-  Value pointerAsIndex =
-      memref::ExtractAlignedPointerAsIndexOp::create(rewriter, loc, baseBuffer);
-
-  Type elementType = getElementTypeOrSelf(memref.getType());
-  unsigned bitWidth = elementType.getIntOrFloatBitWidth();
-  // Sub-byte element types (e.g. i4) share a byte; an offset is only
-  // expressible in whole elements, so keep the element granularity.
-  unsigned bytesPerElement = std::max(1u, bitWidth / 8u);
-  Value elementBytes =
-      arith::ConstantIndexOp::create(rewriter, loc, bytesPerElement);
-  Value byteOffset =
-      arith::MulIOp::create(rewriter, loc, offset, elementBytes);
-  Value effectiveAsIndex =
-      arith::AddIOp::create(rewriter, loc, pointerAsIndex, byteOffset);
-  Value pointerAsI64 =
-      arith::IndexCastOp::create(rewriter, loc, i64Type, effectiveAsIndex);
-  return LLVM::IntToPtrOp::create(rewriter, loc, pointerType, pointerAsI64);
+/// Materialize the effective byte address of a converted memref descriptor as
+/// an `i64`, which is what the DMA runtime ABI takes.
+static Value extractAddressFromDescriptor(OpBuilder &builder, Location loc,
+                                          Value descriptor,
+                                          Type originalMemRefType,
+                                          const LLVMTypeConverter &converter) {
+  Value pointer =
+      extractPointerFromDescriptor(builder, loc, descriptor, originalMemRefType,
+                                   converter);
+  if (!pointer)
+    return Value();
+  return LLVM::PtrToIntOp::create(builder, loc,
+                                  IntegerType::get(builder.getContext(), 64),
+                                  pointer);
 }
 
 // Immediate BOSCAME operations carry an I64Attr. LLVM_IntrOpBase needs the
@@ -180,6 +408,10 @@ static Operation *createBOSCAMEIntrinsicOp(ConversionPatternRewriter &rewriter,
   return rewriter.create(state);
 }
 
+//===----------------------------------------------------------------------===//
+// BOSCAME -> bosc_ame.intr.*
+//===----------------------------------------------------------------------===//
+
 // The old pass had one typed template and one patterns.add<> call per
 // instruction. Their bodies were identical except for operation name and
 // register-number attributes. The SSA ODS no longer has those attributes, so
@@ -198,6 +430,13 @@ public:
     if (!name.starts_with("bosc_ame.") || name.starts_with("bosc_ame.intr."))
       return failure();
 
+    // The SPM view and the DMA requests have dedicated conversion patterns
+    // with a higher benefit; never fabricate an intrinsic for them.
+    if (isa<SpmViewOp, DmaStartOp, DmaWaitOp>(op))
+      return failure();
+
+    const auto &converter =
+        *static_cast<const LLVMTypeConverter *>(typeConverter);
     Location loc = op->getLoc();
     auto module = op->getParentOfType<ModuleOp>();
     auto target = module->getAttrOfType<StringAttr>(kAmeTargetAttrName);
@@ -211,7 +450,10 @@ public:
       Type resultType = getBOSCAMERegisterType(op->getResult(0).getType());
       if (!resultType)
         return failure();
-      Value base = extractPointerFromMemref(rewriter, loc, op->getOperand(0));
+      Value base = extractPointerFromDescriptor(
+          rewriter, loc, operands[0], op->getOperand(0).getType(), converter);
+      if (!base)
+        return failure();
       SmallVector<Value> loadOperands{base, operands[1]};
       if (fpga) {
         auto slot = op->getAttrOfType<IntegerAttr>("bosc_ame.fpga.slot");
@@ -223,7 +465,7 @@ public:
       }
       Operation *intrinsic =
           createBOSCAMEIntrinsicOp(rewriter, loc, fpga ? fpgaName : name,
-                                  TypeRange{resultType}, loadOperands);
+                                   TypeRange{resultType}, loadOperands);
       rewriter.replaceOp(op, intrinsic->getResults());
       return success();
     }
@@ -231,9 +473,13 @@ public:
     // Matrix store: scalable LLVM vector, memref, i64 stride -> no result.
     if (op->getNumResults() == 0 && op->getNumOperands() == 3 &&
         isMemRefValue(op->getOperand(1))) {
-      Value base = extractPointerFromMemref(rewriter, loc, op->getOperand(1));
-      createBOSCAMEIntrinsicOp(rewriter, loc, fpga ? fpgaName : name, TypeRange(),
-                               ValueRange{operands[0], base, operands[2]});
+      Value base = extractPointerFromDescriptor(
+          rewriter, loc, operands[1], op->getOperand(1).getType(), converter);
+      if (!base)
+        return failure();
+      createBOSCAMEIntrinsicOp(rewriter, loc, fpga ? fpgaName : name,
+                               TypeRange(), ValueRange{operands[0], base,
+                                                       operands[2]});
       rewriter.eraseOp(op);
       return success();
     }
@@ -261,6 +507,247 @@ public:
   }
 };
 
+//===----------------------------------------------------------------------===//
+// bosc_ame.spm.view -> LLVM memref descriptor at the fixed bank base
+//===----------------------------------------------------------------------===//
+
+/// `bosc_ame.spm.view {bank, offset}` becomes an LLVM memref descriptor whose
+/// base is `bankBase[bank] + offset`.  The bank is a compile-time hardware
+/// constant, so no root argument, no `memref.view` and no runtime-provided
+/// base pointer is involved.  The descriptor offset is zero (the verifier
+/// guarantees a contiguous, zero-offset view), so later address computations
+/// add the descriptor offset exactly once.
+class SpmViewOpConversion : public ConvertToLLVMPattern {
+public:
+  SpmViewOpConversion(const LLVMTypeConverter &converter, MLIRContext *context)
+      : ConvertToLLVMPattern(SpmViewOp::getOperationName(), context, converter,
+                             PatternBenefit(2)) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto view = cast<SpmViewOp>(op);
+    auto memrefType = dyn_cast<MemRefType>(view.getView().getType());
+    if (!memrefType)
+      return failure();
+    int64_t bank = static_cast<int64_t>(view.getBank());
+    if (bank < 0 || bank >= kSpmBankCount)
+      return failure();
+
+    Location loc = view.getLoc();
+    uint64_t address = getBankBaseAddress(bank) + view.getOffset();
+    Type i64Type = IntegerType::get(rewriter.getContext(), 64);
+    Value addressValue = LLVM::ConstantOp::create(
+        rewriter, loc, i64Type,
+        rewriter.getI64IntegerAttr(static_cast<int64_t>(address)));
+    Type pointerType =
+        LLVM::LLVMPointerType::get(rewriter.getContext(), /*addressSpace=*/0);
+    Value base =
+        LLVM::IntToPtrOp::create(rewriter, loc, pointerType, addressValue);
+    Value descriptor = MemRefDescriptor::fromStaticShape(
+        rewriter, loc, *getTypeConverter(), memrefType, base);
+    rewriter.replaceOp(op, descriptor);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// bosc_ame.dma.start / bosc_ame.dma.wait -> runtime calls
+//===----------------------------------------------------------------------===//
+
+/// `bosc_ame.dma.start` becomes a call to `bosc_ame_dma_start(channel, src,
+/// dst, len)`.  The runtime returns the effective source address, which *is*
+/// the request token, so the call result replaces the token value directly.
+class DmaStartOpConversion : public ConvertToLLVMPattern {
+public:
+  DmaStartOpConversion(const LLVMTypeConverter &converter, MLIRContext *context)
+      : ConvertToLLVMPattern(DmaStartOp::getOperationName(), context, converter,
+                             PatternBenefit(2)) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto start = cast<DmaStartOp>(op);
+    if (!getDmaEndpoint(dyn_cast<MemRefType>(start.getSrc().getType())) ||
+        !getDmaEndpoint(dyn_cast<MemRefType>(start.getDst().getType())))
+      return start.emitOpError()
+             << "DMA endpoints must be 1-D i8 memrefs with a static length";
+
+    Location loc = start.getLoc();
+    const auto &converter =
+        *static_cast<const LLVMTypeConverter *>(getTypeConverter());
+    Value channel = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI32Type(),
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(start.getChannel())));
+    Value src = extractAddressFromDescriptor(
+        rewriter, loc, operands[0], start.getSrc().getType(), converter);
+    Value dst = extractAddressFromDescriptor(
+        rewriter, loc, operands[1], start.getDst().getType(), converter);
+    if (!src || !dst)
+      return failure();
+    // `bytes` is an index operand; the converter has already turned it into the
+    // LLVM index type (i64), which is the runtime's length type as well.
+    Value length = operands[2];
+
+    FlatSymbolRefAttr callee =
+        FlatSymbolRefAttr::get(rewriter.getContext(), kDmaStartHelperName);
+    Type i64Type = IntegerType::get(rewriter.getContext(), 64);
+    auto call = LLVM::CallOp::create(rewriter, loc, TypeRange{i64Type}, callee,
+                                     ValueRange{channel, src, dst, length});
+    rewriter.replaceOp(op, call.getResult());
+    return success();
+  }
+};
+
+/// `bosc_ame.dma.wait` becomes a call to `bosc_ame_dma_wait(channel, token)`.
+/// The channel comes from the *original* token type (the token has already
+/// been converted to the start call's `i64` result), and the converted token
+/// is the effective source address the runtime uses as the completion
+/// barrier.  The helper returns void and owns the status check, so the wait
+/// operation itself is erased.  No start/wait bookkeeping map is needed.
+class DmaWaitOpConversion : public ConvertToLLVMPattern {
+public:
+  DmaWaitOpConversion(const LLVMTypeConverter &converter, MLIRContext *context)
+      : ConvertToLLVMPattern(DmaWaitOp::getOperationName(), context, converter,
+                             PatternBenefit(2)) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto wait = cast<DmaWaitOp>(op);
+    auto tokenType = dyn_cast<DMATokenType>(wait.getToken().getType());
+    if (!tokenType)
+      return wait.emitOpError() << "operand must be a `"
+                                << DMATokenType::getMnemonic() << "` value";
+
+    Location loc = wait.getLoc();
+    Value channel = LLVM::ConstantOp::create(
+        rewriter, loc, rewriter.getI32Type(),
+        rewriter.getI32IntegerAttr(
+            static_cast<int32_t>(tokenType.getChannel())));
+    FlatSymbolRefAttr callee =
+        FlatSymbolRefAttr::get(rewriter.getContext(), kDmaWaitHelperName);
+    LLVM::CallOp::create(rewriter, loc, TypeRange{}, callee,
+                         ValueRange{channel, operands[0]});
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Preparation stages
+//===----------------------------------------------------------------------===//
+
+/// Converter-agnostic preparation the standard lowering expects to have run:
+/// linalg to loops (there is no linalg-to-LLVM lowering), strided-metadata
+/// expansion, memref expansion and vector-to-SCF.  None of them looks at
+/// BOSCAME operations.
+LogicalResult runPreparationPipeline(ModuleOp module, MLIRContext &context) {
+  PassManager pm(&context, PassManager::getAnyOpAnchorName(),
+                 PassManager::Nesting::Implicit);
+  pm.addPass(createConvertLinalgToLoopsPass());
+  pm.addPass(memref::createExpandStridedMetadataPass());
+  pm.addPass(memref::createExpandOpsPass());
+  pm.addPass(createConvertVectorToSCFPass());
+  pm.addPass(createConvertMathToLibmPass());
+  return pm.run(module);
+}
+
+/// Rewrite vector operations into the forms the LLVM conversion understands.
+/// This mirrors the `-convert-vector-to-llvm` pipeline (default options) that
+/// the shipped Makefile runs after the BOSCAME lowering.
+void prepareVectorOps(ModuleOp module, MLIRContext &context) {
+  RewritePatternSet patterns(&context);
+  vector::populateVectorToVectorCanonicalizationPatterns(patterns);
+  vector::populateVectorBitCastLoweringPatterns(patterns);
+  vector::populateVectorBroadcastLoweringPatterns(patterns);
+  vector::populateVectorContractLoweringPatterns(
+      patterns, vector::VectorContractLowering::Dot);
+  vector::populateVectorMaskOpLoweringPatterns(patterns);
+  vector::populateVectorShapeCastLoweringPatterns(patterns);
+  vector::populateVectorInterleaveLoweringPatterns(patterns);
+  vector::populateVectorTransposeLoweringPatterns(
+      patterns, vector::VectorTransposeLowering::EltWise);
+  vector::populateVectorTransferLoweringPatterns(
+      patterns, /*maxTransferRank=*/1);
+  vector::populateVectorMaskMaterializationPatterns(
+      patterns, /*force32BitVectorIndices=*/false);
+  vector::populateVectorInsertExtractStridedSliceTransforms(patterns);
+  vector::populateVectorRankReducingFMAPattern(patterns);
+  vector::populateVectorGatherLoweringPatterns(patterns);
+  vector::populateVectorFromElementsUnrollPatterns(patterns);
+  vector::populateVectorToElementsUnrollPatterns(patterns);
+  (void)applyPatternsGreedily(module, std::move(patterns));
+}
+
+/// Convert loop-carried BOSCAME matrix values to the scalable register type so
+/// that SCF can be lowered to a CFG without leaving a fixed-vector bridge.
+LogicalResult convertScfStructure(ModuleOp module, MLIRContext &context) {
+  LLVMTypeConverter converter(&context);
+  addBOSCAMETypeConversions(converter);
+  ConversionTarget target(context);
+  target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
+  RewritePatternSet patterns(&context);
+  scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
+                                                       target);
+  return applyPartialConversion(module, target, std::move(patterns));
+}
+
+/// The final conversion: BOSCAME / SPM / DMA plus every standard dialect that
+/// still stands between the module and LLVM.
+LogicalResult convertToLLVM(ModuleOp module, MLIRContext &context) {
+  DataLayoutAnalysis dataLayoutAnalysis(module);
+  LowerToLLVMOptions options(&context, dataLayoutAnalysis.getAtOrAbove(module));
+  LLVMTypeConverter converter(&context, options, &dataLayoutAnalysis);
+  addBOSCAMETypeConversions(converter);
+
+  LLVMConversionTarget target(context);
+  target.addDynamicallyLegalDialect<BOSCAMEDialect>([](Operation *op) {
+    return op->getName().getStringRef().starts_with("bosc_ame.intr.");
+  });
+  target.addIllegalDialect<arith::ArithDialect, affine::AffineDialect,
+                           cf::ControlFlowDialect, func::FuncDialect,
+                           index::IndexDialect, linalg::LinalgDialect,
+                           math::MathDialect, memref::MemRefDialect,
+                           scf::SCFDialect, ub::UBDialect,
+                           vector::VectorDialect>();
+
+  SymbolTableCollection symbolTables;
+  RewritePatternSet patterns(&context);
+  patterns.add<BOSCAMEToIntrinsicLowering>(converter, &context);
+  patterns.add<SpmViewOpConversion>(converter, &context);
+  patterns.add<DmaStartOpConversion>(converter, &context);
+  patterns.add<DmaWaitOpConversion>(converter, &context);
+
+  arith::populateArithToLLVMConversionPatterns(converter, patterns);
+  index::populateIndexToLLVMConversionPatterns(converter, patterns);
+  ub::populateUBToLLVMConversionPatterns(converter, patterns);
+  populateAffineToStdConversionPatterns(patterns);
+  populateSCFToControlFlowConversionPatterns(patterns);
+  cf::populateControlFlowToLLVMConversionPatterns(converter, patterns);
+  populateFuncToLLVMConversionPatterns(converter, patterns, &symbolTables);
+  populateFinalizeMemRefToLLVMConversionPatterns(converter, patterns,
+                                                  &symbolTables);
+  populateVectorToLLVMConversionPatterns(converter, patterns);
+  vector::populateVectorTransferLoweringPatterns(patterns);
+  populateMathToLLVMConversionPatterns(converter, patterns);
+
+  return applyPartialConversion(module, target, std::move(patterns));
+}
+
+/// Remove the unrealized conversion casts the conversion may have left behind
+/// (the equivalent of the final `-reconcile-unrealized-casts` stage).
+void reconcileCasts(ModuleOp module) {
+  SmallVector<UnrealizedConversionCastOp> casts;
+  module.walk(
+      [&](UnrealizedConversionCastOp cast) { casts.push_back(cast); });
+  reconcileUnrealizedCasts(casts);
+}
+
+//===----------------------------------------------------------------------===//
+// Pass
+//===----------------------------------------------------------------------===//
+
 struct LegalizeBOSCAMEForLLVMExport
     : public PassWrapper<LegalizeBOSCAMEForLLVMExport,
                          OperationPass<ModuleOp>> {
@@ -268,18 +755,19 @@ struct LegalizeBOSCAMEForLLVMExport
 
   StringRef getArgument() const final { return "lower-bosc-ame"; }
   StringRef getDescription() const final {
-    return "BOSCAME dialect lowering pass.";
+    return "Lower the BOSCAME / SPM / DMA surface and the surrounding standard "
+           "dialects to the LLVM dialect.";
   }
 
   LegalizeBOSCAMEForLLVMExport() = default;
   LegalizeBOSCAMEForLLVMExport(const LegalizeBOSCAMEForLLVMExport &) {}
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<BOSCAMEDialect>();
-    registry.insert<LLVM::LLVMDialect>();
-    registry.insert<arith::ArithDialect>();
-    registry.insert<memref::MemRefDialect>();
-    registry.insert<scf::SCFDialect>();
+    registry.insert<BOSCAMEDialect, LLVM::LLVMDialect, affine::AffineDialect,
+                    arith::ArithDialect, cf::ControlFlowDialect,
+                    func::FuncDialect, index::IndexDialect, linalg::LinalgDialect,
+                    math::MathDialect, memref::MemRefDialect,
+                    scf::SCFDialect, ub::UBDialect, vector::VectorDialect>();
   }
 
   /// FPGA profile: make the backend select the FPGA register-file convention.
@@ -337,6 +825,17 @@ struct LegalizeBOSCAMEForLLVMExport
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
+    MLIRContext &context = getContext();
+
+    // Stage 1: contract checks, while the SPM annotation is still present.
+    if (failed(verifySpmDmaContract(module))) {
+      signalPassFailure();
+      return;
+    }
+    if (failed(validateSpmSurface(module))) {
+      signalPassFailure();
+      return;
+    }
     if (failed(verifyFPGACapabilities(module))) {
       signalPassFailure();
       return;
@@ -345,29 +844,27 @@ struct LegalizeBOSCAMEForLLVMExport
       signalPassFailure();
       return;
     }
-    MLIRContext &context = getContext();
-    LLVMConversionTarget target(context);
-    target.addLegalDialect<arith::ArithDialect>();
-    target.addLegalDialect<memref::MemRefDialect>();
-    target.addDynamicallyLegalDialect<BOSCAMEDialect>([](Operation *op) {
-      return op->getName().getStringRef().starts_with("bosc_ame.intr.");
-    });
+    declareDmaRuntimeHelpers(module);
 
-    LLVMTypeConverter converter(&context);
-    addBOSCAMETypeConversions(converter);
-    RewritePatternSet patterns(&context);
-    patterns.add<BOSCAMEToIntrinsicLowering>(converter, &context);
-    // A matrix value that is carried across an `scf.for` reduction (the FPGA
-    // accumulator chain) has to be converted consistently with the value
-    // produced by the intrinsic, otherwise the loop result keeps the fixed
-    // `vector<4x4xT>` type and a permanent unrealized_conversion_cast bridges
-    // it to the scalable register type.  `reconcile-unrealized-casts` cannot
-    // remove that bridge once the loop is lowered to a CFG, and the LLVM
-    // translation refuses it.
-    scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
-                                                         target);
-    if (failed(applyPartialConversion(module, target, std::move(patterns))))
+    // Stage 2: preparation.
+    if (failed(runPreparationPipeline(module, context))) {
       signalPassFailure();
+      return;
+    }
+    prepareVectorOps(module, context);
+
+    // Stage 3: convert loop-carried matrix values before SCF is lowered.
+    if (failed(convertScfStructure(module, context))) {
+      signalPassFailure();
+      return;
+    }
+
+    // Stage 4: the unified BOSCAME / SPM / DMA / standard conversion.
+    if (failed(convertToLLVM(module, context))) {
+      signalPassFailure();
+      return;
+    }
+    reconcileCasts(module);
   }
 };
 
@@ -377,15 +874,14 @@ void mlir::populateBOSCAMELegalizeForLLVMExportPatterns(
     LLVMTypeConverter &converter, RewritePatternSet &patterns) {
   addBOSCAMETypeConversions(converter);
   patterns.add<BOSCAMEToIntrinsicLowering>(converter, patterns.getContext());
-  // NOTE: callers of this helper that also lower loop-carried matrix values
-  // must add `scf::populateSCFStructuralTypeConversionsAndLegality` themselves;
-  // see the pass below.
+  // NOTE: callers of this helper that lower the SPM/DMA surface or
+  // loop-carried matrix values must add the SPM view / DMA patterns and
+  // `scf::populateSCFStructuralTypeConversionsAndLegality` themselves; see the
+  // unified pass above.
 }
 
 void mlir::configureBOSCAMELegalizeForExportTarget(
     LLVMConversionTarget &target) {
-  target.addLegalDialect<arith::ArithDialect>();
-  target.addLegalDialect<memref::MemRefDialect>();
   target.addDynamicallyLegalDialect<BOSCAMEDialect>([](Operation *op) {
     return op->getName().getStringRef().starts_with("bosc_ame.intr.");
   });

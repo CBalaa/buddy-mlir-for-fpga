@@ -23,6 +23,7 @@ namespace mlir {
 
 class LLVMConversionTarget;
 class LLVMTypeConverter;
+class ModuleOp;
 class RewritePatternSet;
 
 void populateBOSCAMELegalizeForLLVMExportPatterns(LLVMTypeConverter &converter,
@@ -34,7 +35,22 @@ void configureBOSCAMELegalizeForExportTarget(LLVMConversionTarget &target);
 namespace buddy {
 namespace boscame {
 
+/// The unified BOSCAME lowering pass (`-lower-bosc-ame`).  It verifies the
+/// SPM/DMA contract, lowers AME matrix operations to `bosc_ame.intr.*`, lowers
+/// `bosc_ame.spm.view` to an LLVM memref descriptor anchored at the fixed bank
+/// base address, lowers DMA requests to LLVM calls into the runtime ABI and
+/// finishes the module with the standard memref/func/arith/cf/vector/math
+/// lowering so that the pass leaves a module ready for LLVM translation.
 std::unique_ptr<mlir::Pass> createLegalizeForLLVMExportPass();
+
+/// Verify the cross-operation SPM/DMA contract: token lifetime, channel
+/// occupancy and source/destination aliasing.  Exposed so that the unified
+/// lowering pass can run the same checks before the SPM types are converted.
+mlir::LogicalResult verifySpmDmaContract(mlir::ModuleOp module);
+
+/// Verify the cross-operation SPM/DMA contract as a standalone pass, kept for
+/// debugging a pipeline in isolation.
+std::unique_ptr<mlir::Pass> createSpmDmaCheckPass();
 
 } // namespace boscame
 } // namespace buddy

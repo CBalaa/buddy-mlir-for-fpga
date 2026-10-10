@@ -690,7 +690,8 @@ def build(args, output: Path, report: dict) -> None:
          "-o", output / "vit_triton_adapters.o"],
         steps, "compile_adapters")
     runtime_objects = []
-    for name in ("crt.S", "nr_runtime.c", "nr_math.c", "ame_sync.c", "nr_copy.S"):
+    for name in ("crt.S", "nr_runtime.c", "nr_memory.c", "nr_math.c",
+                 "ame_sync.c", "nr_copy.S"):
         obj = output / (Path(name).stem + ".o")
         source_flags = ["-march=rv64gcv_zicbom" if name == "nr_copy.S" and
                         flag.startswith("-march=") else flag for flag in compile_flags]

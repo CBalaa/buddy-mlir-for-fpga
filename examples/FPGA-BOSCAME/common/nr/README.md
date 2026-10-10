@@ -39,6 +39,33 @@ NH 独占 UART MMIO；每个核写的游标独占缓存行。NH 写入后 flush�
 等待提示符，遵守应用输入长度上限。固件能打印提示符、主机 write 成功均不能代替
 实际 RX 验证。
 
+## 模块职责
+
+nr 是平台名称：本目录就是 NR 平台的完整运行环境，平台专属运行时留在这里，
+不是与“通用运行时”平行的一类文件。目录内按职责拆分：
+
+| 文件 | 类别 | 职责 |
+| --- | --- | --- |
+| `crt.S` | 启动 | NH `_start`（gp／栈／trap → `nr_nh_main`）与 RA `_ra_start`（FS/VS/XS/AME MS、RA BSS／TBSS 清零 → `nr_ra_main`），以及两个终态 trap 入口 |
+| `nr.ld` | 平台 | 地址布局：代码／BSS／栈在低 DDR，mailbox `0x80010000`，`.nr_console` NOLOAD，两核各 1 MiB 栈，`.workspace` 从 `0xb8000000` 起 |
+| `nr_runtime.c` | 平台 | NH 初始化 UART 并通过 `0x50000000` 寄存器启动 RA、完成信号 mailbox 轮询、核间日志转发（include `nr_console.inc`）、可选 hang watch（include `nr_hang_watch.inc`）、RA/NH trap 与 abort、结果报告 `nr_finish()`、`print_uart*` 兼容入口、RA cache 诊断 hook |
+| `nr_memory.c` | 运行时 | RA bump heap、`nr_heap_mark()`／`nr_heap_reset()`、`malloc`／`calloc`／`aligned_alloc`／`free`、标量 `memcpy`／`memmove`／`memset`／`memcmp`、MLIR `memrefCopy` ABI |
+| `nr_runtime_internal.h` | 内部 | `nr_runtime.c` 与 `nr_memory.c` 之间的小接口（`nr_finish`、`abort`）；应用不包含 |
+| `nr_console.inc`、`nr_hang_watch.inc` | 平台 | 已有模块边界的核间日志控制块与诊断记录；由 `nr_runtime.c` 在 hooks 之后 include，保持原机制 |
+| `nr_math.c` | 运行时 | freestanding `expf`／`logf`／`powf`／`tanhf`／`erff`／`sqrtf`／`sinf`／`cosf` |
+| `nr_copy.S` | 运行时 | `nr_copy_bytes()` 的已验收 RVV copy 子集（单独用含 V 的 `-march`） |
+| `ame_sync.c` | 运行时 | `ame_fence()`：带 fence 的 1×1 AME resync |
+
+依赖方向：`crt.S` → 平台（`nr_runtime.c`）→ 运行时（`nr_memory.c`、`nr_math.c`、
+`nr_copy.S`、`ame_sync.c`）；驱动（`../uart/uart.c`）只提供设备寄存器访问，
+被 NH 的日志路径调用。`nr_memory.c` 的致命错误（堆耗尽、memrefCopy ABI 违规）
+通过 `nr_runtime.c` 的 `nr_finish()` 发布 FAIL，不直接写 mailbox，也不访问 UART。
+
+每个 NR 镜像只链接一套启动、内存和日志实现：`nr.mk` 的 `NR_OBJECTS` 是唯一
+清单（`crt.o nr_runtime.o nr_memory.o nr_math.o ame_sync.o nr_copy.o`），
+算子集合的 `common.mk` 与 Python 镜像构建器复用同一份列表，不要同时链接
+`common/runtime/bare_runtime*.c` 或 `common/uart/uart.c`。
+
 ## 构建接入
 
 从算子目录使用相对路径包含公共工具链和此 make 片段，例如：
@@ -131,7 +158,9 @@ launch 必须初始化算子实际会读取的每个元素；测试 embedding ga
 描述此段边界。链接器校验它不超过 `0x100000000`，不允许穿过故障区。
 
 `malloc` / `aligned_alloc` 使用低 DDR bump heap，`free` 不回收；耗尽会打印
-请求大小、当前游标和上界并停止。重复调用编译图时，在调用前保存
+请求大小、当前游标和上界并停止。这些入口、堆状态和失效报告都由
+`nr_memory.c` 实现，与 `nr_runtime.c` 的平台职责分开；分配器语义与单核 bare
+后端的固定缓冲 heap 不同，二者不共用实现。重复调用编译图时，在调用前保存
 `uintptr_t mark = nr_heap_mark()`，将所有仍需使用的返回 tensor/KV 复制到持久
 buffer、完成异步访问后调用 `nr_heap_reset(mark)`。reset 后禁止继续使用该次
 调用分配的任何指针；mark 之前的分配保留。集合运行也可复用 `.workspace`
@@ -148,7 +177,9 @@ buffer、完成异步访问后调用 `nr_heap_reset(mark)`。reset 后禁止继�
 
 启动、mailbox、日志同步和 AME 同步协议依据 ModelZoo 的
 `thirdparty/nr`、`examples/buddy-qwen35-fpga/platform/nr` 和
-`examples/tools/bare_runtime.c` 迁移、精简。`nr_math.c` 的 exp/log 表及
+`examples/tools/bare_runtime.c` 迁移、精简。迁移后的 C 运行时按职责拆成
+`nr_runtime.c`（平台）与 `nr_memory.c`（RA 内存支持），代码与导出符号保持
+迁移时的行为。`nr_math.c` 的 exp/log 表及
 `expf`、`logf`、`powf`、`tanhf`、`erff` 迁移自
 `examples/buddy-qwen35-fpga/runtime/src/qwen35_bare_math.c`；原文件注明其
 Arm exp/log 表来自 MIT licensed optimized-routines。
