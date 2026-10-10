@@ -1,0 +1,9 @@
+{
+  "architecture": "efficientnet_b3",
+  "huggingface_id": "timm/efficientnet_b3.ra2_in1k",
+  "num_classes": 1000,
+  "input_size": [3, 288, 288],
+  "layout": "NCHW",
+  "dtype": "float32",
+  "activation": "silu"
+}

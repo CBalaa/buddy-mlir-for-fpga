@@ -6,7 +6,7 @@
 ##
 ## Host check, Buddy lowering of kernel.mlir (or Triton-produced linalg),
 ## encode, link launch.c + NR runtime. Paths are taken from this file's
-## location so both example-root cases and model-cases/ resolve the same
+## location so every case directory next to this file resolves the same
 ## FPGA-BOSCAME tree. The example sits directly under FPGA-BOSCAME.
 ##
 ##===----------------------------------------------------------------------===//

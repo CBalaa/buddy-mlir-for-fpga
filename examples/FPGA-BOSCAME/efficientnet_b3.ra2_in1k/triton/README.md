@@ -23,19 +23,18 @@ source ../../common/triton/triton-env.sh
 "$TRITON_PYTHON" export.py --list
 ```
 
-先在上一级执行 `python3 -B ../tools/generate_cases.py`，保证每个 case 目录里有
-`kernel.mlir`、`metadata.json` 和 `launch.c`。
+图上的 case 和分类器 W8A8 都在上一级，和本目录同级。W8A8 三份由
+`../tools/generate_matmul.py` 和 `../tools/generate_quant.py` 写出。
 
 ## 构建和运行
 
 ```bash
-make export CASE=conv2d_stem_tiny
-make check CASE=conv2d_stem_tiny
+make export CASE=silu_1x6x1x1
+make check CASE=silu_1x6x1x1
 make check GROUP=smoke JOBS=2
-make run CASE=conv2d_stem_tiny FPGA=5
+make run CASE=silu_1x6x1x1 FPGA=5
 make run GROUP=smoke FPGA=5
 ```
 
 分组：`smoke`、`conv`、`linear`、`aux`、`all`。
-整模形状 case 在已提交的 `../model-cases/`（`cases.py` 自动加入搜索根）；
-额外目录仍可通过 `EFFNET_CASE_ROOTS` 注入。
+`cases.py` 搜索上一级的 case 目录。额外目录仍可通过 `EFFNET_CASE_ROOTS` 注入。

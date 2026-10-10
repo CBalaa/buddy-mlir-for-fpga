@@ -14,3 +14,13 @@ Requirements: image SHA256 match, DDR readback OK, one PASS line per case,
 `verify efficientnet operator suite: PASS`, and `[nr] RA returned: PASS`.
 
 Triton-fronted notes are in [triton/validation](../triton/validation/README.md).
+
+整模归档说明用同目录的 `operator-inventory-note.json` 和 `w8a8-rewrite.json`。成功的板上记录写到 `model/validation/board/`，该目录不入库。
+
+```bash
+python -B tools/archive_model_run.py \
+  --run ../build/fpga-runs/run-XXXX \
+  --prepared model/build/fp32-full/prepared \
+  --reference model/build/fp32-full/fp32-reference/host-reference.json \
+  --output model/validation/board/fp32-full-YYYYMMDD
+```

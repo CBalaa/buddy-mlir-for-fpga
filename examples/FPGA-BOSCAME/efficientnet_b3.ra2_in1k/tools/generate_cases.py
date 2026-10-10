@@ -488,53 +488,29 @@ def dwconv2d(root, h, w, c_in, kh, kw, sh, sw, ph, pw, tag=""):
     return c.emit(root)
 
 
+# Graph shapes are the case directories next to tools/. This generator no
+# longer writes reduced shapes that the 1x3x288x288 graph does not call.
 SMOKE = [
-    "silu_1x256", "sigmoid_1x32", "add_1x256", "mul_1x32",
-    "gap_9x9x32", "se_scale_9x9x32", "linear_1x16x32",
-    "conv2d_stem_tiny", "conv2d_1x1_9x9_32x16",
-    "dwconv2d_9x9x32_k3", "dwconv2d_10x10x16_k5",
+    "silu_1x6x1x1",
+    "conv2d_1x1_6x24_k1_s1",
+    "linear_1x1000x1536",
+    "quantize_1x1536",
+    "matmul_1x1000x1536",
+    "dequantize_1x1000",
 ]
 
 
 def catalog(root: Path, include_large=False):
     root = Path(root)
-    metas = [
-        pointwise(root, "silu", (1, 256)),
-        pointwise(root, "silu", (1, 1536)),
-        pointwise(root, "silu", (1, 384, 9, 9)),
-        pointwise(root, "sigmoid", (1, 32)),
-        pointwise(root, "sigmoid", (1, 384)),
-        pointwise(root, "add", (1, 256)),
-        pointwise(root, "add", (1, 384, 9, 9)),
-        pointwise(root, "mul", (1, 32)),
-        gap(root, 9, 9, 32),
-        gap(root, 9, 9, 384),
-        gap(root, 9, 9, 1536),
-        se_scale(root, 9, 9, 32),
-        se_scale(root, 9, 9, 384),
-        linear(root, 1, 16, 32),
-        linear(root, 1, 16, 384),
-        linear(root, 1, 384, 16),
-        linear(root, 1, 1000, 1536),
-        conv2d(root, 16, 16, 3, 8, 3, 3, 2, 2, 1, 1, "conv2d_stem_tiny"),
-        conv2d(root, 9, 9, 32, 16, 1, 1, 1, 1, 0, 0, "conv2d_1x1_9x9_32x16"),
-        conv2d(root, 9, 9, 384, 1536, 1, 1, 1, 1, 0, 0, "conv2d_head_1x1"),
-        conv2d(root, 18, 18, 96, 576, 1, 1, 1, 1, 0, 0),
-        conv2d(root, 18, 18, 576, 96, 1, 1, 1, 1, 0, 0),
-        dwconv2d(root, 9, 9, 32, 3, 3, 1, 1, 1, 1, "dwconv2d_9x9x32_k3"),
-        dwconv2d(root, 10, 10, 16, 5, 5, 1, 1, 2, 2, "dwconv2d_10x10x16_k5"),
-        dwconv2d(root, 18, 18, 576, 3, 3, 1, 1, 1, 1),
-    ]
-    if include_large:
-        metas.append(conv2d(root, 288, 288, 3, 40, 3, 3, 2, 2, 1, 1, "conv2d_stem_288"))
-    index = {
-        "count": len(metas),
-        "smoke": SMOKE,
-        "cases": [m["name"] for m in metas],
-    }
+    del include_large
+    names = []
+    for path in sorted(root.glob("*/metadata.json")):
+        if path.parent.name not in names:
+            names.append(path.parent.name)
+    index = {"count": len(names), "smoke": SMOKE, "cases": names}
     (root / "case-index.json").write_text(json.dumps(index, indent=2) + "\n")
-    print(f"wrote {len(metas)} cases under {root}")
-    return metas
+    print(f"indexed {len(names)} committed cases under {root}")
+    return names
 
 
 if __name__ == "__main__":

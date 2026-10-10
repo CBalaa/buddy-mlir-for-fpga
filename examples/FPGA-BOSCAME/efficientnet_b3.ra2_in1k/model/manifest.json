@@ -1,0 +1,7 @@
+{
+  "model": "timm/efficientnet_b3.ra2_in1k",
+  "weights": "not committed; tools/fetch_checkpoint.py writes model/assets/checkpoint",
+  "cases": "directories next to tools/, one real graph shape each",
+  "pipeline": "tools/run_full.sh",
+  "default_config": "fp32-full"
+}

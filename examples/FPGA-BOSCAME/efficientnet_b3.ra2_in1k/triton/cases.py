@@ -11,8 +11,9 @@
 # ===----------------------------------------------------------------------===//
 #
 # Read-only inventory. Imports no Triton package so `export.py --list` works
-# before the compiler environment exists. Graph shapes live in the committed
-# ``../model-cases/`` tree. Extra roots can be appended via EFFNET_CASE_ROOTS.
+# before the compiler environment exists. Graph shapes are the case
+# directories next to this triton/ tree. Extra roots can be appended via
+# EFFNET_CASE_ROOTS.
 #
 # ===----------------------------------------------------------------------===//
 """Static specializations of EfficientNet-B3 Triton kernels."""
@@ -22,27 +23,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 PARENT = ROOT.parent
-MODEL_CASES = PARENT / "model-cases"
 EXTRA_CASE_ROOTS = tuple(
     Path(entry) for entry in os.environ.get("EFFNET_CASE_ROOTS", "").split(os.pathsep)
     if entry
 )
 
 SMOKE = (
-    "silu_1x256", "sigmoid_1x32", "add_1x256", "mul_1x32",
-    "gap_9x9x32", "se_scale_9x9x32", "linear_1x16x32",
-    "conv2d_stem_tiny", "conv2d_1x1_9x9_32x16",
-    "dwconv2d_9x9x32_k3", "dwconv2d_10x10x16_k5",
-    "matmul_3x19x70", "quantize_1x16", "dequantize_1x16",
+    "silu_1x6x1x1",
+    "conv2d_1x1_6x24_k1_s1",
+    "linear_1x1000x1536",
+    "quantize_1x1536",
+    "matmul_1x1000x1536",
+    "dequantize_1x1000",
 )
 
 
 def case_search_roots():
-    roots = [PARENT]
-    if MODEL_CASES.is_dir():
-        roots.append(MODEL_CASES)
-    roots.extend(EXTRA_CASE_ROOTS)
-    return tuple(roots)
+    return (PARENT, *EXTRA_CASE_ROOTS)
 
 
 def case_directory(name):

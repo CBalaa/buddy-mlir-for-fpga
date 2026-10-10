@@ -6,9 +6,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # B is stored
-# [N,K], exposed as logical [K,N] with strided memref for i8; FP32 uses
-# transpose-B indexing maps. Shapes cover EfficientNet classifier / SE
-# linears plus a small AME tile-tail regression.
+# [N,K], exposed as logical [K,N] with strided memref for i8.
+# The only committed shape is the classifier linear 1x1000x1536.
 #
 # ===----------------------------------------------------------------------===//
 """Generate EfficientNet matmul_i8 / matmul_f32 operator cases."""
@@ -115,19 +114,8 @@ int launch(void) {{
 
 
 def generate(root):
-    # Classifier head + SE / smoke linears used by EfficientNet-B3.
-    shapes = (
-        (1, 1000, 1536, ["classifier"]),
-        (1, 16, 32, ["se_reduce_smoke"]),
-        (1, 16, 384, ["se_reduce"]),
-        (1, 384, 16, ["se_expand"]),
-        (1, 32, 16, ["se_expand_smoke"]),
-        # Tile-tail regression.
-        (3, 19, 70, ["nr_tail_regression"]),
-    )
-    for m, n, k, roles in shapes:
-        linear(root, m, n, k, roles)
-        linear(root, m, n, k, roles, True)
+    # W8A8 form of the classifier linear. FP32 of this shape is linear_1x1000x1536.
+    linear(root, 1, 1000, 1536, ["classifier"])
 
 
 if __name__ == "__main__":

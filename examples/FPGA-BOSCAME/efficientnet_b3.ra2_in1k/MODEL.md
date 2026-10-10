@@ -43,12 +43,12 @@ Linear + Sigmoid + channel mul）→ `1×1 project` → 残差（stride=1 且通
 | `gap` | 全局平均池化 | SE squeeze 与 head |
 | `se_scale` | 通道广播乘法 | SE excite |
 
-`quantize_*` / `matmul_i8` / `dequantize_*` 是分类器和 SE linear 的 W8A8
-微基准，和 FP32 算子放在同一套 case 目录里。生成入口：`make generate`。
+提交的目录只有图上会出现的形状，全部和本文件同级。其中 96 个是 FP32。
+分类器 `linear_1x1000x1536` 的 W8A8 形式是 `quantize_1x1536`、
+`matmul_1x1000x1536`、`dequantize_1x1000`。`make generate` 只刷新这三份。
 
 ## 静态样例
 
-`tools/generate_cases.py`、`tools/generate_matmul.py`、`tools/generate_quant.py`
-写出代表形状。每个目录含 `kernel.mlir`、`launch.c`（独立 C oracle）、
-`metadata.json` 和 `makefile`。图上的真实形状闭集在 `model-cases/`（96 个），
-已随仓库提交。
+每个 case 目录含 `kernel.mlir`、`launch.c`（独立 C oracle）、`metadata.json`
+和 `makefile`。图上的 FP32 闭集（96 个）已随仓库提交，和 W8A8 三份放在同一层。
+没有 `stem_tiny`、`1×256`、`3×19×70` 这种对不上图的样例。

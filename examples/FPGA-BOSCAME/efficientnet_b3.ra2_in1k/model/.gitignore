@@ -1,0 +1,5 @@
+# Weights and build trees stay out of the pull request.
+# SPDX-License-Identifier: Apache-2.0
+build/
+assets/
+validation/board/

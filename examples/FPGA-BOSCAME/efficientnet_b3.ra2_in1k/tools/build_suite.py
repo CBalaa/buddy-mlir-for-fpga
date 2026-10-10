@@ -99,10 +99,16 @@ def main():
     args=p.parse_args()
     if args.jobs<1:
         p.error('--jobs must be positive')
-    cases=[]
+    smoke={
+        'silu_1x6x1x1','conv2d_1x1_6x24_k1_s1','linear_1x1000x1536',
+        'quantize_1x1536','matmul_1x1000x1536','dequantize_1x1000'}
+    found={}
     for source in sorted(ROOT.glob('*/kernel.mlir')):
-        name=source.parent.name
-        meta=json.loads(source.with_name('metadata.json').read_text())
+        found.setdefault(source.parent.name, source.parent)
+    cases=[]
+    directories={}
+    for name, directory in sorted(found.items()):
+        meta=json.loads((directory/'metadata.json').read_text())
         kind=meta.get('kind','')
         selected=(args.group=='all'
                   or args.group=='ame' and kind=='matmul_i8'
@@ -110,27 +116,24 @@ def main():
                   or args.group=='linear' and kind in ('linear_f32','matmul_f32')
                   or args.group=='aux' and kind not in (
                       'conv2d_f32','dwconv2d_f32','linear_f32','matmul_i8','matmul_f32')
-                  or args.group=='smoke' and name in (
-                      'silu_1x256','sigmoid_1x32','add_1x256','mul_1x32',
-                      'gap_9x9x32','se_scale_9x9x32','linear_1x16x32',
-                      'conv2d_stem_tiny','conv2d_1x1_9x9_32x16',
-                      'dwconv2d_9x9x32_k3','dwconv2d_10x10x16_k5',
-                      'matmul_3x19x70','quantize_1x16','dequantize_1x16'))
+                  or args.group=='smoke' and name in smoke)
         if args.cases is not None:selected=name in args.cases
-        if selected:cases.append(name)
+        if selected:
+            cases.append(name)
+            directories[name]=directory
     if not cases: p.error('no matching operator cases')
     if args.cases and set(args.cases)-set(cases):p.error('unknown --case')
     out=ROOT/'build'/('suite-'+args.group+('-host' if args.host else ''))
     out.mkdir(parents=True,exist_ok=True)
     # Keep the build log and each stage in the original sample directory.
     makevars=shlex.split(os.environ.get('EFFNET_MAKE_FLAGS',''))
-    case_directory=ROOT/cases[0]
+    case_directory=directories[cases[0]]
     config=json.loads(subprocess.check_output(['make','--no-print-directory','-s','-C',str(case_directory),'print-config',*makevars],text=True))
     variables=config['variables']
     build_dir=Path(variables['BUILD'])
     target=str(build_dir/'host-check') if args.host else 'all'
     from concurrent.futures import ThreadPoolExecutor
-    def build(name):run(['make','-C',ROOT/name,target,*makevars])
+    def build(name):run(['make','-C',directories[name],target,*makevars])
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:list(pool.map(build,cases))
     cc=shlex.split(variables['HOST_CC' if args.host else 'RISCV_CC'])
     flags=shlex.split(variables['HOST_CFLAGS' if args.host else 'CFLAGS'])
@@ -140,9 +143,9 @@ def main():
         declarations.append('int '+symbol+'(void);')
         calls.append(f'  nr_puts("[{i+1}/{len(cases)}] {name} BEGIN\\r\\n"); failures += {symbol}() != 0;')
         obj=out/(name+'.o')
-        run([*cc,*flags,'-Dlaunch='+symbol,'-c',ROOT/name/'launch.c','-o',obj],cwd=case_directory)
+        run([*cc,*flags,'-Dlaunch='+symbol,'-c',directories[name]/'launch.c','-o',obj],cwd=case_directory)
         objects.append(obj)
-        objects.append(ROOT/name/build_dir/('kernel.host.ll' if args.host else 'kernel.o'))
+        objects.append(directories[name]/build_dir/('kernel.host.ll' if args.host else 'kernel.o'))
     suite=out/'suite.c'
     suite.write_text('#include "support.h"\n'+'\n'.join(declarations)+'\nint launch(void) {\n  unsigned failures=0;\n'+'\n'.join(calls)+'''\n  nr_puts("suite failed cases: "); nr_hex32(failures); nr_puts("\\r\\n");
   return print_check("efficientnet operator suite",failures,0.0f);
@@ -163,7 +166,7 @@ def main():
         run([*shlex.split(variables['RISCV_OBJCOPY']),'-O','binary',elf,image],cwd=case_directory)
     source_files={ROOT/'common.mk',ROOT/'support.h',ROOT/'support.c',Path(__file__).resolve(),ROOT/'tools/host_main.c',ROOT/'tools/vectorize_nr.py',FPGA/'common/toolchain.mk'}
     for name in cases:
-        source_files.update(ROOT/name/filename for filename in ('kernel.mlir','launch.c','metadata.json','makefile'))
+        source_files.update(directories[name]/filename for filename in ('kernel.mlir','launch.c','metadata.json','makefile'))
     if not args.host:
         source_files.add(FPGA/'common/uart/uart.h')
         for pattern in ('*.c','*.h','*.S','*.ld'):

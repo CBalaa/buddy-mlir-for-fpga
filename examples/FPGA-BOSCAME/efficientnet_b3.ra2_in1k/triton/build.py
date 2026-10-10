@@ -111,10 +111,9 @@ def ensure_export(case):
 def get_config(case, make_flags):
     """Read makefile print-config for this case directory.
 
-    HOST_CFLAGS / CFLAGS embed ``-I$(ROOT)`` relative to the case dir. Model
-    cases under ``model/build/.../model-cases`` override ROOT to a deeper
-    relative path than root-level smoke cases, so configs must not be shared
-    across different case directories.
+    HOST_CFLAGS / CFLAGS embed ``-I$(ROOT)`` from this file's location.
+    Configs are cached per case directory so two cases never share a
+    print-config result.
     """
     directory = Path(case["directory"])
     data = command(["make", "--no-print-directory", "-s", "-C", directory,

@@ -22,7 +22,8 @@ fetch → import → inventory → emit cases → Triton host+NR
 W8A8 图替换示例（需根目录 `make generate` 且 Triton 已编好对应 cases）：
 
 ```bash
-make -C model replace W8A8=1 TRITON_BUILD=../triton/build
+# 在例子根目录执行
+python3 -B tools/triton_call_replace.py --w8a8 --checkpoint model/assets/checkpoint --triton-build triton/build --output model/build/replacement --input-size 288
 # 随后用 build_nr_w8a8_segment.py / build_nr_w8a8_image.py 打包权重镜像
 ```
 
@@ -36,7 +37,7 @@ REPO="$(git rev-parse --show-toplevel)"
 MODEL="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k/model"
 EFF="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
 source "$EFF/env.sh"
-"$MODEL/tools/run_model.sh" "$MODEL/build/fp32-full/prepared" \
+"$EFF/tools/run_model.sh" "$MODEL/build/fp32-full/prepared" \
   --fpga=5 --capture-seconds=1800 --startup-timeout=900
 ```
 
@@ -51,7 +52,7 @@ verify efficientnet_b3.ra2_in1k: PASS
 归档（把 `RUN` 换成 fpga_run 打印的目录）：
 
 ```bash
-"$BUDDY_PYTHON" -B "$MODEL/tools/archive_model_run.py" \
+"$BUDDY_PYTHON" -B "$EFF/tools/archive_model_run.py" \
   --run "$REPO/examples/FPGA-BOSCAME/build/fpga-runs/run-XXXXXXXX" \
   --prepared "$MODEL/build/fp32-full/prepared" \
   --reference "$MODEL/build/fp32-full/fp32-reference/host-reference.json" \
@@ -67,29 +68,20 @@ EFF="$REPO/examples/FPGA-BOSCAME/efficientnet_b3.ra2_in1k"
 source "$EFF/env.sh"
 
 # 截断 1 个 stage，先确认替换与镜像（快）→ model/build/stage0/
-RUN_FPGA=0 bash "$EFF/model/tools/run_stage0.sh"
+RUN_FPGA=0 bash "$EFF/tools/run_stage0.sh"
 
 # 整模镜像（默认 CONFIG=fp32-full → model/build/fp32-full/）
-bash "$EFF/model/tools/run_full.sh"
+bash "$EFF/tools/run_full.sh"
 
 # 与 Qwen 相同的 build/<config>：例如板型前缀
-# CONFIG=ame-v05/fp32-full bash "$EFF/model/tools/run_full.sh"
+# CONFIG=ame-v05/fp32-full bash "$EFF/tools/run_full.sh"
 # 或 OUT=... 直接指定绝对路径
 
 # 编完立刻上板
-RUN_FPGA=1 FPGA=5 CAPTURE_SECONDS=1800 bash "$EFF/model/tools/run_full.sh"
+RUN_FPGA=1 FPGA=5 CAPTURE_SECONDS=1800 bash "$EFF/tools/run_full.sh"
 ```
 
-或分步：
-
-```bash
-cd "$EFF/model"
-make checkpoint
-make import inventory
-# 然后按 README 父目录第 3 节编 Triton / replace / lower / image
-make -C .. -C triton check GROUP=smoke   # 算子侧
-make full
-```
+分步脚本都在 `$EFF/tools/`：`fetch_checkpoint.py`、`import_model.py`、`triton_call_replace.py`、`lower_model_nr.py`、`build_model_image.py`、`run_model.sh`。算子侧先 `make -C "$EFF/triton" check GROUP=smoke`。
 
 ## 主机 EE（上板前可选）
 
@@ -97,14 +89,17 @@ make full
 
 ```bash
 # 需要已有 replacement + triton host kernels + fp32-reference
-make -C "$EFF/model" host-bridge \
-  TRITON_BUILD="$EFF/model/build/fp32-full/triton-build" \
-  REPLACE_DIR="$EFF/model/build/fp32-full/replacement"
-make -C "$EFF/model" host-run \
-  TRITON_BUILD="$EFF/model/build/fp32-full/triton-build" \
-  REPLACE_DIR="$EFF/model/build/fp32-full/replacement" \
-  REF_DIR="$EFF/model/build/fp32-full/fp32-reference" \
-  CHECKPOINT="$EFF/model/assets/checkpoint"
+OUT="$EFF/model/build/fp32-full/host-bridge" \
+ADAPTERS="$EFF/model/build/fp32-full/replacement/effnet_triton_adapters.c" \
+TRITON_BUILD="$EFF/model/build/fp32-full/triton-build" \
+bash "$EFF/tools/build_host_bridge.sh"
+"$BUDDY_PYTHON" -B "$EFF/tools/run_graph_host.py" \
+  --checkpoint "$EFF/model/assets/checkpoint" \
+  --output "$EFF/model/build/fp32-full/host-run" \
+  --reference-dir "$EFF/model/build/fp32-full/fp32-reference" \
+  --input-size 288 \
+  --replace --triton-build "$EFF/model/build/fp32-full/triton-build" \
+  --external-lib "$EFF/model/build/fp32-full/host-bridge/libeffnet_triton_host.so"
 ```
 
 ## 与 Qwen model/ 的对应关系
@@ -137,7 +132,7 @@ model/build/fp32-full/     # run_full.sh 默认（CONFIG=fp32-full）
   prepared/                # image.bin + weights.bin + ddr-load.plan
 model/build/stage0/        # run_stage0.sh 默认
 model/build/<config>/      # CONFIG=ame-v05/fp32-full 等
-../model-cases/            # 提交的整模静态 case 全集（run_* 默认使用）
+../silu_*/ ../conv2d_*/ … # 提交的整模静态 case，和 tools/ 同级
 model/validation/board/    # archive_model_run.py 归档（勿提交大二进制）
 ```
 

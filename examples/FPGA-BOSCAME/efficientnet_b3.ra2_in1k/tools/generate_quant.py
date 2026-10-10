@@ -137,11 +137,9 @@ int launch(void) {{
 
 
 def generate(root):
-    # Pair with generate_matmul.py EfficientNet shapes.
-    for m, k in ((1, 1536), (1, 32), (1, 384), (1, 16), (3, 70)):
-        quant(root, m, k)
-    for m, n in ((1, 1000), (1, 16), (1, 384), (1, 32), (3, 19)):
-        dequant(root, m, n)
+    # Pair with the classifier linear 1x1000x1536.
+    quant(root, 1, 1536)
+    dequant(root, 1, 1000)
 
 
 if __name__ == "__main__":
