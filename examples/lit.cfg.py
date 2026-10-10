@@ -54,6 +54,10 @@ config.substitutions.append(("%openmp_runtime_dir", config.openmp_runtime_dir))
 # directories.
 config.excludes = [
     "BOSCAMEFPGA",
+    # Board examples: each one has its own makefile-driven build
+    # (`make all`, `make audit`), which the FPGA test flow runs instead
+    # of lit.
+    "FPGA-BOSCAME",
     "BuddyLeNet",
     "BuddyBert",
     "BuddyLlama",

@@ -24,6 +24,11 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
+// The operation declarations below reference the SPM memory space attribute and
+// the DMA token type, so their classes must be visible first.
+#include "BOSCAME/BOSCAMEAttrs.h"
+#include "BOSCAME/BOSCAMETypes.h"
+
 #define GET_OP_CLASSES
 #include "BOSCAME/BOSCAME.h.inc"
 
