@@ -42,10 +42,21 @@
 #include "BOSCAME/Transform.h"
 #include "Bud/BudDialect.h"
 #include "Bud/BudOps.h"
+#include "Conversion/StructuredToMemref/Passes.h"
+#include "Conversion/TritonArithToLinalg/Passes.h"
+#include "Conversion/TritonPtrToMemref/Passes.h"
+#include "Conversion/TritonToBOSCAME/Passes.h"
+#include "Conversion/TritonToLinalgExperimental/Passes.h"
+#include "Conversion/TritonToStructured/Passes.h"
+#include "Conversion/TritonToUnstructured/Passes.h"
+#include "Conversion/UnstructuredToMemref/Passes.h"
 #include "DAP/DAPDialect.h"
 #include "DAP/DAPOps.h"
 #include "DIP/DIPDialect.h"
 #include "DIP/DIPOps.h"
+#include "Dialect/TPtr/IR/TPtrDialect.h"
+#include "Dialect/Triton/IR/Dialect.h"
+#include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 #include "Tile/TileDialect.h"
 #include "Tile/TileOps.h"
 #include "Trace/TraceDialect.h"
@@ -229,9 +240,28 @@ int main(int argc, char **argv) {
   registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
   buddy::trace::registerBufferizableOpInterfaceExternalModels(registry);
+  // Register the FPGA AME TTIR -> BOSCAME conversion.
+  mlir::triton::registerTritonToBOSCAMEPasses();
+  // Passes of the experimental TTIR -> Linalg pipeline driven by
+  // `--triton-to-linalg-experimental`.
+  mlir::triton::registerTritonToLinalgExperimentalPasses();
+  mlir::triton::registerTritonToStructuredPasses();
+  mlir::triton::registerTritonToUnstructuredPasses();
+  mlir::triton::registerTritonArithToLinalgPasses();
+  mlir::triton::registerStructuredToMemrefPasses();
+  mlir::triton::registerUnstructuredToMemrefPasses();
+  mlir::triton::registerTritonPtrToMemrefPasses();
   // Register dialects in buddy-mlir project.
   // clang-format off
-  registry.insert<buddy::bud::BudDialect,
+  // TTIR must be registered before MlirOptMain parses its input, otherwise
+  // `tt` ops in the input file would only be visible to passes that declare the
+  // dialect in getDependentDialects.  The same holds for the helper dialects of
+  // the experimental pipeline (`tts`, `tptr`), which appear in the IR between
+  // the individual stages.
+  registry.insert<mlir::triton::TritonDialect,
+                  mlir::tts::TritonStructuredDialect,
+                  mlir::tptr::TPtrDialect,
+                  buddy::bud::BudDialect,
                   buddy::dip::DIPDialect,
                   buddy::dap::DAPDialect,
                   buddy::rvv::RVVDialect,

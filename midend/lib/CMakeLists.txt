@@ -1,5 +1,7 @@
 add_subdirectory(CAPI)
 add_subdirectory(Dialect)
+add_subdirectory(Analysis)
+add_subdirectory(AnalysisStructured)
 add_subdirectory(Conversion)
 add_subdirectory(Target)
 add_subdirectory(Utils)
@@ -44,6 +46,16 @@ set(LinkedLibs
   EliminateLargeZeroConstants
   TraceInsert
   GraphRedundancyElimination
+  BuddyTritonIR
+  BuddyTritonAnalysisStructured
+  BuddyTritonArithToLinalg
+  BuddyTritonToStructured
+  BuddyTritonToUnstructured
+  BuddyTritonStructuredToMemref
+  BuddyTritonUnstructuredToMemref
+  BuddyTritonPtrToMemref
+  BuddyTritonToLinalgExperimental
+  BuddyTPtrIR
 )
 
 if(BUDDY_ENABLE_EXTERNAL_DIALECTS)

@@ -1,0 +1,8 @@
+add_subdirectory(TritonToBOSCAME)
+add_subdirectory(TritonArithToLinalg)
+add_subdirectory(TritonToStructured)
+add_subdirectory(TritonToUnstructured)
+add_subdirectory(StructuredToMemref)
+add_subdirectory(UnstructuredToMemref)
+add_subdirectory(TritonPtrToMemref)
+add_subdirectory(TritonToLinalgExperimental)
