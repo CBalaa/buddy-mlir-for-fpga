@@ -8,8 +8,8 @@
  *
  * Build and run (from the repository root):
  *   cc -std=c11 -Wall -Wextra -Werror \
- *      -I examples/FPGA-BOSCAME/common/runtime \
- *      examples/FPGA-BOSCAME/common/runtime/test_bosc_ame_dma.c \
+ *      -I runtime/boscame/runtime \
+ *      runtime/boscame/runtime/test_bosc_ame_dma.c \
  *      -o /tmp/bosc_ame_dma_test && /tmp/bosc_ame_dma_test
  *
  * bosc_ame_dma_wait has no result: it performs the completion barrier and then
@@ -49,12 +49,17 @@ static volatile uint64_t fake_regs[2][5];
  */
 static void test_fence(void);
 static uint64_t test_mmio_read64(uint32_t channel, uintptr_t offset);
-static void test_mmio_write64(uint32_t channel, uintptr_t offset, uint64_t value);
+static void test_mmio_write64(uint32_t channel, uintptr_t offset,
+                              uint64_t value);
+static void test_shared_writes(void);
+static void test_shared_reads(void);
 
 #define BOSC_AME_DMA_FENCE() test_fence()
-#define BOSC_AME_DMA_MMIO_READ64(channel, offset) \
+#define BOSC_AME_DMA_SHARED_WRITES() test_shared_writes()
+#define BOSC_AME_DMA_SHARED_READS() test_shared_reads()
+#define BOSC_AME_DMA_MMIO_READ64(channel, offset)                              \
   test_mmio_read64((channel), (offset))
-#define BOSC_AME_DMA_MMIO_WRITE64(channel, offset, value) \
+#define BOSC_AME_DMA_MMIO_WRITE64(channel, offset, value)                      \
   test_mmio_write64((channel), (offset), (value))
 
 #include "bosc_ame_dma.c"
@@ -65,12 +70,12 @@ static void test_mmio_write64(uint32_t channel, uintptr_t offset, uint64_t value
 
 static int failures;
 
-#define CHECK(cond)                                                      \
-  do {                                                                   \
-    if (!(cond)) {                                                       \
-      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);    \
-      ++failures;                                                        \
-    }                                                                    \
+#define CHECK(cond)                                                            \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);          \
+      ++failures;                                                              \
+    }                                                                          \
   } while (0)
 
 /* Register indices inside the fake file (byte offset / 8). */
@@ -85,6 +90,10 @@ static unsigned mmio_writes[2];
 static unsigned mmio_write_count;
 static uintptr_t mmio_write_offsets[16];
 static uint64_t mmio_write_values[16];
+static enum { POLICY_UNSET, POLICY_READ, POLICY_WRITE } ddr_policy;
+
+static void test_shared_writes(void) { ddr_policy = POLICY_WRITE; }
+static void test_shared_reads(void) { ddr_policy = POLICY_READ; }
 
 static void mmio_reset(void) {
   memset(mmio_reads, 0, sizeof(mmio_reads));
@@ -93,6 +102,7 @@ static void mmio_reset(void) {
 }
 
 static uint64_t test_mmio_read64(uint32_t channel, uintptr_t offset) {
+  CHECK(ddr_policy == POLICY_READ);
   CHECK(channel < 2u);
   CHECK(offset == BOSC_AME_DMA_STATUS_OFFSET);
   if (channel >= 2u || offset != BOSC_AME_DMA_STATUS_OFFSET)
@@ -101,7 +111,9 @@ static uint64_t test_mmio_read64(uint32_t channel, uintptr_t offset) {
   return fake_regs[channel][offset / sizeof(uint64_t)];
 }
 
-static void test_mmio_write64(uint32_t channel, uintptr_t offset, uint64_t value) {
+static void test_mmio_write64(uint32_t channel, uintptr_t offset,
+                              uint64_t value) {
+  CHECK(ddr_policy == POLICY_WRITE);
   CHECK(channel < 2u);
   CHECK(offset <= BOSC_AME_DMA_START_OFFSET);
   CHECK(offset % sizeof(uint64_t) == 0u);
@@ -119,6 +131,7 @@ static void test_mmio_write64(uint32_t channel, uintptr_t offset, uint64_t value
 }
 
 static void reset_regs(void) {
+  ddr_policy = POLICY_UNSET;
   for (unsigned channel = 0; channel < 2u; ++channel) {
     bosc_ame_dma_last_src[channel] = BOSC_AME_DMA_INVALID_TOKEN;
     for (unsigned reg = 0; reg < 5u; ++reg)
@@ -161,18 +174,18 @@ static void fail_reset(void) {
  * `reason` and `channel`.  `fail_status`/`fail_token` are left for the caller
  * to inspect.
  */
-#define EXPECT_FAIL(channel_value, token_value, reason_value)              \
-  do {                                                                     \
-    fail_reset();                                                          \
-    if (setjmp(fail_jmp) == 0) {                                           \
-      bosc_ame_dma_wait((channel_value), (token_value));                   \
-      CHECK(0 && "bosc_ame_dma_wait returned instead of failing");         \
-    } else {                                                               \
-      CHECK(fail_seen == 1);                                               \
-      CHECK(fail_channel == (channel_value));                              \
-      CHECK(fail_reason == (reason_value));                                \
-      CHECK(fail_token == (token_value));                                  \
-    }                                                                      \
+#define EXPECT_FAIL(channel_value, token_value, reason_value)                  \
+  do {                                                                         \
+    fail_reset();                                                              \
+    if (setjmp(fail_jmp) == 0) {                                               \
+      bosc_ame_dma_wait((channel_value), (token_value));                       \
+      CHECK(0 && "bosc_ame_dma_wait returned instead of failing");             \
+    } else {                                                                   \
+      CHECK(fail_seen == 1);                                                   \
+      CHECK(fail_channel == (channel_value));                                  \
+      CHECK(fail_reason == (reason_value));                                    \
+      CHECK(fail_token == (token_value));                                      \
+    }                                                                          \
   } while (0)
 
 /* ------------------------------------------------------------------ */
@@ -210,8 +223,8 @@ static void fence_reset(void) {
 }
 
 static void prepare_wait(uint32_t channel, uint64_t src) {
-  CHECK(bosc_ame_dma_start(channel, src, UINT64_C(0x80000000),
-                           UINT64_C(128)) == src);
+  CHECK(bosc_ame_dma_start(channel, src, UINT64_C(0x80000000), UINT64_C(128)) ==
+        src);
   mmio_reset();
   fence_reset();
 }
@@ -231,12 +244,12 @@ static void test_start_layout_and_token(void) {
 
   const uint64_t token = bosc_ame_dma_start(0u, src, dst, len);
 
-  CHECK(fake_regs[0][REG_SRC] == src);   /* SRC   at 0x00 */
-  CHECK(fake_regs[0][REG_DST] == dst);   /* DST   at 0x08 */
-  CHECK(fake_regs[0][REG_LEN] == len);   /* LEN   at 0x10 */
+  CHECK(fake_regs[0][REG_SRC] == src); /* SRC   at 0x00 */
+  CHECK(fake_regs[0][REG_DST] == dst); /* DST   at 0x08 */
+  CHECK(fake_regs[0][REG_LEN] == len); /* LEN   at 0x10 */
   CHECK(fake_regs[0][REG_START] == BOSC_AME_DMA_START_COMMAND); /* 0x18 */
-  CHECK(fake_regs[0][REG_STATUS] == UINT64_C(0xdeadbeef)); /* untouched */
-  CHECK(token == src);                   /* start returns the src token */
+  CHECK(fake_regs[0][REG_STATUS] == UINT64_C(0xdeadbeef));      /* untouched */
+  CHECK(token == src); /* start returns the src token */
   CHECK(bosc_ame_dma_last_src[0] == src);
   CHECK(mmio_reads[0] == 0u && mmio_reads[1] == 0u);
   CHECK(mmio_writes[0] == 4u && mmio_writes[1] == 0u);
@@ -263,6 +276,7 @@ static void test_wait_success(void) {
 
   bosc_ame_dma_wait(0u, src);
 
+  CHECK(ddr_policy == POLICY_READ);
   CHECK(fail_seen == 0);
   CHECK(mmio_reads[0] == 1u && mmio_reads[1] == 0u);
   CHECK(mmio_writes[0] == 1u && mmio_writes[1] == 0u);
@@ -478,10 +492,10 @@ static void test_mismatch_preserves_other_channel(void) {
 
   reset_regs();
   fence_reset();
-  CHECK(bosc_ame_dma_start(0u, src0, UINT64_C(0x80000000),
-                           UINT64_C(128)) == src0);
-  CHECK(bosc_ame_dma_start(1u, src1, UINT64_C(0x80000100),
-                           UINT64_C(128)) == src1);
+  CHECK(bosc_ame_dma_start(0u, src0, UINT64_C(0x80000000), UINT64_C(128)) ==
+        src0);
+  CHECK(bosc_ame_dma_start(1u, src1, UINT64_C(0x80000100), UINT64_C(128)) ==
+        src1);
   mmio_reset();
   fake_regs[0][REG_STATUS] = BOSC_AME_DMA_STATUS_BUS_ERROR;
   fake_regs[1][REG_STATUS] = UINT64_C(0);
@@ -516,10 +530,10 @@ static void test_mismatch_preserves_other_channel(void) {
  */
 #define SIM_BANK_COUNT 2u
 #define SIM_BANK_BYTES ((size_t)4096)
-#define SIM_DDR_BYTES  ((size_t)4096)
-#define SIM_DDR_BASE   UINT64_C(0x80000000)
+#define SIM_DDR_BYTES ((size_t)4096)
+#define SIM_DDR_BASE UINT64_C(0x80000000)
 #define SIM_GUARD_BYTES ((size_t)64)
-#define SIM_SENTINEL   ((uint8_t)0xA5)
+#define SIM_SENTINEL ((uint8_t)0xA5)
 
 /* The SPM bases of the hardware map, used as register payloads only. */
 #define SPM0_BASE_VAL ((uint64_t)BOSC_AME_SPM0_BASE)
@@ -529,13 +543,15 @@ static uint8_t sim_bank[SIM_BANK_COUNT][SIM_BANK_BYTES + 2 * SIM_GUARD_BYTES];
 static uint8_t sim_ddr[SIM_DDR_BYTES];
 
 static uint64_t sim_bank_base(unsigned bank) {
-  return bank == 0u ? (uint64_t)BOSC_AME_SPM0_BASE : (uint64_t)BOSC_AME_SPM1_BASE;
+  return bank == 0u ? (uint64_t)BOSC_AME_SPM0_BASE
+                    : (uint64_t)BOSC_AME_SPM1_BASE;
 }
 
 /* A byte range that stays inside [base, base + size). */
 static int sim_in_window(uint64_t addr, uint64_t base, size_t size,
                          uint64_t len) {
-  return addr >= base && len <= (uint64_t)size && addr - base <= (uint64_t)size - len;
+  return addr >= base && len <= (uint64_t)size &&
+         addr - base <= (uint64_t)size - len;
 }
 
 static int sim_bytes_are(const uint8_t *data, size_t size, uint8_t value) {
@@ -594,7 +610,8 @@ static int sim_commit(uint32_t channel, int force_bus_error) {
     return 0;
   }
 
-  memcpy(sim_bank[(unsigned)bank] + SIM_GUARD_BYTES + (size_t)(dst - sim_bank_base((unsigned)bank)),
+  memcpy(sim_bank[(unsigned)bank] + SIM_GUARD_BYTES +
+             (size_t)(dst - sim_bank_base((unsigned)bank)),
          sim_ddr + (size_t)(src - SIM_DDR_BASE), (size_t)len);
   fake_regs[channel][REG_STATUS] = UINT64_C(0); /* completed, not busy */
   return 1;
@@ -602,7 +619,7 @@ static int sim_commit(uint32_t channel, int force_bus_error) {
 
 /* A staged move into the bank, and the same bytes read straight from DDR. */
 static void test_staged_copy_matches_direct_copy(void) {
-  static const uint64_t src = SIM_DDR_BASE + UINT64_C(64);  /* non-zero offset */
+  static const uint64_t src = SIM_DDR_BASE + UINT64_C(64); /* non-zero offset */
   static const uint64_t dst = SPM0_BASE_VAL + UINT64_C(256);
   static const uint64_t len = UINT64_C(1024);
   uint8_t baseline[1024];
@@ -676,7 +693,8 @@ static void test_dual_channel_staging(void) {
   memcpy(baseline0, sim_ddr + (size_t)(src0 - SIM_DDR_BASE), (size_t)len);
   memcpy(baseline1, sim_ddr + (size_t)(src1 - SIM_DDR_BASE), (size_t)len);
   CHECK(memcmp(sim_bank[0] + SIM_GUARD_BYTES, baseline0, (size_t)len) == 0);
-  CHECK(memcmp(sim_bank[1] + SIM_GUARD_BYTES + 128u, baseline1, (size_t)len) == 0);
+  CHECK(memcmp(sim_bank[1] + SIM_GUARD_BYTES + 128u, baseline1, (size_t)len) ==
+        0);
 
   /* Each engine wrote only its own bank, and only inside its own window. */
   CHECK(sim_bank_outside_window_is_sentinel(0u, 0u, (size_t)len) == 1);
@@ -719,25 +737,24 @@ static void test_invalid_arguments(void) {
   reset_regs();
   fence_reset();
   /* Bad channel (>= 2). */
-  CHECK(bosc_ame_dma_start(2u, token_src, UINT64_C(0x80000000),
-                           UINT64_C(64)) == BOSC_AME_DMA_INVALID_TOKEN);
+  CHECK(bosc_ame_dma_start(2u, token_src, UINT64_C(0x80000000), UINT64_C(64)) ==
+        BOSC_AME_DMA_INVALID_TOKEN);
   /* Zero length. */
-  CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0x80000000),
-                           UINT64_C(0)) == BOSC_AME_DMA_INVALID_TOKEN);
+  CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0x80000000), UINT64_C(0)) ==
+        BOSC_AME_DMA_INVALID_TOKEN);
   /* Length not a multiple of 64. */
-  CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0x80000000),
-                           UINT64_C(63)) == BOSC_AME_DMA_INVALID_TOKEN);
+  CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0x80000000), UINT64_C(63)) ==
+        BOSC_AME_DMA_INVALID_TOKEN);
   /* Misaligned source. */
-  CHECK(bosc_ame_dma_start(0u, token_src | UINT64_C(1),
-                           UINT64_C(0x80000000),
+  CHECK(bosc_ame_dma_start(0u, token_src | UINT64_C(1), UINT64_C(0x80000000),
                            UINT64_C(64)) == BOSC_AME_DMA_INVALID_TOKEN);
   /* Misaligned destination. */
   CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0x80000000) | UINT64_C(8),
                            UINT64_C(64)) == BOSC_AME_DMA_INVALID_TOKEN);
   CHECK(bosc_ame_dma_start(0u, UINT64_C(0), UINT64_C(0x80000000),
                            UINT64_C(64)) == BOSC_AME_DMA_INVALID_TOKEN);
-  CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0),
-                           UINT64_C(64)) == BOSC_AME_DMA_INVALID_TOKEN);
+  CHECK(bosc_ame_dma_start(0u, token_src, UINT64_C(0), UINT64_C(64)) ==
+        BOSC_AME_DMA_INVALID_TOKEN);
   CHECK(mmio_write_count == 0u);
   CHECK(mmio_reads[0] == 0u && mmio_reads[1] == 0u);
   /* No register may have been written by any rejected call. */
@@ -750,9 +767,8 @@ static void test_invalid_arguments(void) {
 
   /* A rejected call must not overwrite the token of an existing launch. */
   prepare_wait(0u, token_src);
-  CHECK(bosc_ame_dma_start(0u, token_src + UINT64_C(0x40),
-                           UINT64_C(0x80000000), UINT64_C(63)) ==
-        BOSC_AME_DMA_INVALID_TOKEN);
+  CHECK(bosc_ame_dma_start(0u, token_src + UINT64_C(0x40), UINT64_C(0x80000000),
+                           UINT64_C(63)) == BOSC_AME_DMA_INVALID_TOKEN);
   CHECK(bosc_ame_dma_last_src[0] == token_src);
   CHECK(mmio_write_count == 0u && mmio_reads[0] == 0u);
   CHECK(fake_regs[0][REG_SRC] == token_src);
@@ -760,9 +776,24 @@ static void test_invalid_arguments(void) {
 }
 #endif /* NDEBUG */
 
+static void test_cpu_ddr_policy(void) {
+  reset_regs();
+  bosc_ame_ddr_write_begin();
+  CHECK(ddr_policy == POLICY_WRITE);
+  bosc_ame_ddr_read_begin();
+  CHECK(ddr_policy == POLICY_READ);
+  bosc_ame_ddr_write_begin();
+  CHECK(ddr_policy == POLICY_WRITE);
+  CHECK(mmio_write_count == 0u);
+  CHECK(mmio_reads[0] == 0u && mmio_reads[1] == 0u);
+  CHECK(bosc_ame_dma_last_src[0] == BOSC_AME_DMA_INVALID_TOKEN);
+  CHECK(bosc_ame_dma_last_src[1] == BOSC_AME_DMA_INVALID_TOKEN);
+}
+
 int main(void) {
   bosc_ame_dma_fail_hook = test_fail_hook;
 
+  test_cpu_ddr_policy();
   test_start_layout_and_token();
   test_wait_success();
   test_wait_failures();

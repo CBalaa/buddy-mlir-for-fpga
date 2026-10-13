@@ -76,18 +76,18 @@ extern "C" {
 #define BOSC_AME_DMA1_BASE ((uintptr_t)UINT32_C(0x60010000))
 #endif
 
-#define BOSC_AME_DMA_CHANNELS      UINT32_C(2)
+#define BOSC_AME_DMA_CHANNELS UINT32_C(2)
 #define BOSC_AME_DMA_CHANNEL_STRIDE UINT32_C(0x10000)
 
 /* Byte offsets inside one DMA channel register file. */
-#define BOSC_AME_DMA_SRC_OFFSET    UINT32_C(0x00)
-#define BOSC_AME_DMA_DST_OFFSET    UINT32_C(0x08)
-#define BOSC_AME_DMA_LEN_OFFSET    UINT32_C(0x10)
-#define BOSC_AME_DMA_START_OFFSET  UINT32_C(0x18)
+#define BOSC_AME_DMA_SRC_OFFSET UINT32_C(0x00)
+#define BOSC_AME_DMA_DST_OFFSET UINT32_C(0x08)
+#define BOSC_AME_DMA_LEN_OFFSET UINT32_C(0x10)
+#define BOSC_AME_DMA_START_OFFSET UINT32_C(0x18)
 #define BOSC_AME_DMA_STATUS_OFFSET UINT32_C(0x20)
 
 /* STATUS bits. */
-#define BOSC_AME_DMA_STATUS_BUSY      UINT64_C(0x1)
+#define BOSC_AME_DMA_STATUS_BUSY UINT64_C(0x1)
 #define BOSC_AME_DMA_STATUS_BUS_ERROR UINT64_C(0x2)
 
 /* Transfer granularity / required endpoint alignment, in bytes. */
@@ -156,6 +156,18 @@ extern bosc_ame_dma_fail_fn bosc_ame_dma_fail_hook;
 /* ------------------------------------------------------------------ */
 /* ABI implemented by bosc_ame_dma.c and emitted by the MLIR pass     */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Select the delivered E6 DDR access policy, draining earlier accesses with
+ * a fence before changing CSR 0xbc0. Platform PMP setup is required first.
+ * read_begin selects uncached DDR loads so DMA-written data is visible;
+ * write_begin restores the policy required for CPU DDR stores. A DDR
+ * read/modify/write must select reads, load its operands, then select writes
+ * before storing. dma_wait leaves the read policy active. These helpers do
+ * not access SPM or launch/complete a DMA; they are no-ops on host builds.
+ */
+void bosc_ame_ddr_read_begin(void);
+void bosc_ame_ddr_write_begin(void);
 
 /*
  * Program SRC, DST, LEN and then START on the given channel, in that order.

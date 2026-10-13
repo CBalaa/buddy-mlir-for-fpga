@@ -66,7 +66,13 @@ __nh_e6_ddr_window_end = 0x80300000;
 | 接口 | `0xbc0` | 用途 |
 | --- | --- | --- |
 | `nh_e6_cache_writes()` | `0x0f0f0f0f0f0f0f0f` | 写通 store、cached load；阶段边界恢复写策略 |
-| `nh_e6_cache_uncached_loads()` | `0x0f0f000f000f000f` | 写通 store、uncached load；读取 DMA 刚写入的数据前使用 |
+| `nh_e6_cache_uncached_loads()` | `0x0f0f000f000f000f` | uncached load；读取 DMA 刚写入的数据前使用，随后写 DDR 时必须恢复写策略 |
+
+`dma_wait` 返回时保留读策略。读完 DMA 结果后若要写 DDR，必须重新选择写策略；
+不能把读策略当成可持续写入的状态。TTIR → BOSCAME pass 通过 DMA runtime 的
+`bosc_ame_ddr_read_begin()`／`bosc_ame_ddr_write_begin()` 为 DDR packing、初值填充
+和收尾的 load/add/store 生成这两个切换，顺序是读策略 → load → 写策略 → store。
+这些 helper 与上表使用同样的 fence/CSR 值，不访问 SPM。
 
 阶段切换仍是 `nh_e6_progress(marker)` → `nh_e6_cache_writes()`（GEMM 应用里
 的 `e6_stage()`），阶段标记和访问顺序不变。与迁移前相比，写策略前多了一条
@@ -87,7 +93,7 @@ __nh_e6_ddr_window_end = 0x80300000;
 | UART | `common/uart` 的 `0x310b0000` 驱动，只有 NH 访问 |
 | E6 地址空间 | 七个 TOR PMP 区域、`satp=0`（bare）、切换后 `sfence.vma`；SPM／DMA 常量取自 `bosc_ame_dma.h` |
 | DDR staging 窗口 | 样例 `link.ld` 导出的 `__nh_e6_ddr_window_start`／`__nh_e6_ddr_window_end`（GEMM：`[0x80100000, 0x80300000)`） |
-| CSR `0xbc0` | 写通 store：`0x0f0f0f0f0f0f0f0f`；写通 store＋uncached load：`0x0f0f000f000f000f`，均由平台接口写入 |
+| CSR `0xbc0` | 写策略：`0x0f0f0f0f0f0f0f0f`；读策略：`0x0f0f000f000f000f`，均在前置 fence 后写入 |
 
 访问顺序保持原 `launcher.S` 的写法：清零三个寄存器 → `fence iorw, iorw` →
 写 PC／control=0／release=1／control=1 → `fence iorw, iorw`；轮询每轮先

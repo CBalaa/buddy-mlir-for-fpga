@@ -20,8 +20,7 @@
  */
 #ifndef BOSC_AME_DMA_FENCE
 #if defined(__riscv)
-#define BOSC_AME_DMA_FENCE() \
-  __asm__ volatile("fence iorw, iorw" ::: "memory")
+#define BOSC_AME_DMA_FENCE() __asm__ volatile("fence iorw, iorw" ::: "memory")
 #else
 #define BOSC_AME_DMA_FENCE() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #endif
@@ -33,9 +32,11 @@
 
 /*
  * The delivered patch7 DMA/SPM reference uses CSR 0xbc0 to select write-through
- * stores and uncached loads: E6 cannot complete an uncached store miss.  Follow
- * its `shared_writes` before programming SRC/DST/LEN/START and `shared_reads`
- * before observing STATUS, draining prior accesses before each policy change.
+ * stores and uncached loads. Follow its `shared_writes` before DDR stores or
+ * programming SRC/DST/LEN/START and `shared_reads` before DDR loads or STATUS.
+ * The read policy left by dma_wait must be switched back before subsequent
+ * CPU DDR stores; a read/modify/write needs both transitions. Drain prior
+ * accesses before each policy change.
  * The caller must first configure the platform's PMP regions as that reference
  * does; these CSR values must not be used with unspecified region boundaries.
  * See test/src/cases/nh_e6_dma_spm/src/main.c in the hardware delivery.
@@ -45,14 +46,14 @@
  */
 #ifndef BOSC_AME_DMA_SHARED_WRITES
 #if defined(__riscv)
-#define BOSC_AME_DMA_SHARED_WRITES()                                       \
-  __asm__ volatile("fence iorw, iorw\n\tcsrw 0xbc0, %0"                     \
-                   :: "r"(UINT64_C(0x0f0f0f0f0f0f0f0f))                   \
-                   : "memory")
-#define BOSC_AME_DMA_SHARED_READS()                                        \
-  __asm__ volatile("fence iorw, iorw\n\tcsrw 0xbc0, %0"                     \
-                   :: "r"(UINT64_C(0x0f0f000f000f000f))                   \
-                   : "memory")
+#define BOSC_AME_DMA_SHARED_WRITES()                                           \
+  __asm__ volatile(                                                            \
+      "fence iorw, iorw\n\tcsrw 0xbc0, %0" ::"r"(UINT64_C(0x0f0f0f0f0f0f0f0f)) \
+      : "memory")
+#define BOSC_AME_DMA_SHARED_READS()                                            \
+  __asm__ volatile(                                                            \
+      "fence iorw, iorw\n\tcsrw 0xbc0, %0" ::"r"(UINT64_C(0x0f0f000f000f000f)) \
+      : "memory")
 #else
 #define BOSC_AME_DMA_SHARED_WRITES() ((void)0)
 #define BOSC_AME_DMA_SHARED_READS() ((void)0)
@@ -88,13 +89,14 @@ static inline volatile uint64_t *bosc_ame_dma_reg(uint32_t channel,
   return (volatile uint64_t *)(bosc_ame_dma_base(channel) + byte_offset);
 }
 
-/* Tests can observe register transactions without making write-only SRC readable. */
+/* Tests can observe register transactions without making write-only SRC
+ * readable. */
 #ifndef BOSC_AME_DMA_MMIO_READ64
-#define BOSC_AME_DMA_MMIO_READ64(channel, offset) \
+#define BOSC_AME_DMA_MMIO_READ64(channel, offset)                              \
   (*bosc_ame_dma_reg((channel), (offset)))
 #endif
 #ifndef BOSC_AME_DMA_MMIO_WRITE64
-#define BOSC_AME_DMA_MMIO_WRITE64(channel, offset, value) \
+#define BOSC_AME_DMA_MMIO_WRITE64(channel, offset, value)                      \
   (*bosc_ame_dma_reg((channel), (offset)) = (value))
 #endif
 
@@ -106,10 +108,14 @@ static inline int bosc_ame_dma_valid_channel(uint32_t channel) {
 static inline int bosc_ame_dma_valid_transfer(uint64_t src, uint64_t dst,
                                               uint64_t len) {
   const uint64_t align = (uint64_t)BOSC_AME_DMA_ALIGNMENT;
-  if (src == BOSC_AME_DMA_INVALID_TOKEN || dst == 0u) return 0;
-  if (len == 0u) return 0;
-  if ((len % align) != 0u) return 0;
-  if (((src | dst) & (align - 1u)) != 0u) return 0;
+  if (src == BOSC_AME_DMA_INVALID_TOKEN || dst == 0u)
+    return 0;
+  if (len == 0u)
+    return 0;
+  if ((len % align) != 0u)
+    return 0;
+  if (((src | dst) & (align - 1u)) != 0u)
+    return 0;
   return 1;
 }
 
@@ -145,6 +151,10 @@ bosc_ame_dma_fail_fn bosc_ame_dma_fail_hook = bosc_ame_dma_default_fail;
 /* Public ABI                                                         */
 /* ------------------------------------------------------------------ */
 
+void bosc_ame_ddr_read_begin(void) { BOSC_AME_DMA_SHARED_READS(); }
+
+void bosc_ame_ddr_write_begin(void) { BOSC_AME_DMA_SHARED_WRITES(); }
+
 uint64_t bosc_ame_dma_start(uint32_t channel, uint64_t src, uint64_t dst,
                             uint64_t len) {
   /*
@@ -178,7 +188,7 @@ uint64_t bosc_ame_dma_start(uint32_t channel, uint64_t src, uint64_t dst,
 
   /* START is the last store; it launches the transfer and clears bus_error. */
   BOSC_AME_DMA_MMIO_WRITE64(channel, BOSC_AME_DMA_START_OFFSET,
-                           BOSC_AME_DMA_START_COMMAND);
+                            BOSC_AME_DMA_START_COMMAND);
 
   /*
    * Fence #2, after START: keeps the launch store ordered ahead of any later
@@ -262,8 +272,8 @@ void bosc_ame_dma_wait(uint32_t channel, uint64_t src_token) {
                            src_token);
     __builtin_unreachable();
   }
-  if ((status & (BOSC_AME_DMA_STATUS_BUSY |
-                 BOSC_AME_DMA_STATUS_BUS_ERROR)) != 0u) {
+  if ((status & (BOSC_AME_DMA_STATUS_BUSY | BOSC_AME_DMA_STATUS_BUS_ERROR)) !=
+      0u) {
     uint32_t reason = (status & BOSC_AME_DMA_STATUS_BUS_ERROR) != 0u
                           ? BOSC_AME_DMA_FAIL_BUS_ERROR
                           : BOSC_AME_DMA_FAIL_BUSY;

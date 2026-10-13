@@ -51,15 +51,14 @@
 #define NH_E6_SYSCTRL_BASE ((uintptr_t)UINT32_C(0x50000000))
 #endif
 
-#define NH_E6_SYSCTRL(offset) \
-  (NH_E6_SYSCTRL_BASE + (uintptr_t)(offset))
+#define NH_E6_SYSCTRL(offset) (NH_E6_SYSCTRL_BASE + (uintptr_t)(offset))
 
-#define NH_E6_E6_PC_REG      NH_E6_SYSCTRL(UINT32_C(0x100))
+#define NH_E6_E6_PC_REG NH_E6_SYSCTRL(UINT32_C(0x100))
 #define NH_E6_E6_CONTROL_REG NH_E6_SYSCTRL(UINT32_C(0x060))
 #define NH_E6_E6_RELEASE_REG NH_E6_SYSCTRL(UINT32_C(0x050))
-#define NH_E6_DONE_REG       NH_E6_SYSCTRL(UINT32_C(0x120))
-#define NH_E6_RESULT_REG     NH_E6_SYSCTRL(UINT32_C(0x140))
-#define NH_E6_MAILBOX_REG    NH_E6_SYSCTRL(UINT32_C(0x160))
+#define NH_E6_DONE_REG NH_E6_SYSCTRL(UINT32_C(0x120))
+#define NH_E6_RESULT_REG NH_E6_SYSCTRL(UINT32_C(0x140))
+#define NH_E6_MAILBOX_REG NH_E6_SYSCTRL(UINT32_C(0x160))
 
 /* Released by writing 1; the control register is cleared before release. */
 #define NH_E6_E6_RELEASE_VALUE UINT32_C(1)
@@ -137,18 +136,18 @@ void nh_e6_e6_main(void);
 void nh_e6_platform_init(void);
 
 /*
- * CSR 0xbc0 cache policies of the delivered E6.  The core can not complete an
- * uncached store miss, so stores stay write-through; only the load behaviour is
- * switched, and only after the preceding writes have drained.  Both write
+ * CSR 0xbc0 cache policies of the delivered E6. Select the write policy before
+ * CPU DDR stores and uncached loads before reading DMA-written data. A
+ * read/modify/write needs both transitions; the read policy left by dma_wait
+ * must not be relied on for subsequent DDR stores. Both write
  * `fence iorw, iorw` then `csrw 0xbc0` and must run after
  * `nh_e6_platform_init()`:
  *
  *   nh_e6_cache_writes()         0x0f0f0f0f0f0f0f0f: write-through stores,
  *                                cached loads -- the default at phase
  *                                boundaries, before DMA staging writes.
- *   nh_e6_cache_uncached_loads() 0x0f0f000f000f000f: write-through stores,
- *                                uncached loads -- before reading data the DMA
- *                                engines have just written (the scalar oracle).
+ *   nh_e6_cache_uncached_loads() 0x0f0f000f000f000f: uncached loads -- before
+ * reading data the DMA engines have just written (the scalar oracle).
  */
 void nh_e6_cache_writes(void);
 void nh_e6_cache_uncached_loads(void);
@@ -168,8 +167,10 @@ void nh_e6_progress(uint32_t marker);
  * trap that follows is captured by the E6 trap entry and reported by NH as
  * TRAP with the DMA context line.
  */
-__attribute__((noreturn)) void nh_e6_publish_dma_failure(
-    uint32_t channel, uint32_t reason, uint64_t status, uint64_t src_token);
+__attribute__((noreturn)) void nh_e6_publish_dma_failure(uint32_t channel,
+                                                         uint32_t reason,
+                                                         uint64_t status,
+                                                         uint64_t src_token);
 
 /*
  * Line prefixes for the NH report: `[5.5296MHz][<tag>] ` (lifecycle lines) and
