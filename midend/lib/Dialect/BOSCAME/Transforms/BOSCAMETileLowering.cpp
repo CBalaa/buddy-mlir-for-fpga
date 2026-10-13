@@ -55,6 +55,7 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -287,57 +288,138 @@ bool isTileValueProducer(Operation *op) {
       op);
 }
 
-/// The first version has no matrix-value ABI: a matrix value has to be produced
-/// by a tile operation in the same block, and it may only feed a `tile.mma` or
-/// a `tile.store_acc`.
+/// True when `value` is a legal *source* of a matrix value.
+///
+/// There is still no matrix-value ABI - a function argument, a call result or a
+/// value produced by an unrelated operation is rejected - but a matrix value
+/// may travel through structured control flow, which is what lets an
+/// accumulator stay in the register file across a reduction loop:
+///
+///   * the result of a `bosc_ame.tile.*` operation,
+///   * an `scf.for` region iter-argument (a loop-carried matrix value),
+///   * for nested reductions, the result of an `scf.for` that yielded one.
+///
+/// `origin` is filled with the accepted producer for the diagnostics.
+bool isMatrixValueSource(Value value, StringRef &origin) {
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    auto forOp =
+        dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
+    if (forOp && llvm::is_contained(forOp.getRegionIterArgs(), value)) {
+      origin = "an `scf.for` region iter-argument";
+      return true;
+    }
+    return false;
+  }
+  Operation *defining = value.getDefiningOp();
+  if (isTileValueProducer(defining)) {
+    origin = "a `bosc_ame.tile.*` operation";
+    return true;
+  }
+  if (isa_and_nonnull<scf::ForOp>(defining)) {
+    origin = "the result of an `scf.for`";
+    return true;
+  }
+  return false;
+}
+
+bool isMatrixValueType(Value value) {
+  auto vector = dyn_cast<VectorType>(value.getType());
+  return vector && vector.getRank() == 2;
+}
+
+/// The first version has no matrix-value ABI: a matrix value has to come from a
+/// tile operation or from an enclosing `scf.for` (a loop-carried accumulator),
+/// and it may only feed a `tile.mma`, a `tile.store_acc`, a loop yield or a
+/// loop's initial value.
 ///
 /// This is a rule about the *values*, not about registers: which tile or
 /// accumulator register holds a value is the backend's decision, and neither
 /// the tile operations nor this pass ever name one.
 LogicalResult verifyBlockTileValues(Block &block) {
   bool ok = true;
-  for (Operation &op : block) {
-    auto requireTileValue = [&](Value value, StringRef what) -> void {
-      if (!isTileValueProducer(value.getDefiningOp())) {
-        op.emitOpError()
-            << what << " (" << value
-            << ") must be produced by a `bosc_ame.tile.*` operation; the first "
-               "version has no matrix-value ABI, so a matrix value has to come "
-               "from a tile load, a tile load_acc or a tile.mma";
-        ok = false;
-        return;
-      }
-      if (value.getDefiningOp()->getBlock() != &block) {
-        op.emitOpError()
-            << what << " (" << value
-            << ") is defined in another block; the first version has no "
-               "matrix-value ABI and does not carry a matrix value across "
-               "control flow";
-        ok = false;
-      }
-    };
+  auto requireMatrixSource = [&](Operation *consumer, Value value,
+                                 StringRef what) -> void {
+    StringRef origin;
+    if (isMatrixValueSource(value, origin))
+      return;
+    consumer->emitOpError()
+        << what << " (" << value
+        << ") must be produced by a `bosc_ame.tile.*` operation or carried by "
+           "an enclosing `scf.for`; the first version has no matrix-value ABI, "
+           "so a matrix value may not enter from a function argument, a call "
+           "or an unrelated operation";
+    ok = false;
+  };
 
+  for (Operation &op : block) {
     if (auto mma = dyn_cast<TileMmaOp>(&op)) {
-      requireTileValue(mma.getAcc(), "the accumulator operand");
-      requireTileValue(mma.getLhs(), "the A operand");
-      requireTileValue(mma.getRhs(), "the B operand");
+      requireMatrixSource(&op, mma.getAcc(), "the accumulator operand");
+      requireMatrixSource(&op, mma.getLhs(), "the A operand");
+      requireMatrixSource(&op, mma.getRhs(), "the B operand");
       continue;
     }
     if (auto store = dyn_cast<TileStoreAccOp>(&op))
-      requireTileValue(store.getMatrix(), "the stored matrix value");
+      requireMatrixSource(&op, store.getMatrix(), "the stored matrix value");
   }
 
+  // A matrix value that leaves the block: only the structured loop forms may
+  // carry it, and the type has to be preserved along the way.  A region
+  // terminator that carries nothing - the usual `scf.if` body - is not this
+  // rule's business.
+  if (block.mightHaveTerminator())
+    if (auto yield = dyn_cast<scf::YieldOp>(block.getTerminator())) {
+      auto forOp = dyn_cast<scf::ForOp>(block.getParentOp());
+      for (auto [index, yielded] : llvm::enumerate(yield.getOperands())) {
+        if (!isMatrixValueType(yielded))
+          continue;
+        if (!forOp) {
+          yield.emitOpError()
+              << "yields the matrix value " << yielded
+              << " from a region that is not an `scf.for`; matrix values only "
+                 "cross structured loops";
+          ok = false;
+          continue;
+        }
+        if (index >= forOp.getNumRegionIterArgs() ||
+            yielded.getType() != forOp.getRegionIterArg(index).getType()) {
+          yield.emitOpError()
+              << "yields " << yielded.getType() << " at position " << index
+              << " but the loop does not carry a matching value";
+          ok = false;
+          continue;
+        }
+        requireMatrixSource(yield.getOperation(), yielded,
+                            "the yielded matrix value");
+      }
+    }
+
   for (Operation &op : block) {
+    if (auto forOp = dyn_cast<scf::ForOp>(&op)) {
+      for (auto [index, init] : llvm::enumerate(forOp.getInitArgs())) {
+        if (!isMatrixValueType(forOp.getRegionIterArg(index)))
+          continue;
+        if (init.getType() != forOp.getRegionIterArg(index).getType()) {
+          forOp.emitOpError()
+              << "initializes the loop-carried " << init.getType()
+              << " at position " << index << " but carries "
+              << forOp.getRegionIterArg(index).getType();
+          ok = false;
+          continue;
+        }
+        requireMatrixSource(forOp.getOperation(), init,
+                            "the loop-carried initial value");
+      }
+    }
     if (!isTileValueProducer(&op))
       continue;
     for (Value result : op.getResults())
       for (Operation *user : result.getUsers())
-        if (!isa<TileMmaOp, TileStoreAccOp>(user)) {
+        if (!isa<TileMmaOp, TileStoreAccOp, scf::YieldOp, scf::ForOp>(user)) {
           user->emitOpError()
               << "uses the matrix value " << result
               << " as a regular operand; a matrix value may only feed a "
-                 "`bosc_ame.tile.mma` or a `bosc_ame.tile.store_acc` in the "
-                 "first version";
+                 "`bosc_ame.tile.mma`, a `bosc_ame.tile.store_acc` or an "
+                 "`scf.for` that carries it";
           ok = false;
         }
   }
@@ -386,10 +468,15 @@ buddy::boscame::resolveTileTargetProfile(ModuleOp module,
 }
 
 LogicalResult buddy::boscame::verifyBOSCAMETileValues(ModuleOp module) {
+  // Walk every region, not just the entry block of every function: a matrix
+  // value that crosses a loop is checked in the block that actually carries it,
+  // and a nested region with a broken matrix value must not be able to hide
+  // behind a legal outer block.
   bool ok = true;
-  module.walk([&](func::FuncOp function) {
-    for (Block &block : function.getBody())
-      ok &= succeeded(verifyBlockTileValues(block));
+  module.walk([&](Operation *op) {
+    for (Region &region : op->getRegions())
+      for (Block &block : region)
+        ok &= succeeded(verifyBlockTileValues(block));
   });
   return success(ok);
 }

@@ -581,19 +581,6 @@ void prepareVectorOps(ModuleOp module, MLIRContext &context) {
   (void)applyPatternsGreedily(module, std::move(patterns));
 }
 
-/// Convert loop-carried BOSCAME matrix values to the scalable register type so
-/// that SCF can be lowered to a CFG without leaving a fixed-vector bridge.
-LogicalResult convertScfStructure(ModuleOp module, MLIRContext &context) {
-  LLVMTypeConverter converter(&context);
-  addBOSCAMETypeConversions(converter);
-  ConversionTarget target(context);
-  target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
-  RewritePatternSet patterns(&context);
-  scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
-                                                       target);
-  return applyPartialConversion(module, target, std::move(patterns));
-}
-
 /// The final conversion: BOSCAME / SPM / DMA / tile plus every standard dialect
 /// that still stands between the module and LLVM.
 LogicalResult convertToLLVM(ModuleOp module, MLIRContext &context,
@@ -623,6 +610,15 @@ LogicalResult convertToLLVM(ModuleOp module, MLIRContext &context,
   // they do not run a conversion of their own.
   populateBOSCAMETileLoweringPatterns(converter, patterns, tileOptions);
 
+  // A loop that carries an AME matrix value changes the type of its iter
+  // arguments.  The structural SCF conversion has to run inside this same
+  // conversion - and before SCF is lowered to a CFG - so that the loop itself,
+  // the value it carries and the tile operations that produce and consume that
+  // value are all rewritten against one converter; a separate type-conversion
+  // pass would have to bridge the two conversions with casts that could not be
+  // reconciled afterwards.
+  scf::populateSCFStructuralTypeConversions(converter, patterns,
+                                            PatternBenefit(10));
   arith::populateArithToLLVMConversionPatterns(converter, patterns);
   index::populateIndexToLLVMConversionPatterns(converter, patterns);
   ub::populateUBToLLVMConversionPatterns(converter, patterns);
@@ -689,9 +685,10 @@ LogicalResult runBOSCAMELowering(ModuleOp module, MLIRContext &context,
     return failure();
   prepareVectorOps(module, context);
 
-  // Stage 3: convert loop-carried matrix values before SCF is lowered.
-  if (failed(convertScfStructure(module, context)))
-    return failure();
+  // Stage 3: the loop structure follows automatically from the type conversion
+  // of stage 4 (see `convertToLLVM`), which converts the matrix value type and
+  // the operations that carry it - the loop included - in one conversion, so
+  // that no fixed-vector bridge can survive between them.
 
   // Stage 4: the unified BOSCAME / SPM / DMA / standard conversion.
   if (failed(convertToLLVM(module, context, tileOptions)))

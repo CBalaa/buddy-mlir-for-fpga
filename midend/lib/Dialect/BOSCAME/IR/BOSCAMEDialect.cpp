@@ -21,6 +21,7 @@
 
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
+#include "Dialect/BOSCAME/DmaAlignment.h"
 #include "Dialect/BOSCAME/SpmDma.h"
 
 using namespace mlir;
@@ -76,12 +77,12 @@ struct BankAnchoredRange {
   int64_t end;
 };
 
-/// Derive the bank-anchored byte range that a transfer of `bytes` bytes starting
-/// at `value` occupies, or `std::nullopt` when the value cannot be traced back
-/// to a bank-anchored origin.  The two supported origins are the result of a
-/// `bosc_ame.spm.view` (whose `offset` is bank-relative by construction) and an
-/// SPM block argument, which the workspace contract pins to the start of its
-/// bank.
+/// Derive the bank-anchored byte range that a transfer of `bytes` bytes
+/// starting at `value` occupies, or `std::nullopt` when the value cannot be
+/// traced back to a bank-anchored origin.  The two supported origins are the
+/// result of a `bosc_ame.spm.view` (whose `offset` is bank-relative by
+/// construction) and an SPM block argument, which the workspace contract pins
+/// to the start of its bank.
 static std::optional<BankAnchoredRange> getBankAnchoredRange(Value value,
                                                              int64_t bytes) {
   if (auto view = value.getDefiningOp<SpmViewOp>()) {
@@ -89,8 +90,8 @@ static std::optional<BankAnchoredRange> getBankAnchoredRange(Value value,
     return BankAnchoredRange{view.getBank(), begin, begin + bytes};
   }
   // A block argument counts as bank-anchored only when it is exactly one
-  // complete bank: the workspace contract maps each bank used by a kernel to one
-  // such parameter.  A narrower SPM memref argument has no statically known
+  // complete bank: the workspace contract maps each bank used by a kernel to
+  // one such parameter.  A narrower SPM memref argument has no statically known
   // position inside its bank.
   if (isa<BlockArgument>(value)) {
     auto memref = dyn_cast<MemRefType>(value.getType());
@@ -159,9 +160,8 @@ LogicalResult SpmViewOp::verify() {
   uint64_t requiredBytes = static_cast<uint64_t>(*sizeBytes);
   if (offset > static_cast<uint64_t>(kSpmBankCapacityBytes) - requiredBytes)
     return emitOpError() << "byte range [" << offset << ", "
-                         << (offset + requiredBytes)
-                         << ") exceeds the " << kSpmBankCapacityBytes
-                         << "-byte SPM bank " << bank;
+                         << (offset + requiredBytes) << ") exceeds the "
+                         << kSpmBankCapacityBytes << "-byte SPM bank " << bank;
 
   return success();
 }
@@ -208,8 +208,9 @@ LogicalResult DmaStartOp::verify() {
 
   std::optional<int64_t> bytesValue = getConstantIntValue(getBytes());
   if (!bytesValue)
-    return emitOpError("v1 requires a statically known transfer length: `bytes` "
-                       "must fold to a constant number of bytes");
+    return emitOpError(
+        "v1 requires a statically known transfer length: `bytes` "
+        "must fold to a constant number of bytes");
   int64_t bytes = *bytesValue;
   if (bytes <= 0)
     return emitOpError() << "bytes must be positive, got " << bytes;
@@ -239,6 +240,17 @@ LogicalResult DmaStartOp::verify() {
              << "SPM endpoint must be 64 B aligned, but its descriptor offset "
              << endpoint->byteOffset << " is not";
   }
+
+  // The descriptor offset is only one of the three contributions to an
+  // effective address.  A `memref.view` shift moves the base pointer while
+  // keeping that offset at zero, so every shift on the endpoint's view chain
+  // has to be either static and aligned or provably a multiple of the DMA
+  // granularity; otherwise the alignment of the transferred range is a guess.
+  if (failed(verifyEndpointPointerAlignment(getOperation(), getSrc(), "src",
+                                            kDmaAlignmentBytes)) ||
+      failed(verifyEndpointPointerAlignment(getOperation(), getDst(), "dst",
+                                            kDmaAlignmentBytes)))
+    return failure();
 
   // A DDR base address is not a compile-time constant.  The module-level ABI
   // assertion records that the caller handed us 64 B aligned, pairwise
@@ -279,8 +291,8 @@ LogicalResult DmaStartOp::verify() {
 
 namespace {
 /// The DMA engines as a side-effect resource.  Both `dma.start` and `dma.wait`
-/// write this resource, so no optimization may reorder, eliminate or duplicate a
-/// transfer or its completion.  Volatile MMIO alone would not be enough: the
+/// write this resource, so no optimization may reorder, eliminate or duplicate
+/// a transfer or its completion.  Volatile MMIO alone would not be enough: the
 /// effect interface is what keeps the request alive and its status read where
 /// the program put it.
 struct DmaDeviceResource
@@ -301,8 +313,7 @@ void DmaStartOp::getEffects(
   effects.emplace_back(MemoryEffects::Write::get(), &getDstMutable());
   effects.emplace_back(MemoryEffects::Read::get());
   effects.emplace_back(MemoryEffects::Write::get());
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       DmaDeviceResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), DmaDeviceResource::get());
 }
 
 void DmaWaitOp::getEffects(
@@ -311,8 +322,7 @@ void DmaWaitOp::getEffects(
   // compiler knowing which range that is; only the paired `dma.start` does.
   effects.emplace_back(MemoryEffects::Read::get());
   effects.emplace_back(MemoryEffects::Write::get());
-  effects.emplace_back(MemoryEffects::Write::get(),
-                       DmaDeviceResource::get());
+  effects.emplace_back(MemoryEffects::Write::get(), DmaDeviceResource::get());
 }
 
 void BOSCAMEDialect::initialize() {

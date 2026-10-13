@@ -68,6 +68,7 @@
 #include "Dialect/BOSCAME/BOSCAMEAttrs.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
+#include "Dialect/BOSCAME/DmaAlignment.h"
 #include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/BOSCAME/Transform.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -104,6 +105,13 @@ struct Footprint {
   /// Byte range inside the bank (SPM) or inside the root buffer (DDR).
   int64_t begin = 0;
   int64_t end = 0;
+  /// False when the footprint contains a *runtime* base-pointer shift, i.e. a
+  /// `memref.view` whose byte shift is not a compile-time constant.  That is
+  /// how a regular dynamic address (a tile row, a K sub-block) is expressed:
+  /// the shift is proven to be a multiple of the DMA granularity by the op
+  /// verifier, but its value is unknown here, so the byte range can only be
+  /// bounded conservatively.  `begin` is the static part of the chain.
+  bool rangeKnown = true;
 };
 
 /// The pointer chain of a memref value, up to the storage root it was derived
@@ -114,6 +122,9 @@ struct PointerChain {
   std::optional<int64_t> bank;
   Value ddrRoot;
   int64_t pointerShift = 0;
+  /// True when the chain contains a `memref.view` whose byte shift is not a
+  /// compile-time constant.
+  bool dynamicShift = false;
 };
 
 /// An in-flight request, recorded when `bosc_ame.dma.start` is reached.
@@ -207,10 +218,21 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       chain.pointerShift += view.getOffset();
       return chain;
     }
-    // Only `memref.view` moves the base pointer, by `byte_shift` bytes.
+    // Only `memref.view` moves the base pointer, by `byte_shift` bytes.  A
+    // constant shift is folded into the footprint; a runtime shift is accepted
+    // only when it is provably a multiple of the DMA granularity (the op
+    // verifier enforces the same rule) and marks the footprint's range as
+    // unknown instead of exact.
     if (auto view = dyn_cast<memref::ViewOp>(defining)) {
       std::optional<int64_t> shift = getConstantIntValue(view.getByteShift());
-      if (!shift || *shift < 0)
+      if (!shift) {
+        if (!isProvablyMultipleOf(view.getByteShift(), kDmaAlignmentBytes))
+          return std::nullopt;
+        chain.dynamicShift = true;
+        current = view.getSource();
+        continue;
+      }
+      if (*shift < 0)
         return std::nullopt;
       chain.pointerShift += *shift;
       current = view.getSource();
@@ -248,7 +270,8 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
   if (!rootType)
     return std::nullopt;
   Operation *rootOp = current.getDefiningOp();
-  bool isRoot = isa<BlockArgument>(current) || isa_and_nonnull<memref::AllocOp>(rootOp) ||
+  bool isRoot = isa<BlockArgument>(current) ||
+                isa_and_nonnull<memref::AllocOp>(rootOp) ||
                 isa_and_nonnull<memref::AllocaOp>(rootOp) ||
                 isa_and_nonnull<memref::GetGlobalOp>(rootOp);
   if (!isRoot)
@@ -289,6 +312,7 @@ static std::optional<Footprint> resolveFootprint(Value value, int64_t length) {
   footprint.ddrRoot = chain->ddrRoot;
   footprint.begin = begin;
   footprint.end = end;
+  footprint.rangeKnown = !chain->dynamicShift;
   return footprint;
 }
 
@@ -319,8 +343,13 @@ static bool mayAlias(const Footprint &lhs, const Footprint &rhs,
     return false;
   if (lhs.bank)
     return *lhs.bank == *rhs.bank && lhs.begin < rhs.end && rhs.begin < lhs.end;
-  if (lhs.ddrRoot == rhs.ddrRoot)
+  if (lhs.ddrRoot == rhs.ddrRoot) {
+    // A footprint with a runtime base-pointer shift has no exact range, so it
+    // has to be taken as covering its whole root.
+    if (!lhs.rangeKnown || !rhs.rangeKnown)
+      return true;
     return lhs.begin < rhs.end && rhs.begin < lhs.end;
+  }
   // Two distinct pointer arguments are disjoint only under the explicit
   // module ABI promise; without it the ranges cannot be compared at all.
   return !abiDisjointDdrRoots;
@@ -519,9 +548,8 @@ private:
                 "be the result of a `bosc_ame.dma.start` in the same block";
     auto start = token.getDefiningOp<DmaStartOp>();
     if (!start)
-      return wait.emitOpError()
-             << "waits on a value that is not produced by a "
-                "`bosc_ame.dma.start`";
+      return wait.emitOpError() << "waits on a value that is not produced by a "
+                                   "`bosc_ame.dma.start`";
 
     for (std::optional<ActiveRequest> &slot : analysis.active) {
       if (!slot || slot->token != token)
@@ -627,10 +655,10 @@ private:
       else
         endpoints = "destination";
       return op.emitOpError()
-             << (isRead ? "reads " : "writes ") << describeOperand(value) << " ("
-             << describeFootprint(*footprint) << "), which overlaps the "
-             << endpoints << " of the in-flight request on DMA channel "
-             << slot->channel
+             << (isRead ? "reads " : "writes ") << describeOperand(value)
+             << " (" << describeFootprint(*footprint)
+             << "), which overlaps the " << endpoints
+             << " of the in-flight request on DMA channel " << slot->channel
              << "; the destination is unavailable until its "
                 "`bosc_ame.dma.wait` and the source may only be read";
     }
@@ -683,8 +711,6 @@ std::unique_ptr<Pass> buddy::boscame::createSpmDmaCheckPass() {
 
 namespace mlir {
 namespace buddy {
-void registerBOSCAMESpmDmaCheckPass() {
-  PassRegistration<SpmDmaCheckPass>();
-}
+void registerBOSCAMESpmDmaCheckPass() { PassRegistration<SpmDmaCheckPass>(); }
 } // namespace buddy
 } // namespace mlir
