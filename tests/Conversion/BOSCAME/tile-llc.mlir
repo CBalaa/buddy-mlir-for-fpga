@@ -1,22 +1,23 @@
 // RUN: buddy-opt %s --lower-bosc-ame | buddy-translate --buddy-to-llvmir | llc -mtriple=riscv64 -mattr=+m,+a,+f,+d,+c,-v,+xboscame -filetype=asm -o - | FileCheck %s --check-prefix=ASM
 
 // The whole pipeline really compiles: `--lower-bosc-ame` produces LLVM dialect
-// with the registered `llvm.riscv.bosc.fpga.*` intrinsics, `buddy-translate`
+// with the registered `llvm.riscv.bosc.*` intrinsics, `buddy-translate`
 // turns it into LLVM IR and `llc` selects the AME instructions.  A check that
 // only inspects the LLVM dialect cannot tell whether the backend knows these
-// intrinsics or whether the fixed slots survive register allocation.
+// intrinsics, and that LLVM's own register allocator gives every operand the
+// register file its instruction requires.
 //
-// The `+xboscame-fpga` convention is *not* passed to llc on the command line:
+// The FPGA target feature is *not* passed to llc on the command line:
 // the pass writes it onto the lowered function, and the backend then allocates
-// the fixed slots from the load intrinsics.
+// registers itself.
 
 // ASM-LABEL: {{^}}gemm:
 // ASM: msettype
-// ASM: mlce32.m{{[ \t]+}}acc0
-// ASM: mlae8.m{{[ \t]+}}tr0
-// ASM: mlbe8.m{{[ \t]+}}tr4
-// ASM: mqma.b.mm{{[ \t]+}}acc0, tr0, tr4
-// ASM: msce32.m{{[ \t]+}}acc0
+// ASM: mlce32.m{{[ \t]+}}acc{{[0-7]}}
+// ASM: mlae8.m{{[ \t]+}}tr{{[0-7]}}
+// ASM: mlbe8.m{{[ \t]+}}tr{{[0-7]}}
+// ASM: mqma.b.mm{{[ \t]+}}acc{{[0-7]}}, tr{{[0-7]}}, tr{{[0-7]}}
+// ASM: msce32.m{{[ \t]+}}acc{{[0-7]}}
 
 module attributes {bosc_ame.target = "nr-fpga"} {
   func.func @gemm(%dummy: i32) -> i32 {

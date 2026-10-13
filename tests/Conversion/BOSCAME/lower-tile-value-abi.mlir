@@ -4,8 +4,9 @@
 // inside the block that produced it, and it may only be consumed by a
 // `bosc_ame.tile.mma` or a `bosc_ame.tile.store_acc`.  A matrix value that
 // arrives from outside (a function argument, a region yield, a call) has no
-// register slot the fixed convention could give it, so it is rejected instead
-// of being allocated somewhere undefined.
+// defined producer in the lowered code, so it is rejected.  This is a scope
+// rule on the values - which register holds a tile is the backend's decision
+// and is not part of the check.
 
 module attributes {bosc_ame.target = "nr-fpga"} {
   func.func @foreign_matrix_value(%ta: vector<8x16xi8>,

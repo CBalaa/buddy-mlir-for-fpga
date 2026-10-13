@@ -3,7 +3,8 @@
 // The upstream AME path keeps working: an operation set that uses the old
 // memref-based AME load/store operations (no `bosc_ame.tile.*`) is lowered to
 // the upstream `bosc_ame.intr.mlae8.m`-style intrinsics, takes no FPGA register
-// slots and gets no `+xboscame-fpga` target feature.  FPGA semantics are only
+// registers that the backend allocates, and gets no extra target feature.
+// FPGA semantics are only
 // applied to a module that both uses tile operations and selects a contract.
 
 module {
@@ -15,7 +16,7 @@ module {
     %acc = bosc_ame.mlce32.m %c, %c256 : memref<64x64xi32> -> vector<4x4xi32>
     // CHECK: "bosc_ame.intr.msce32.m"(%{{.*}}, %{{.*}}, %{{.*}}) : (vector<[32]xi32>, !llvm.ptr, i64) -> ()
     bosc_ame.msce32.m %acc, %c, %c256 : vector<4x4xi32>, memref<64x64xi32>
-    // No slot-carrying FPGA intrinsic may appear on this path.
+    // No FPGA-specific intrinsic may appear on this path.
     // CHECK-NOT: bosc.intr.fpga.
     // CHECK-NOT: target_features
     return %c0_i32 : i32

@@ -40,7 +40,7 @@ module attributes {bosc_ame.target = "nr-fpga"} {
     // LLVM: llvm.mlir.constant(536875008 : i64) : i64
     // The offset is folded into a single pointer constant by the time the LLVM
     // IR is emitted: 536875008 + 512, applied once.
-    // IR: call <vscale x 128 x i8> @llvm.riscv.bosc.fpga.mlae8.m.nxv128i8.i64(ptr inttoptr (i64 536875520 to ptr), i64 64, i32 0)
+    // IR: call <vscale x 128 x i8> @llvm.riscv.bosc.mlae8.m.nxv128i8.i64(ptr inttoptr (i64 536875520 to ptr), i64 64)
     %ta = bosc_ame.tile.load_a %a_tile : memref<16x16xi8, strided<[64, 1], offset: 512>, #bosc_ame.spm<0>> -> vector<16x16xi8>
     %tb = bosc_ame.tile.load_b %b : memref<16x16xi8, strided<[1, 16], offset: 0>, #bosc_ame.spm<1>> -> vector<16x16xi8>
     %tc = bosc_ame.tile.load_acc %c : memref<16x16xi32, #bosc_ame.spm<0>> -> vector<16x16xi32>
