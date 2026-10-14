@@ -7,6 +7,7 @@
 
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
 #include "Conversion/TritonArithToLinalg/TritonArithToLinalg.h"
+#include "Conversion/TritonLoweringConfig.h"
 #include "Conversion/TritonPtrToMemref/TritonPtrToMemref.h"
 #include "Conversion/TritonToLinalgExperimental/CollapseShape.h"
 #include "Conversion/TritonToLinalgExperimental/ReconcilePtrCasts.h"
@@ -15,6 +16,7 @@
 #include "Conversion/TritonToStructured/TritonToStructured.h"
 #include "Conversion/TritonToUnstructured/TritonToUnstructured.h"
 #include "Conversion/UnstructuredToMemref/UnstructuredToMemref.h"
+#include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/TPtr/IR/TPtrDialect.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 #include "mlir/Dialect/Ptr/IR/PtrDialect.h"
@@ -54,6 +56,49 @@ public:
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
+    TritonLoweringConfig config{boscame, dmaAbi};
+    if (config.enableBOSCAME) {
+      using namespace buddy::boscame::spmdma;
+      Attribute contract = moduleOp->getAttr(kDmaAbiAttrName);
+      auto existing = dyn_cast_or_null<StringAttr>(contract);
+      if (existing && !config.dmaAbi.empty() &&
+          existing.getValue() != config.dmaAbi) {
+        moduleOp.emitError(
+            "command-line DMA ABI conflicts with the module contract");
+        signalPassFailure();
+        return;
+      }
+      if (contract &&
+          (!existing || existing.getValue() != kDmaAbiAlignedNonAliasing)) {
+        moduleOp.emitError("invalid BOSCAME module DMA ABI contract");
+        signalPassFailure();
+        return;
+      }
+      if (!config.dmaAbi.empty() &&
+          config.dmaAbi != kDmaAbiAlignedNonAliasing) {
+        moduleOp.emitError() << "invalid dma-abi: " << config.dmaAbi;
+        signalPassFailure();
+        return;
+      }
+      if (config.dmaAbi.empty() && existing)
+        config.dmaAbi = existing.getValue().str();
+      if (config.dmaAbi.empty()) {
+        moduleOp.emitError(
+            "boscame=true requires dma-abi=args_aligned64_nonalias");
+        signalPassFailure();
+        return;
+      }
+      moduleOp->setAttr(kDmaAbiAttrName,
+                        StringAttr::get(&getContext(), config.dmaAbi));
+      moduleOp->setAttr("bosc_ame.cpu_ddr_policy",
+                        UnitAttr::get(&getContext()));
+    }
+    if (config.enableBOSCAME) {
+      moduleOp.emitError(
+          "BOSCAME memory lowering is not installed at this pipeline stage");
+      signalPassFailure();
+      return;
+    }
     PassManager pm(&getContext(), moduleOp.getOperationName());
     bool enableTensorFirstVectorCpu = false;
     if (structuredLdstMode == "legacy_memref_bridge") {

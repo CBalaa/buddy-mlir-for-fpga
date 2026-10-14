@@ -14,6 +14,10 @@ def TritonToLinalgExperimental : Pass<"triton-to-linalg-experimental", "mlir::Mo
   let summary = "Convert Triton to Linalg dialect";
   let constructor = "triton::createTritonToLinalgExperimentalPass()";
   let options = [
+      Option<"boscame", "boscame", "bool", /*default*/"false",
+             "Stage memory accesses with DMA and lower marked integer matmul to BOSCAME AME">,
+      Option<"dmaAbi", "dma-abi", "std::string", /*default*/"\"\"",
+             "BOSCAME DMA caller contract: args_aligned64_nonalias">,
       Option<"enableMakeGatherScatterTensorPtr", "enable-make-gather-scatter", "bool", /*default*/"true",
              "Enable make_gather_scatter_tptr support">,
       Option<"enableCollapseShape", "enable-collapse-shape", "bool", /*default*/"false",
