@@ -1,0 +1,25 @@
+{
+  "kind": "layernorm",
+  "passed": true,
+  "failures": [],
+  "board_diagnostics": {
+    "layernorm_round": 1,
+    "layernorm_checked": 302592,
+    "layernorm_errors": 0,
+    "layernorm_guard_errors": 0
+  },
+  "shape": [
+    197,
+    768
+  ],
+  "final_round_values_checked": 151296,
+  "output_mismatches": 0,
+  "exact_final_round_values": 151296,
+  "max_absolute_error": 0.0,
+  "tolerance": "2e-5 * (1 + abs(expected))",
+  "oracle": "sequential f32, 1024 padded variance lanes, f32 sqrt then division",
+  "elf_sha256": "85ef4a8b87c5c58a2a9fb5b9613cdb4bf927b61e22a36290680374309207eba4",
+  "dump_sha256": "2b9d0c189d6a3bf4ffbacd74e4acb1b09039a5baccb07147c30948a6e6f8c62d",
+  "dump_bytes": 3145728,
+  "ddr_base": "0x80000000"
+}

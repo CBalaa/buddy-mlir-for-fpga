@@ -87,6 +87,9 @@ void *memcpy(void *destination, const void *source, size_t bytes) {
 #if MATMUL_I8_CHECK_ROWS > M
 #error "MATMUL_I8_CHECK_ROWS must not exceed M"
 #endif
+#if defined(MATMUL_I8_BOARD_CHECK) && MATMUL_I8_CHECK_ROWS != M
+#error "MATMUL_I8_BOARD_CHECK requires a full-output oracle"
+#endif
 
 /* ------------------------------------------------------------------ */
 /* ABI bridge interface (build.py --adapter ...)                        *
@@ -135,12 +138,41 @@ static inline MemRef2 make_2(void *pointer, int64_t rows, int64_t columns) {
 /* DDR staging windows, pinned by link.ld inside the PMP DDR window    */
 /* ------------------------------------------------------------------ */
 
+#if defined(MATMUL_I8_BOARD_CHECK)
+/* Separate guard words from the payload without weakening its 64B alignment.
+ * The public symbols and fixed 1024B payload offsets also let a host oracle
+ * inspect a post-execution DDR dump independently of the E6 diagnostics. */
+#define GUARD_WORDS 256u
+#define GUARD_VALUE UINT32_C(0x6e5a1234)
+typedef struct {
+  uint32_t before[GUARD_WORDS];
+  int8_t elements[A_BYTES];
+  uint32_t after[GUARD_WORDS];
+} AStorage;
+typedef struct {
+  uint32_t before[GUARD_WORDS];
+  int8_t elements[B_BYTES];
+  uint32_t after[GUARD_WORDS];
+} BStorage;
+typedef struct {
+  uint32_t before[GUARD_WORDS];
+  uint32_t elements[M * N];
+  uint32_t after[GUARD_WORDS];
+} CStorage;
+AStorage a_storage __attribute__((section(".dma_source"), aligned(4096), used));
+BStorage b_storage __attribute__((section(".dma_source"), aligned(4096), used));
+CStorage c_storage __attribute__((section(".dma_output"), aligned(4096), used));
+#define a_matrix a_storage.elements
+#define b_matrix b_storage.elements
+#define c_matrix c_storage.elements
+#else
 static int8_t a_matrix[A_BYTES]
     __attribute__((section(".dma_source"), aligned(4096), used));
 static int8_t b_matrix[B_BYTES]
     __attribute__((section(".dma_source"), aligned(4096), used));
 static int32_t c_matrix[M * N]
     __attribute__((section(".dma_output"), aligned(4096), used));
+#endif
 /* Legacy launcher scratch facade. The experimental adapter keeps this
  * parameter for compatibility but the new kernel uses aligned stack packs
  * and does not receive scratch. */
@@ -159,6 +191,10 @@ volatile uint32_t e6_diag_errors DIAG;
 volatile uint32_t e6_diag_max_abs DIAG;
 volatile uint32_t e6_diag_checked_rows DIAG;
 volatile uint64_t e6_diag_cycles DIAG;
+#if defined(MATMUL_I8_BOARD_CHECK)
+volatile uint32_t e6_diag_round DIAG;
+volatile uint32_t e6_diag_guard_errors DIAG;
+#endif
 #if defined(MATMUL_I8_TRACE)
 volatile int32_t e6_diag_first_got[8] DIAG;
 volatile int32_t e6_diag_first_want[8] DIAG;
@@ -184,6 +220,80 @@ static inline uint64_t cycles(void) {
 
 /* The kernel accumulates into C (`mqma.b.mm` has += semantics), so C starts at
  * the same deterministic pattern the oracle expects. */
+#if defined(MATMUL_I8_BOARD_CHECK)
+/* All arithmetic in the generators is bounded. Product accumulation in the
+ * oracle uses uint32_t to model the kernel's exact INT32 wrap semantics.
+ * B is physically [N,K], including for the independent host oracle. */
+static int32_t board_a(unsigned i, unsigned q, unsigned round) {
+  return (int32_t)((i * 13u + q * 7u + round * 71u) % 256u) - 128;
+}
+static int32_t board_b(unsigned j, unsigned q, unsigned round) {
+  return (int32_t)((j * 11u + q * 5u + round * 37u) % 256u) - 128;
+}
+static uint32_t board_c(unsigned i, unsigned j, unsigned round) {
+  return UINT32_C(0x7fffff00) + (i * 3u + j + round * 97u) % 512u;
+}
+
+static void fill_operands(unsigned round) {
+  for (unsigned g = 0; g < GUARD_WORDS; ++g) {
+    a_storage.before[g] = a_storage.after[g] = GUARD_VALUE;
+    b_storage.before[g] = b_storage.after[g] = GUARD_VALUE;
+    c_storage.before[g] = c_storage.after[g] = GUARD_VALUE;
+  }
+  for (unsigned i = 0; i < M; ++i)
+    for (unsigned q = 0; q < K; ++q)
+      a_matrix[(size_t)i * K + q] = (int8_t)board_a(i, q, round);
+  for (unsigned j = 0; j < N; ++j)
+    for (unsigned q = 0; q < K; ++q)
+      b_matrix[(size_t)j * K + q] = (int8_t)board_b(j, q, round);
+  for (unsigned i = 0; i < M; ++i)
+    for (unsigned j = 0; j < N; ++j)
+      c_matrix[(size_t)i * N + j] = board_c(i, j, round);
+}
+
+static uint32_t validate_guards_and_inputs(unsigned round) {
+  uint32_t errors = 0;
+  for (unsigned g = 0; g < GUARD_WORDS; ++g) {
+    errors += a_storage.before[g] != GUARD_VALUE;
+    errors += a_storage.after[g] != GUARD_VALUE;
+    errors += b_storage.before[g] != GUARD_VALUE;
+    errors += b_storage.after[g] != GUARD_VALUE;
+    errors += c_storage.before[g] != GUARD_VALUE;
+    errors += c_storage.after[g] != GUARD_VALUE;
+  }
+  for (unsigned i = 0; i < M; ++i)
+    for (unsigned q = 0; q < K; ++q)
+      errors += a_matrix[(size_t)i * K + q] != board_a(i, q, round);
+  for (unsigned j = 0; j < N; ++j)
+    for (unsigned q = 0; q < K; ++q)
+      errors += b_matrix[(size_t)j * K + q] != board_b(j, q, round);
+  return errors;
+}
+
+static uint32_t validate(unsigned round) {
+  uint32_t errors = 0;
+  for (unsigned i = 0; i < M; ++i) {
+    for (unsigned j = 0; j < N; ++j) {
+      uint32_t want = board_c(i, j, round);
+      for (unsigned q = 0; q < K; ++q)
+        want += (uint32_t)(board_a(i, q, round) * board_b(j, q, round));
+      uint32_t got = c_matrix[(size_t)i * N + j];
+#if defined(MATMUL_I8_TRACE)
+      if (i == 0u && j < 8u) {
+        e6_diag_first_got[j] = (int32_t)got;
+        e6_diag_first_want[j] = (int32_t)want;
+      }
+#endif
+      errors += got != want;
+    }
+    ++e6_diag_checked_rows;
+    /* Two full grids share the same SPM contents; only DDR operands are
+     * reinitialized between them. Distinct markers identify the oracle row. */
+    nh_e6_progress(0x2000u + round * M + i);
+  }
+  return errors;
+}
+#else
 static void fill_operands(void) {
   for (unsigned i = 0; i < M; ++i)
     for (unsigned q = 0; q < K; ++q)
@@ -236,6 +346,7 @@ static uint32_t validate(void) {
   e6_diag_checked_rows = checked;
   return errors;
 }
+#endif
 
 /* ------------------------------------------------------------------ */
 /* E6 entry                                                            */
@@ -246,6 +357,38 @@ int e6_main(void) {
    * trap entry publishes 0xed and NH prints the DMA context line. */
   bosc_ame_dma_fail_hook = nh_e6_publish_dma_failure;
 
+#if defined(MATMUL_I8_BOARD_CHECK)
+  e6_diag_errors = 0;
+  e6_diag_guard_errors = 0;
+  e6_diag_checked_rows = 0;
+  e6_diag_cycles = 0;
+  for (unsigned round = 0; round < 2u; ++round) {
+    e6_diag_round = round;
+    e6_stage(0x11u + round);
+    fill_operands(round);
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    MemRef2 a = make_2(a_matrix, M, K);
+    MemRef2 b = make_2(b_matrix, N, K);
+    MemRef2 c = make_2(c_matrix, M, N);
+    e6_stage(0x30u + round * 2u);
+    uint64_t begin = cycles();
+#if MATMUL_I8_USE_AME
+    _mlir_ciface_kernel_matmul_i8_128x1024x128(&a, &b, &c, scratch);
+#else
+    _mlir_ciface_kernel_matmul_i8_128x1024x128(&a, &b, &c);
+#endif
+    e6_diag_cycles += cycles() - begin;
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    e6_stage(0x31u + round * 2u);
+    nh_e6_cache_uncached_loads();
+    e6_diag_guard_errors += validate_guards_and_inputs(round);
+    e6_diag_errors += validate(round);
+    __asm__ volatile("fence rw, rw" ::: "memory");
+  }
+  uint32_t errors = e6_diag_errors + e6_diag_guard_errors;
+  e6_stage(errors == 0u ? 0x02u : 0xeeu);
+  return errors == 0u ? 0 : 1;
+#else
   e6_stage(0x11u);
   /* The operands keep their logical shape; every tile is fully valid. */
   fill_operands();
@@ -276,6 +419,7 @@ int e6_main(void) {
   e6_stage(errors == 0u ? 0x02u : 0xeeu);
 
   return errors == 0u ? 0 : 1;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -285,7 +429,11 @@ int e6_main(void) {
 /* The tag says which datapath the image carries, so two console logs can be
  * told apart; the tester selects the image by file name, not by tag. */
 #if MATMUL_I8_USE_AME
+#if defined(MATMUL_I8_BOARD_CHECK)
+const char *nh_e6_app_tag(void) { return "matmul-i8-128x1024x128-boardcheck"; }
+#else
 const char *nh_e6_app_tag(void) { return "matmul-i8-128x1024x128"; }
+#endif
 #else
 const char *nh_e6_app_tag(void) { return "matmul-i8-128x1024x128-noame"; }
 #endif
@@ -300,6 +448,12 @@ void nh_e6_app_report(void) {
   print_uart_dec32(e6_diag_checked_rows);
   print_uart(" errors=");
   print_uart_dec32(e6_diag_errors);
+#if defined(MATMUL_I8_BOARD_CHECK)
+  print_uart(" guard_errors=");
+  print_uart_dec32(e6_diag_guard_errors);
+  print_uart(" round=");
+  print_uart_dec32(e6_diag_round);
+#endif
   print_uart(" max_abs=");
   print_uart_dec32(e6_diag_max_abs);
   print_uart("\r\n");

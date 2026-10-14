@@ -52,7 +52,7 @@ nr 是平台名称：本目录就是 NR 平台的完整运行环境，平台专�
 | `nr_memory.c` | 运行时 | RA bump heap、`nr_heap_mark()`／`nr_heap_reset()`、`malloc`／`calloc`／`aligned_alloc`／`free`、标量 `memcpy`／`memmove`／`memset`／`memcmp`、MLIR `memrefCopy` ABI |
 | `nr_runtime_internal.h` | 内部 | `nr_runtime.c` 与 `nr_memory.c` 之间的小接口（`nr_finish`、`abort`）；应用不包含 |
 | `nr_console.inc`、`nr_hang_watch.inc` | 平台 | 已有模块边界的核间日志控制块与诊断记录；由 `nr_runtime.c` 在 hooks 之后 include，保持原机制 |
-| `nr_math.c` | 运行时 | freestanding `expf`／`logf`／`powf`／`tanhf`／`erff`／`sqrtf`／`sinf`／`cosf` |
+| `nr_math.c` | 运行时 | freestanding `expf`／`logf`／`powf`／`tanhf`／`erff`／`sqrtf`／`rsqrtf`／`sinf`／`cosf` |
 | `nr_copy.S` | 运行时 | `nr_copy_bytes()` 的已验收 RVV copy 子集（单独用含 V 的 `-march`） |
 | `ame_sync.c` | 运行时 | `ame_fence()`：带 fence 的 1×1 AME resync |
 
@@ -187,6 +187,7 @@ Arm exp/log 表来自 MIT licensed optimized-routines。
 参考仓库：https://gitlink.org.cn/michaelcjl/ModelZoo.git ，提交
 `8815b74fb6d3cd6288c4d99ac6fd7c5d041a7cc3`。构建不依赖该仓库。
 
-新增 `sqrtf` 使用 `fsqrt.s`。`sinf` / `cosf` 面向 RoPE，采用 double 角度约简与
+新增 `sqrtf` 使用 `fsqrt.s`。`rsqrtf` 为 MLIR scalar `math.rsqrt` 提供
+freestanding 入口，先执行 f32 sqrt，再执行 f32 `1 / sqrt`，不使用近似指令。`sinf` / `cosf` 面向 RoPE，采用 double 角度约简与
 多项式，支持有限输入 `|x| <= 2^20` 弧度；超出范围返回 NaN。它们以及原来的
 pow/tanh/erf 是 freestanding 样例辅助实现，不是完整 IEEE libm。

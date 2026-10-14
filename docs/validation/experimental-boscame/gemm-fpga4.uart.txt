@@ -1,0 +1,3 @@
+[5.5296MHz][matmul-i8-128x1024x128-boardcheck] start
+[5.5296MHz][matmul-i8-128x1024x128-boardcheck] PASS
+[5.5296MHz][matmul-i8-128x1024x128-boardcheck] stats phase=0x00000002 cycles=0x000000008788ce04 checked_rows=256 errors=0 guard_errors=0 round=1 max_abs=0

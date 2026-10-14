@@ -94,8 +94,21 @@ Every static access point has a non-reusing bank/offset allocation, aligned to
 reuse their own windows after tile store; access points do not share windows.
 There are no SPM allocations: storage is expressed by `bosc_ame.spm.view`.
 Static ordinary temporary buffers are promoted to stack when their lifetime
-allows it. On the NH/E6 image, DMA packs on the E6 stack require that stack to
-lie inside the exported DDR/PMP window.
+allows it. On the NH/E6 image, user DDR occupies PMP entry 5 at
+`0x80100000..0x802e0000`; the E6 stack occupies
+`0x802e0000..0x802f0000` in entry 6. Entry 6 retains the `0x0f` write-through
+policy during both DDR read and write phases. Internal stack packs are DMA
+sources, while results return through explicit one-dimensional vector copies.
+They do not require the stack to share user DDR's alternating cache policy.
+
+Keeping this boundary matters for compiler-generated spills. With the stack
+inside entry 5, a diagnostic board run reached the second program and trapped
+while dereferencing an A descriptor at address 9. The descriptor's stack slot
+had held the boolean value 1 late in the previous program. The next entry
+stored its descriptor under the policy left by `dma_wait`, then switched back
+to cached loads and observed the old value 1. Separating the stack into entry
+6 avoids changing its cache policy between those accesses; linker assertions
+keep user data and guards below that boundary.
 
 The exit check rejects residual Triton/tensors/bridges/casts/target matmuls,
 SPM allocation/free, scalar SPM access, ordinary memref copies or Linalg on
@@ -107,6 +120,8 @@ conversion; the experimental driver does not duplicate it.
 ```bash
 make -C examples/FPGA-BOSCAME/layernorm_197x768 llvm adapter asm simcheck
 make -C examples/FPGA-BOSCAME/matmul_i8_128x1024x128 check simcheck
+make -C examples/FPGA-BOSCAME/layernorm_197x768 check bin
+make -C examples/FPGA-BOSCAME/matmul_i8_128x1024x128 boardcheck
 ```
 
 These commands use the real Triton frontend (Triton/triton-riscv Python
@@ -127,6 +142,9 @@ and an independent sequential-f32 padded TTIR oracle. Maximum absolute error
 against a high-precision padded formula on the deterministic input was
 2.61e-5. No reduction order or source arithmetic was changed. This functional
 comparison does not assert bit identity for actual board rsqrt/FMA instructions.
+The freestanding LayerNorm image links `runtime/boscame/nr/nr_math.c` for
+`sqrtf` and `rsqrtf`; the latter evaluates `1.0f / sqrtf(value)` with separate
+f32 rounding. The kernel and oracle builds disable floating-point contraction.
 
 GEMM executes all 512 programs and compares all 131072 i32 outputs exactly with
 an independent wide-integer NumPy product followed by i32 wrap. Signed extrema,
@@ -137,10 +155,71 @@ K blocks, a nonzero dot initializer and dynamic rectangular masks/nonzero
 
 This implementation deliberately adds ordinary temporary buffers, packing and
 extra DMA/vector copies. It materializes results at every dot boundary instead
-of keeping an accumulator across the outer K loop. Latency, cycles and speedup
-have not been measured. **Board execution and readback have not been verified.**
-An ELF containing RVV/AME instructions is a code-generation check, not a
-numerical board result.
+of keeping an accumulator across the outer K loop. No baseline latency or speedup comparison has been made; the board drivers
+record cycles for diagnostics. An ELF containing RVV/AME instructions establishes
+code generation; numerical board validation requires execution and final-DDR
+comparison as described below.
+
+## Board execution and post-execution readback
+
+`make check bin` for LayerNorm builds the NH/E6 launcher, typed adapter,
+freestanding math, DMA runtime and audited kernel into
+`build/layernorm_197x768/layernorm_197x768.bin`. The launcher runs two different
+inputs, each with all 197 programs in reverse row order: 394 programs and
+302592 checked output values. SPM is poisoned once before the first launch
+and then retained. Every input/output has before/after guards, including the
+last row and the Weight/Bias tails; inputs are checked for modification.
+
+GEMM's `make boardcheck` produces
+`build/matmul_i8_128x1024x128/boardcheck/matmul_i8_128x1024x128.boardcheck.bin`.
+It executes two complete 512-program launches and checks all 262144 output
+values. The operands include signed-i8 extremes and asymmetric physical B;
+initial C values exercise i32 wrap. The independent C oracle uses unsigned
+wrap arithmetic, and checks inputs and all DDR guards after each round.
+The second launch reuses SPM without clearing it. `make debug` remains a
+shorter diagnostic variant and is not this full board check.
+
+Upload the desired image with the platform's usual transfer command, then run
+it from the FPGA test runner directory:
+
+```bash
+./run.sh test=test/layernorm_197x768.bin
+./run.sh test=test/matmul_i8_128x1024x128.boardcheck.bin
+```
+
+Keep the runner active until the application prints its terminal verdict;
+increase its documented idle delay if a quiet computation would otherwise end
+the session. After that verdict, read back DDR starting at `0x80000000` through
+the output and diagnostic symbols. A 3 MiB dump covers both supplied layouts.
+The runner's loader mirror is captured before program execution and cannot
+validate output. Use the exact ELF linked into the uploaded image:
+
+```bash
+python3 examples/FPGA-BOSCAME/tools/check_experimental_board.py layernorm \
+  --elf examples/FPGA-BOSCAME/layernorm_197x768/build/layernorm_197x768/layernorm_197x768.elf \
+  --dump layernorm.final-ddr.bin --report layernorm.board.json
+python3 examples/FPGA-BOSCAME/tools/check_experimental_board.py gemm \
+  --elf examples/FPGA-BOSCAME/matmul_i8_128x1024x128/build/matmul_i8_128x1024x128/boardcheck/matmul_i8_128x1024x128.boardcheck.elf \
+  --dump gemm.final-ddr.bin --report gemm.board.json
+```
+
+The checker resolves addresses and sizes from ELF symbols, validates both
+rounds' diagnostic counters, verifies final inputs and guards, and independently
+recomputes every final-round result. GEMM must match every i32 bit. LayerNorm
+retains the 1024-lane padded TTIR variance and uses the f32 tolerance
+`2e-5 * (1 + abs(expected))`; the report also records exact matches and maximum
+absolute error. Missing symbols, incomplete dumps, invalid counters, changed
+guards/inputs or numerical errors return nonzero. The report includes ELF and
+dump SHA256 values.
+
+On 2026-10-14, both examples passed actual NH/E6 execution and independent
+post-execution DDR comparison. LayerNorm on FPGA5 and FPGA6 each checked
+302592 values across two rounds, with zero errors and guard errors; all 151296 final-round values
+matched the sequential-f32 oracle bit for bit (max absolute error 0 for these
+inputs, 2.993e-5 against the f64 padded formula). GEMM on FPGA4 checked 262144
+values across two rounds, with zero errors and guard/input errors; all 131072
+final-round i32 values matched the independent wide-integer/wrap oracle
+exactly. See [the retained board reports, UART verdicts and image hashes](validation/experimental-boscame/README.md).
 
 ## Implementation and tests
 
@@ -154,8 +233,16 @@ numerical board result.
 | `SpmDma.h`, `DmaAlignment.h`, `BOSCAME.td`, `BOSCAMEDialect.cpp` | Typed byte widths/capacities and effective-address alignment proof |
 | `SpmDmaCheck.cpp`, `LegalizeForLLVMExport.cpp`, `buddy-opt.cpp` | Footprints, token/SPM safety, typed pointer export, one-dimensional vector conversion and check registration |
 | Conversion/Transforms CMake files, legacy TritonToBOSCAME source | Shared-helper linkage without a driver dependency cycle; legacy policy helpers remain compatible |
-| Both example makefiles/build adapters/READMEs and GEMM linker/simcheck | New commands, typed ABI, authorized DMA stack and functional verification |
+| Both example makefiles/build adapters/READMEs and linkers | New commands, typed ABI, audited NH/E6 images and stable stack cache policy |
+| Both example `launch.c` files and `simcheck.py` files | Two-round board drivers, independent numerical oracles, input/output guards and functional verification |
+| `runtime/boscame/nr/nr_math.c` | Freestanding scalar `sqrtf`/`rsqrtf` for the LayerNorm image |
+| `examples/FPGA-BOSCAME/tools/check_experimental_board.py` | Independent post-execution DDR validation, ELF symbol bounds and machine-readable evidence |
 | `tools/boscame_buffer_sim.py` and experimental/BOSCAME tests | Fail-closed functional model, independent oracles, guards, failure exit codes, ABI and default regressions |
+
+`boscame-board-readback.py` tests the final-DDR checker with valid synthetic
+images and corrupted data/guards/counters, and `boscame-freestanding-math.py`
+tests the freestanding math entry points. These host tests support the board
+workflow and do not replace hardware execution.
 
 Use `ninja -C build buddy-opt`, `ninja -C build check-buddy`, and
 `pre-commit run --files <changed-files>`. The new tests complement the retained

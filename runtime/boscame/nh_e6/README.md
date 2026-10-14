@@ -45,20 +45,25 @@
 
 七个 TOR 段的覆盖范围：`[0, 0x20000000)`、两个 SPM bank
 `[0x20000000, 0x20420000)`、`[0x20420000, 0x60000000)`、两个 DMA 通道
-`[0x60000000, 0x60020000)`、含镜像与两核栈的 `[0x60020000, 0x80100000)`、
-DDR staging 窗口 `[0x80100000, 0x80300000)`、其余地址空间。
+`[0x60000000, 0x60020000)`、含镜像与 NH 栈的 `[0x60020000, 0x80100000)`、
+用户 DDR staging 窗口 `[0x80100000, 0x802e0000)`、其余地址空间。
+experimental 样例的 E6 栈在最后一个区域中，地址为
+`[0x802e0000, 0x802f0000)`。
 
 **DDR 窗口由链接脚本提供。** 使用本平台的样例 `link.ld` 必须导出两个绝对
 符号（`nh_e6_platform.c` 以 `extern char []` ＋ `&symbol` 取值）：
 
 ```ld
 __nh_e6_ddr_window_start = 0x80100000;
-__nh_e6_ddr_window_end = 0x80300000;
+__nh_e6_ddr_window_end = 0x802e0000;
 ```
 
-窗口按硬件约定保留，不按 `.dma_source`／`.dma_output` 的实际大小缩小；
-`link.ld` 用 `ASSERT` 保证两个 staging 段落在窗口内，GEMM 的 `make audit`
-（`pmpcheck`）还会在镜像上复查符号值与 PMP/satp 顺序。
+experimental 样例为用户 DDR 保留上述静态区间，并将 E6 栈置于 PMP entry 6。
+entry 6 在两种 CSR 策略下均为 `0x0f`，保持 write-through，使编译器 spill/reload
+不会在 cached/uncached 之间切换。内部栈 pack 仅作为 DMA 源；SPM 结果用显式
+vector store 写回普通栈 buffer。`link.ld` 用 `ASSERT` 保证用户数据及 guards
+处于 entry 5，栈处于 entry 6；GEMM 的 `make audit` 复查边界和 PMP/satp 顺序。
+其他链接脚本仍可导出自身的 DDR 区间；平台从符号读取边界。
 
 **CSR `0xbc0` 缓存策略** 由平台统一提供。参考程序的 `shared_writes()`／
 `shared_reads()` 都是先 `fence iorw, iorw` 再写 CSR，本模块保持同样顺序：
@@ -92,7 +97,7 @@ __nh_e6_ddr_window_end = 0x80300000;
 | 有界等待 | `NH_E6_WAIT_ITERATIONS`（默认与板测镜像一致的 `100000000`） |
 | UART | `common/uart` 的 `0x310b0000` 驱动，只有 NH 访问 |
 | E6 地址空间 | 七个 TOR PMP 区域、`satp=0`（bare）、切换后 `sfence.vma`；SPM／DMA 常量取自 `bosc_ame_dma.h` |
-| DDR staging 窗口 | 样例 `link.ld` 导出的 `__nh_e6_ddr_window_start`／`__nh_e6_ddr_window_end`（GEMM：`[0x80100000, 0x80300000)`） |
+| DDR staging 窗口 | 样例 `link.ld` 导出的 `__nh_e6_ddr_window_start`／`__nh_e6_ddr_window_end`（experimental GEMM：`[0x80100000, 0x802e0000)`） |
 | CSR `0xbc0` | 写策略：`0x0f0f0f0f0f0f0f0f`；读策略：`0x0f0f000f000f000f`，均在前置 fence 后写入 |
 
 访问顺序保持原 `launcher.S` 的写法：清零三个寄存器 → `fence iorw, iorw` →

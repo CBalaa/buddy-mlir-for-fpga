@@ -34,7 +34,12 @@
  * example linker script must export:
  *
  *   __nh_e6_ddr_window_start   first byte of PMP entry 5   (0x80100000)
- *   __nh_e6_ddr_window_end     one past its last byte      (0x80300000)
+ *   __nh_e6_ddr_window_end     one past its last byte      (chosen by link.ld)
+ *
+ * Keep CPU stacks in a region whose cache policy is stable across both
+ * modes. The experimental examples end entry 5 at the E6 stack bottom;
+ * entry 6 remains write-through in both modes. Internal stack packs are DMA
+ * sources; results return through explicit CPU vector stores.
  *
  * They are addresses exported by `link.ld` (`extern char []` + `&` in the
  * implementation), so the window can not be shrunk to the staging arrays'

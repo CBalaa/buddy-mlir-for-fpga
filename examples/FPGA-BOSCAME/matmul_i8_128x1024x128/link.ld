@@ -37,8 +37,9 @@ SECTIONS {
    * image does not have to carry ~660 KiB of zeros. */
   .dma_source 0x80100000 (NOLOAD) : { KEEP(*(.dma_source)) } > RAM
   .dma_output 0x80200000 (NOLOAD) : { KEEP(*(.dma_output)) } > RAM
-  /* The experimental kernel's aligned ordinary packs are DMA endpoints.
-   * Its stack therefore belongs to the exported DDR/PMP window as well. */
+  /* Stack packs are DMA sources, written through by the CPU; DMA results
+   * return through explicit SPM vector copies. Keep spills and packs in PMP
+   * entry 6, whose write-through/cache policy is stable across DMA waits. */
   .e6_stack 0x802e0000 (NOLOAD) : {
     __e6_stack_bottom = .; . += 64K; __e6_stack_top = .;
   } > RAM
@@ -46,7 +47,7 @@ SECTIONS {
   _end = .;
 
   __nh_e6_ddr_window_start = 0x80100000;
-  __nh_e6_ddr_window_end = 0x80300000;
+  __nh_e6_ddr_window_end = __e6_stack_bottom;
 
   /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
   ASSERT(_start == 0x80000000, "NH entry must be 0x80000000")
@@ -63,9 +64,8 @@ SECTIONS {
          "source staging overlaps output")
   ASSERT(ADDR(.dma_output) + SIZEOF(.dma_output) <= __e6_stack_bottom,
          "output staging overlaps the E6 stack")
-  ASSERT(__nh_e6_ddr_window_start <= __e6_stack_bottom &&
-         __e6_stack_top <= __nh_e6_ddr_window_end,
-         "E6 DMA stack outside the PMP DDR window")
+  ASSERT(__nh_e6_ddr_window_end <= __e6_stack_bottom,
+         "E6 stack must use the stable PMP entry 6 cache policy")
   ASSERT(__bss_end <= __nh_stack_bottom, "image overlaps the NH stack")
   ASSERT(_end <= ORIGIN(RAM) + LENGTH(RAM), "image exceeds 4MiB")
 }

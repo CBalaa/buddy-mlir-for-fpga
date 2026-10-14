@@ -37,7 +37,7 @@ stores vector-stage valid results into SPM before DMA writes DDR.
 
 This first version uses ordinary temporary buffers and extra DMA/vector
 movement. It does not retain AME accumulators across the outer K loop.
-Performance has not been measured. The default `boscame=false` and the legacy
+No baseline performance comparison has been made. The default `boscame=false` and the legacy
 `--triton-to-boscame` entry remain compatible; this example now selects the new
 entry by default. See [the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md).
 
@@ -57,10 +57,16 @@ the new kernel does not receive or use that scratch pointer.
 `build.py --adapter triton-to-boscame` still emits the old four-byte-descriptor
 bridge for users of the legacy pass.
 
-The generated ordinary packs are aligned stack allocations and some are DMA
-endpoints. `link.ld` places the E6 stack at `0x802e0000..0x802f0000`, inside the
-exported `0x80100000..0x80300000` DDR/PMP window, and checks that it does not
-overlap C. The NH stack remains in its original window. Shared
+The generated ordinary packs are aligned stack allocations and DMA sources;
+results return through explicit one-dimensional vector copies. `link.ld`
+places user DDR at `0x80100000..0x802e0000` in PMP entry 5, and the E6 stack at
+`0x802e0000..0x802f0000` in entry 6, checking that C and its guards do not overlap
+the stack. Entry 6 keeps the `0x0f` write-through policy in both DDR read/write
+phases, so compiler spills do not switch between cached and uncached access.
+A diagnostic run with the stack inside entry 5 trapped on the second program:
+an A descriptor spill was read as the old boolean value 1, then dereferenced
+at address 9. The separated layout addresses that cache-policy hazard.
+The NH stack remains in its original window. Shared
 `runtime/boscame/nh_e6` boot/platform setup installs PMP and bare addressing;
 `runtime/boscame/runtime/bosc_ame_dma.c` supplies DMA and DDR cache policies.
 
@@ -84,18 +90,57 @@ All integer comparisons are exact.
 make AME=0 check       # Existing scalar RISC-V path, separate noame/ directory
 make host             # Existing Triton-to-linalg host oracle
 make debug            # Progress markers and the launcher's 16-row board oracle
+make boardcheck       # Two full launches with signed extremes, wrapping and guards
 ```
+
+`make boardcheck` builds
+`build/matmul_i8_128x1024x128/boardcheck/matmul_i8_128x1024x128.boardcheck.bin`.
+The driver runs two different complete 512-program launches, with 262144
+output comparisons against its independent C oracle. A/B include signed-i8
+extremes, B retains its asymmetric physical `[N,K]` layout, and nonzero C
+exercises i32 wrap. The oracle uses unsigned arithmetic to define that wrap
+without signed-overflow undefined behavior. Inputs and before/after DDR
+guards are checked after each round; the second launch reuses SPM without
+clearing it. The shortened `debug` oracle does not replace this validation.
+
+Upload this image using the usual platform command, then run it from the test
+runner directory:
+
+```bash
+./run.sh test=test/matmul_i8_128x1024x128.boardcheck.bin
+```
+
+Keep the session alive until the terminal application verdict. Read back DDR
+after that verdict, starting at `0x80000000` through the outputs and diagnostics;
+a 3 MiB dump covers this image. The loader's pre-execution mirror cannot be
+used as output evidence. From this example directory, validate the final dump
+using the exact ELF used to build the uploaded image:
+
+```bash
+python3 ../tools/check_experimental_board.py gemm \
+  --elf build/matmul_i8_128x1024x128/boardcheck/matmul_i8_128x1024x128.boardcheck.elf \
+  --dump gemm.final-ddr.bin --report gemm.board.json
+```
+
+The checker independently computes the full final-round product in i64,
+adds initial C and explicitly wraps to i32. Every output bit must match. It
+also verifies both rounds' counters and the final input bytes/DDR guards;
+missing data or any mismatch returns nonzero. JSON includes ELF/dump hashes
+and comparison counts.
 
 | File | Role |
 | --- | --- |
 | `kernels.py` | Original Triton computation |
 | `build.py` | Frontend, fixed shape, typed and legacy adapters, LLVM ABI check, host path |
 | `makefile` | New TTIR→BOSCAME→LLVM→assembly→ELF/image pipeline and variants |
-| `link.ld` | NH/E6 entries, DDR data and authorized DMA stack |
-| `launch.c` | Operands, kernel facade, independent INT32 oracle and NH report |
+| `link.ld` | NH/E6 entries, user DDR data and stable stack cache policy |
+| `launch.c` | Operands, kernel facade, two-round guarded INT32 board oracle and NH report |
 | `simcheck.py` | Full-grid functional execution, numerical oracle and guards |
+| `../tools/check_experimental_board.py` | Independent final-DDR checker using exact ELF symbols |
 | `launch-host.c`, `support.c`, `support.h` | Existing host reference |
 
-**Board execution/readback has not been verified for this new path.** Use the
-existing platform runner and compare the readback with the launcher oracle
-before making a board-correctness or performance claim.
+On 2026-10-14, FPGA4 reported PASS for both full rounds: 256 rows / 262144
+output values checked, zero errors and zero guard/input errors. Independent
+post-execution DDR comparison matched all 131072 final-round i32 values exactly.
+See [the board evidence](../../../docs/validation/experimental-boscame/README.md).
+No baseline performance comparison has been made.

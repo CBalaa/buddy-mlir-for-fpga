@@ -92,6 +92,7 @@ VARIANT := $(strip $(VAR)$(if $(and $(VAR),$(AME_VAR)),-)$(AME_VAR))
 V_DIR := $(OUT)$(if $(VARIANT),/$(VARIANT))
 V_NAME := $(NAME)$(if $(VARIANT),.$(VARIANT),)
 V_CFLAGS := $(if $(filter debug,$(VAR)),-DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=16) \
+  $(if $(filter boardcheck,$(VAR)),-DMATMUL_I8_BOARD_CHECK=1 -DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=128) \
   -DMATMUL_I8_USE_AME=$(AME)
 V_AME := --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias"
 # ABI bridge: three typed unranked descriptors + six grid scalars. The new
@@ -115,7 +116,7 @@ C_FLAGS := $(RISCV_FLAGS) -fno-vectorize -fno-slp-vectorize '-DBOSC_AME_DMA_ASSE
 LLC_FLAGS := -O2 -filetype=asm -mtriple=riscv64 -target-abi=lp64d \
   -mattr=+m,+a,+f,+d,+c,$(if $(filter 1,$(AME)),+v,-v),+xboscame -code-model=medium
 
-.PHONY: all ttir boscame llvm asm bin debug host check audit simcheck clean
+.PHONY: all ttir boscame llvm asm bin debug boardcheck host check audit simcheck clean
 all: bin
 
 $(sort $(OUT) $(V_DIR) $(OBJ) $(SCRATCH)):
@@ -225,8 +226,8 @@ audit: $(ELF)
 	  = "0000000080100000" \
 	  || { echo "FAIL: link.ld must export __nh_e6_ddr_window_start = 0x80100000"; exit 1; }
 	@test "$$($(NM) $< | awk '$$3 == "__nh_e6_ddr_window_end" { print $$1 }')" \
-	  = "0000000080300000" \
-	  || { echo "FAIL: link.ld must export __nh_e6_ddr_window_end = 0x80300000"; exit 1; }
+	  = "00000000802e0000" \
+	  || { echo "FAIL: link.ld must export __nh_e6_ddr_window_end = 0x802e0000"; exit 1; }
 	@$(OBJDUMP) -d $< \
 	  | grep -oE 'csrw[[:space:]]+(pmpaddr[0-6]|pmpcfg0|satp)|sfence[.]vma' \
 	  | tr -s '[:space:]' ' ' \
@@ -246,6 +247,11 @@ bin: $(BIN) audit
 # same for the scalar image (the command-line AME value is inherited).
 debug:
 	$(MAKE) VAR=debug bin
+
+# Two complete launches, signed-i8 extremes, INT32 wrapping, input/DDR guards
+# and a full 128-row oracle. No SPM reset separates the two launches.
+boardcheck:
+	$(MAKE) VAR=boardcheck check
 
 # --- 9. host oracle from the Triton-to-linalg path ----------------------
 # Always the scalar path, whatever AME is: for AME=0 this is the numeric

@@ -144,6 +144,12 @@ def export_frontend():
 def adapter_source():
     """Emit the typed-unranked C wrapper bridge with an enforced DMA ABI."""
     return f"""#include <stdint.h>
+#if defined(LAYERNORM_TRACE)
+extern void nh_e6_progress(uint32_t marker);
+#define LAYERNORM_MARK(value) nh_e6_progress(value)
+#else
+#define LAYERNORM_MARK(value) ((void)0)
+#endif
 typedef struct {{ void *allocated, *aligned; int64_t offset, sizes[2], strides[2]; }} MemRef2;
 typedef struct {{ void *allocated, *aligned; int64_t offset, size, stride; }} MemRef1;
 typedef struct {{ int64_t rank; void *descriptor; }} Unranked;
@@ -173,8 +179,15 @@ void _mlir_ciface_kernel_{NAME}(MemRef2 *x, MemRef1 *weight, MemRef1 *bias, MemR
   MemRef1 db = {{bias->allocated, bp, 0, {WIDTH}, 1}};
   MemRef1 dout = {{out->allocated, op, 0, (int64_t){ROWS} * {WIDTH}, 1}};
   Unranked mx = {{1, &dx}}, mw = {{1, &dw}}, mb = {{1, &db}}, mo = {{1, &dout}};
-  for (int32_t row = 0; row < {ROWS}; ++row)
+  for (int32_t index = 0; index < {ROWS}; ++index) {{
+#if defined(LAYERNORM_REVERSE)
+    int32_t row = {ROWS} - 1 - index;
+#else
+    int32_t row = index;
+#endif
+    LAYERNORM_MARK(0x1000u + (uint32_t)row);
     _mlir_ciface_{SYMBOL}(&mx, &mw, &mb, &mo, {ROWS}, 1, 1, row, 0, 0);
+  }}
 }}
 """
 
