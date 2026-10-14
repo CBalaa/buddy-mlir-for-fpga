@@ -1,4 +1,5 @@
-//===- SpmDma.h - SPM / DMA platform contract and shared helpers -*- C++ -*-===//
+//===- SpmDma.h - SPM / DMA platform contract and shared helpers -*- C++
+//-*-===//
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,7 +51,7 @@ namespace spmdma {
 constexpr int64_t kSpmBankCount = 2;
 constexpr int64_t kSpmBankCapacityBytes = 128 * 1024;
 constexpr uint64_t kSpmBankBaseAddress[kSpmBankCount] = {0x20000000ULL,
-                                                        0x20400000ULL};
+                                                         0x20400000ULL};
 
 //===----------------------------------------------------------------------===//
 // DMA
@@ -62,7 +63,7 @@ constexpr uint64_t kSpmBankBaseAddress[kSpmBankCount] = {0x20000000ULL,
 /// into or out of SPM1.
 constexpr int64_t kDmaChannelCount = 2;
 constexpr uint64_t kDmaChannelBaseAddress[kDmaChannelCount] = {0x60000000ULL,
-                                                              0x60010000ULL};
+                                                               0x60010000ULL};
 
 /// Every control/status register is a natural-aligned single-shot 64-bit access
 /// and every transfer offset and length is a multiple of 64 bytes.
@@ -141,7 +142,7 @@ inline unsigned getSpmElementByteWidth(mlir::Type elementType) {
 /// Bank of a memref type whose memory space is `#bosc_ame.spm<bank>`.
 /// Returns std::nullopt for anything else, including DDR memrefs.
 inline std::optional<int64_t> getSpmBank(mlir::Type type) {
-  auto memref = llvm::dyn_cast<mlir::MemRefType>(type);
+  auto memref = llvm::dyn_cast<mlir::BaseMemRefType>(type);
   if (!memref)
     return std::nullopt;
   auto space = llvm::dyn_cast_or_null<::buddy::boscame::SPMAttr>(
@@ -193,8 +194,8 @@ inline std::optional<int64_t> getStaticByteSize(mlir::ShapedType shaped) {
 /// Unlike `getStaticByteSize` this rejects subviews with a nonzero descriptor
 /// offset, which is what a `bosc_ame.spm.view` result guarantees and what lets
 /// the view be lowered to a single fixed base address.
-inline std::optional<int64_t> getContiguousZeroOffsetByteSize(
-    mlir::MemRefType memref) {
+inline std::optional<int64_t>
+getContiguousZeroOffsetByteSize(mlir::MemRefType memref) {
   llvm::SmallVector<int64_t, 4> strides;
   int64_t offset = 0;
   if (mlir::failed(memref.getStridesAndOffset(strides, offset)))
@@ -210,10 +211,11 @@ inline std::optional<int64_t> getContiguousZeroOffsetByteSize(
 // DMA endpoints
 //===----------------------------------------------------------------------===//
 
-/// A DMA endpoint is a byte view of a buffer.  The hardware moves `bytes` bytes
-/// from the effective SRC address to the effective DST address, so an endpoint
-/// must be a 1-D `i8` ranked memref with unit stride and a statically known
-/// shape and descriptor offset.  The descriptor offset stays part of the
+/// A DMA endpoint is a typed contiguous view of a buffer. The hardware moves
+/// `bytes` bytes from the effective SRC address to the effective DST address,
+/// so an endpoint must be a 1-D ranked memref with a supported byte-addressable
+/// element type, unit element stride and static shape. A dynamic descriptor
+/// offset needs an SSA alignment proof. The descriptor offset stays part of the
 /// effective address; it is never silently dropped.
 struct DmaEndpoint {
   mlir::MemRefType type;
@@ -221,6 +223,7 @@ struct DmaEndpoint {
   std::optional<int64_t> bank;
   /// Static descriptor offset in bytes inside the addressed storage.
   int64_t byteOffset = 0;
+  bool hasStaticOffset = true;
   /// Static length of the endpoint buffer in bytes.
   int64_t byteLength = 0;
 
@@ -231,7 +234,8 @@ struct DmaEndpoint {
 inline std::optional<DmaEndpoint> getDmaEndpoint(mlir::MemRefType type) {
   if (!type || type.getRank() != 1)
     return std::nullopt;
-  if (!type.getElementType().isInteger(8))
+  unsigned elementBytes = getSpmElementByteWidth(type.getElementType());
+  if (!elementBytes)
     return std::nullopt;
   if (!type.hasStaticShape())
     return std::nullopt;
@@ -239,15 +243,19 @@ inline std::optional<DmaEndpoint> getDmaEndpoint(mlir::MemRefType type) {
   int64_t offset = 0;
   if (mlir::failed(type.getStridesAndOffset(strides, offset)))
     return std::nullopt;
-  if (offset == mlir::ShapedType::kDynamic)
-    return std::nullopt;
   if (!hasContiguousStrides(type.getShape(), strides))
     return std::nullopt;
   DmaEndpoint endpoint;
   endpoint.type = type;
   endpoint.bank = getSpmBank(type);
-  endpoint.byteOffset = offset;
-  endpoint.byteLength = type.getDimSize(0);
+  endpoint.hasStaticOffset = offset != mlir::ShapedType::kDynamic;
+  if (endpoint.hasStaticOffset &&
+      llvm::MulOverflow(offset, static_cast<int64_t>(elementBytes),
+                        endpoint.byteOffset))
+    return std::nullopt;
+  if (llvm::MulOverflow(type.getDimSize(0), static_cast<int64_t>(elementBytes),
+                        endpoint.byteLength))
+    return std::nullopt;
   return endpoint;
 }
 
@@ -256,7 +264,8 @@ inline std::optional<DmaEndpoint> getDmaEndpoint(mlir::MemRefType type) {
 /// descriptor offset alone decides.  A DDR base address is not visible to the
 /// compiler and is covered by `bosc_ame.dma.abi` instead.
 inline bool isStaticallyAlignedEndpoint(const DmaEndpoint &endpoint) {
-  return endpoint.byteOffset % kDmaAlignmentBytes == 0;
+  return endpoint.hasStaticOffset &&
+         endpoint.byteOffset % kDmaAlignmentBytes == 0;
 }
 
 } // namespace spmdma

@@ -134,6 +134,7 @@ void registerLowerAMEPass();
 void registerLowerXTAMEPass();
 void registerLowerBOSCAMEPass();
 void registerLowerBOSCAMETilePass();
+void registerBOSCAMESpmDmaCheckPass();
 void registerAssumeTightMemRefLayoutPass();
 void registerStaticizeMemRefLayoutPass();
 void registerConvertMemcpyToGPUPass();
@@ -190,6 +191,7 @@ int main(int argc, char **argv) {
   mlir::buddy::registerLowerXTAMEPass();
   mlir::buddy::registerLowerBOSCAMEPass();
   mlir::buddy::registerLowerBOSCAMETilePass();
+  mlir::buddy::registerBOSCAMESpmDmaCheckPass();
 
   // Register Several Optimize Pass.
   mlir::buddy::registerMatMulVectorizationBLISPass();

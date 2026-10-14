@@ -158,8 +158,10 @@ def DmaStartOp : BOSCAME_Op<"dma.start",
     ```
 
     `bytes` is a byte count, not an element count.  Both endpoints must be
-    1-D `i8` memrefs with unit stride and a static length; at least one endpoint
-    must be in an SPM bank.  The transfer starts at the effective address of
+    1-D typed memrefs with unit element stride and a static length. Supported
+    elements are i8/i16/i32/i64/f16/bf16/f32/f64. Endpoint capacity is
+    elementCount * elementBytes; at least one endpoint must be in an SPM bank.
+    The transfer starts at the effective address of
     the memref (descriptor offset included) and is legal when:
 
       * `bytes` is a positive multiple of 64,
@@ -169,15 +171,18 @@ def DmaStartOp : BOSCAME_Op<"dma.start",
       * the two ranges do not overlap.
 
     *Where the alignment comes from.*  The effective address is the storage
-    root plus the descriptor offset plus every `memref.view` byte shift on the
-    view chain.  The root is anchored (a 64 B aligned SPM bank base, or a DDR
-    pointer argument covered by `bosc_ame.dma.abi`), the descriptor offset must
-    be static and aligned, and a `memref.view` shift is accepted either as a
+    aligned pointer plus descriptorOffset * elementBytes, including every
+    `memref.view` byte shift on the view chain. The root is anchored (a 64 B
+    aligned SPM bank, an explicitly aligned allocation, or a DDR argument
+    covered by `bosc_ame.dma.abi`). The descriptor offset and view shifts
+    require alignment proofs: a static multiple of the granularity, or a
+    runtime expression whose divisibility follows from SSA operations.
+    A `memref.view` shift is accepted either as a
     static multiple of 64 or as a runtime value the compiler can *prove* to be
     one (a constant, a sum/product of provable factors, a widening cast, or a
     loop induction variable with provably aligned lower bound and step).  A
-    shift nothing can be proven about is rejected: it has to go through an
-    ordinary copy instead of an optimistically assumed hardware transfer.
+    shift nothing can be proven about is rejected. A subview adds its offsets
+    times source strides; reinterpret_cast replaces the descriptor offset.
 
     The operation does not wait: the request completes when the matching
     `bosc_ame.dma.wait` executes the completion barrier.  It therefore has

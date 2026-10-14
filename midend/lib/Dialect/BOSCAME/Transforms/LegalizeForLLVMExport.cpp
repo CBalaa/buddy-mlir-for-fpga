@@ -255,9 +255,9 @@ static void addBOSCAMETypeConversions(LLVMTypeConverter &converter) {
   // arrays.  BOSCAME matrix registers are represented by scalable vectors in
   // the backend, so keep those values in the register form throughout this
   // conversion instead of materializing unrealized array casts.
-  converter.addConversion([](VectorType type) -> Type {
+  converter.addConversion([](VectorType type) -> std::optional<Type> {
     if (type.getRank() != 2)
-      return Type();
+      return std::nullopt;
     return getBOSCAMERegisterType(type);
   });
 
@@ -290,6 +290,11 @@ static Value extractAddressFromDescriptor(OpBuilder &builder, Location loc,
                                           Value descriptor,
                                           Type originalMemRefType,
                                           const LLVMTypeConverter &converter) {
+  // DMA lengths are bytes, while memref descriptor offsets are ELEMENTS.
+  // bufferPtr performs the typed GEP (including dynamic offsets) exactly once.
+  auto type = dyn_cast<MemRefType>(originalMemRefType);
+  if (!type || !getSpmElementByteWidth(type.getElementType()))
+    return Value();
   Value pointer = extractPointerFromDescriptor(builder, loc, descriptor,
                                                originalMemRefType, converter);
   if (!pointer)

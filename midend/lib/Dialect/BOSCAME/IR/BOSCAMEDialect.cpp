@@ -195,12 +195,12 @@ LogicalResult DmaStartOp::verify() {
   std::optional<DmaEndpoint> src = getDmaEndpoint(srcType);
   std::optional<DmaEndpoint> dst = getDmaEndpoint(dstType);
   if (!src)
-    return emitOpError() << "src must be a 1-D i8 memref with a static shape, "
-                            "unit stride and a static descriptor offset, got "
+    return emitOpError() << "src must be a 1-D byte-addressable memref with a "
+                            "static shape and unit stride, got "
                          << srcType;
   if (!dst)
-    return emitOpError() << "dst must be a 1-D i8 memref with a static shape, "
-                            "unit stride and a static descriptor offset, got "
+    return emitOpError() << "dst must be a 1-D byte-addressable memref with a "
+                            "static shape and unit stride, got "
                          << dstType;
   if (!src->isSpm() && !dst->isSpm())
     return emitOpError("at least one endpoint must be SPM storage; DDR to DDR "
@@ -231,11 +231,13 @@ LogicalResult DmaStartOp::verify() {
   for (const DmaEndpoint *endpoint : {&*src, &*dst}) {
     if (!endpoint->isSpm())
       continue;
-    if (endpoint->byteOffset + bytes > kSpmBankCapacityBytes)
+    if (endpoint->hasStaticOffset &&
+        (endpoint->byteOffset < 0 ||
+         endpoint->byteOffset > kSpmBankCapacityBytes - bytes))
       return emitOpError() << "byte range [" << endpoint->byteOffset << ", "
                            << (endpoint->byteOffset + bytes)
                            << ") leaves SPM bank " << *endpoint->bank;
-    if (!isStaticallyAlignedEndpoint(*endpoint))
+    if (endpoint->hasStaticOffset && !isStaticallyAlignedEndpoint(*endpoint))
       return emitOpError()
              << "SPM endpoint must be 64 B aligned, but its descriptor offset "
              << endpoint->byteOffset << " is not";

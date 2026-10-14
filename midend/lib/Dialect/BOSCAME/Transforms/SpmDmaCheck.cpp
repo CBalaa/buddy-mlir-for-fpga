@@ -72,6 +72,7 @@
 #include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/BOSCAME/Transform.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -181,8 +182,6 @@ getStaticElementSpan(MemRefType type) {
   int64_t offset = 0;
   if (failed(type.getStridesAndOffset(strides, offset)))
     return std::nullopt;
-  if (offset == ShapedType::kDynamic)
-    return std::nullopt;
   if (llvm::is_contained(type.getShape(), 0))
     return std::make_pair(offset, int64_t{0});
   int64_t lastElement = 0;
@@ -262,13 +261,54 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       current = cast.getSource();
       continue;
     }
+    if (auto metadata = dyn_cast<memref::ExtractStridedMetadataOp>(defining)) {
+      current = metadata.getSource();
+      continue;
+    }
     // `memref.reshape`, `memref.transpose`, call results, ... are not traced.
     break;
   }
 
-  auto rootType = dyn_cast<MemRefType>(current.getType());
+  auto rootType = dyn_cast<BaseMemRefType>(current.getType());
   if (!rootType)
     return std::nullopt;
+  if (auto argument = dyn_cast<BlockArgument>(current)) {
+    if (auto loop = dyn_cast<scf::ForOp>(argument.getOwner()->getParentOp())) {
+      if (argument.getArgNumber() == 0)
+        return std::nullopt;
+      unsigned position = argument.getArgNumber() - 1;
+      Value initial = loop.getInitArgs()[position];
+      Value yielded = cast<scf::YieldOp>(loop.getBody()->getTerminator())
+                          .getResults()[position];
+      bool movesPointer = false;
+      // An iter_arg may change descriptor offsets, but must keep its storage
+      // root. Treat a changing aligned pointer as an unknown interval. Never
+      // infer nonalias from the initial argument if a later iteration can
+      // yield a different allocation or function argument.
+      while (yielded != argument && yielded != initial) {
+        Operation *def = yielded.getDefiningOp();
+        if (auto view = dyn_cast_or_null<memref::ViewOp>(def)) {
+          movesPointer = true;
+          yielded = view.getSource();
+        } else if (auto sub = dyn_cast_or_null<memref::SubViewOp>(def))
+          yielded = sub.getSource();
+        else if (auto cast = dyn_cast_or_null<memref::ReinterpretCastOp>(def))
+          yielded = cast.getSource();
+        else if (auto cast = dyn_cast_or_null<memref::CastOp>(def))
+          yielded = cast.getSource();
+        else
+          return std::nullopt;
+      }
+      auto origin = tracePointerChain(initial);
+      if (!origin)
+        return std::nullopt;
+      origin->pointerShift += chain.pointerShift;
+      origin->dynamicShift |= chain.dynamicShift || movesPointer;
+      return origin;
+    }
+    if (!isa<func::FuncOp>(argument.getOwner()->getParentOp()))
+      return std::nullopt;
+  }
   Operation *rootOp = current.getDefiningOp();
   bool isRoot = isa<BlockArgument>(current) ||
                 isa_and_nonnull<memref::AllocOp>(rootOp) ||
@@ -298,12 +338,14 @@ static std::optional<Footprint> resolveFootprint(Value value, int64_t length) {
     return std::nullopt;
   unsigned elementBytes = getSpmElementByteWidth(memrefType.getElementType());
   int64_t begin = chain->pointerShift;
-  int64_t offsetBytes = 0;
-  if (llvm::MulOverflow(span->first, static_cast<int64_t>(elementBytes),
-                        offsetBytes))
-    return std::nullopt;
-  if (llvm::AddOverflow(begin, offsetBytes, begin))
-    return std::nullopt;
+  auto descriptorOffset = getStaticDescriptorOffset(value);
+  if (descriptorOffset) {
+    int64_t offsetBytes = 0;
+    if (llvm::MulOverflow(*descriptorOffset, static_cast<int64_t>(elementBytes),
+                          offsetBytes) ||
+        llvm::AddOverflow(begin, offsetBytes, begin))
+      return std::nullopt;
+  }
   int64_t end = 0;
   if (llvm::AddOverflow(begin, length, end))
     return std::nullopt;
@@ -312,7 +354,7 @@ static std::optional<Footprint> resolveFootprint(Value value, int64_t length) {
   footprint.ddrRoot = chain->ddrRoot;
   footprint.begin = begin;
   footprint.end = end;
-  footprint.rangeKnown = !chain->dynamicShift;
+  footprint.rangeKnown = !chain->dynamicShift && descriptorOffset.has_value();
   return footprint;
 }
 
@@ -352,7 +394,17 @@ static bool mayAlias(const Footprint &lhs, const Footprint &rhs,
   }
   // Two distinct pointer arguments are disjoint only under the explicit
   // module ABI promise; without it the ranges cannot be compared at all.
-  return !abiDisjointDdrRoots;
+  auto freshAllocation = [](Value root) {
+    return isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(
+        root.getDefiningOp());
+  };
+  if (freshAllocation(lhs.ddrRoot) || freshAllocation(rhs.ddrRoot))
+    return false;
+  auto left = dyn_cast<BlockArgument>(lhs.ddrRoot);
+  auto right = dyn_cast<BlockArgument>(rhs.ddrRoot);
+  return !(abiDisjointDdrRoots && left && right &&
+           left.getOwner() == right.getOwner() &&
+           isa<func::FuncOp>(left.getOwner()->getParentOp()));
 }
 
 //===----------------------------------------------------------------------===//
@@ -420,6 +472,8 @@ private:
   }
 
   LogicalResult checkOperation(Operation &op, BlockAnalysis &analysis) {
+    if (failed(checkSpmStorage(op)))
+      return failure();
     // Regions are only entered with nothing in flight; the region body is
     // analyzed with its own fresh state.
     if (op.getNumRegions() != 0) {
@@ -445,14 +499,21 @@ private:
     if (auto wait = dyn_cast<DmaWaitOp>(&op))
       return checkWait(wait, analysis);
 
-    if (failed(checkSpmStorage(op)))
-      return failure();
     return checkAccess(op, analysis);
   }
 
   /// SPM is a fixed workspace: it is addressed through `bosc_ame.spm.view`,
   /// never allocated, freed or declared as a global.
   LogicalResult checkSpmStorage(Operation &op) {
+    if (isa<memref::LoadOp, memref::StoreOp, memref::CopyOp, linalg::LinalgOp>(
+            op))
+      for (Value operand : op.getOperands()) {
+        auto chain = tracePointerChain(operand);
+        if (getSpmBank(operand.getType()) || (chain && chain->bank))
+          return op.emitOpError(
+              "scalar load/store, ordinary memref.copy or Linalg may not "
+              "access SPM; use 1-D vector transfers or AME tiles");
+      }
     auto checkSpace = [&](Type type, StringRef verb) -> LogicalResult {
       std::optional<int64_t> bank = getSpmBank(type);
       if (!bank)
@@ -510,6 +571,11 @@ private:
              << " endpoint whose byte range cannot be traced back to a storage "
                 "root; the SPM/DMA analysis needs a view of a function "
                 "argument, a `bosc_ame.spm.view` or an allocation";
+    for (const Footprint *footprint : {&*src, &*dst})
+      if (footprint->bank && (!footprint->rangeKnown || footprint->begin < 0 ||
+                              footprint->end > kSpmBankCapacityBytes))
+        return start.emitOpError(
+            "SPM DMA range must be statically bounded inside its bank");
 
     // A new request behaves like a read of its source and a write of its
     // destination, so it conflicts with the destination of an in-flight
