@@ -54,6 +54,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Conversion/TritonToBOSCAME/TritonToBOSCAME.h"
+#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 
 #include "BOSCAME/BOSCAMEAttrs.h"
 #include "BOSCAME/BOSCAMEDialect.h"
@@ -106,35 +107,8 @@ namespace {
 
 constexpr int64_t kTileDimMax = kAmeMaxTileDim;
 constexpr int64_t kDmaGranularity = kDmaAlignmentBytes;
-constexpr StringLiteral kDdrReadBegin = "bosc_ame_ddr_read_begin";
-constexpr StringLiteral kDdrWriteBegin = "bosc_ame_ddr_write_begin";
-
-/// E6 DDR loads after DMA must bypass cached data, and subsequent stores must
-/// restore the write policy. These calls stay outside the AME live range.
-void emitDdrPolicy(OpBuilder &builder, Location loc, bool write) {
-  func::CallOp::create(builder, loc, write ? kDdrWriteBegin : kDdrReadBegin,
-                       TypeRange{}, ValueRange{});
-}
-
-LogicalResult declareDdrPolicies(ModuleOp module) {
-  OpBuilder builder(module.getContext());
-  auto type = builder.getFunctionType({}, {});
-  for (StringRef name : {kDdrReadBegin, kDdrWriteBegin}) {
-    if (Operation *symbol = SymbolTable::lookupSymbolIn(module, name)) {
-      auto function = dyn_cast<func::FuncOp>(symbol);
-      if (!function || function.getFunctionType() != type ||
-          !function.isExternal())
-        return symbol->emitError()
-               << "reserved BOSCAME DDR policy helper @" << name
-               << " must be an external func.func with type () -> ()";
-      continue;
-    }
-    builder.setInsertionPointToEnd(module.getBody());
-    auto function = func::FuncOp::create(builder, module.getLoc(), name, type);
-    function.setPrivate();
-  }
-  return success();
-}
+using buddy::boscame::lowering::declareDdrPolicies;
+using buddy::boscame::lowering::emitDdrPolicy;
 
 int64_t alignTo(int64_t value, int64_t alignment) {
   return (value + alignment - 1) / alignment * alignment;

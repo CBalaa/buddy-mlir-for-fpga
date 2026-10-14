@@ -9,6 +9,7 @@ add_mlir_library(BuddyTritonToBOSCAME
   BuddyTritonToBOSCAMEPassIncGen
 
   LINK_LIBS PUBLIC
+  BuddyBOSCAMEHelpers
   BuddyBOSCAME
   BuddyTritonIR
   MLIRArithDialect

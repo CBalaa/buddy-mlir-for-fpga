@@ -1,6 +1,7 @@
 #ifndef TRITON_CONVERSION_TRITONARITHTOLINALG_TRITONARITHTOLINALG_H
 #define TRITON_CONVERSION_TRITONARITHTOLINALG_TRITONARITHTOLINALG_H
 
+#include "Conversion/TritonLoweringConfig.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
@@ -15,18 +16,18 @@ namespace triton {
 void populateTritonArithToLinalgCanonicalizationPatterns(
     RewritePatternSet &patterns);
 
-void populateTritonArithToLinalgConversionPatterns(bool pidsToFuncArgs,
-                                                   bool addptrToLinalg,
-                                                   bool assertToCf,
-                                                   bool transposeReduceToRank0,
-                                                   RewritePatternSet &patterns);
+void populateTritonArithToLinalgConversionPatterns(
+    bool pidsToFuncArgs, bool addptrToLinalg, bool assertToCf,
+    bool transposeReduceToRank0, RewritePatternSet &patterns,
+    TritonLoweringConfig config = {});
 
 // Expand the triton pointer ops operating on pointers to linalg
 void populateTritonTensorPtrConversionPatterns(RewritePatternSet &patterns);
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createTritonArithToLinalgPass(bool tensorPtrToLinalg = false,
-                              bool transposeReduceToRank0 = true);
+                              bool transposeReduceToRank0 = true,
+                              TritonLoweringConfig config = {});
 
 } // namespace triton
 } // namespace mlir

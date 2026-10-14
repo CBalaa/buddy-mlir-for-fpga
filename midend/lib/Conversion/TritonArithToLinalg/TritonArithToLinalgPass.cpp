@@ -88,6 +88,8 @@ class TritonArithToLinalgPass
   }
 
 public:
+  TritonLoweringConfig config;
+
   void getDependentDialects(DialectRegistry &registry) const override {
     registry
         .insert<func::FuncDialect, arith::ArithDialect, math::MathDialect,
@@ -98,6 +100,19 @@ public:
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
+    if (config.enableBOSCAME) {
+      WalkResult remainingMemory = moduleOp.walk([&](Operation *op) {
+        if (!isa<triton::LoadOp, triton::StoreOp>(op))
+          return WalkResult::advance();
+        op->emitError("BOSCAME unstructured/scalar memory access is "
+                      "unsupported; cannot bypass DMA");
+        return WalkResult::interrupt();
+      });
+      if (remainingMemory.wasInterrupted()) {
+        signalPassFailure();
+        return;
+      }
+    }
 
     {
       RewritePatternSet patterns(&getContext());
@@ -184,7 +199,7 @@ public:
 
     triton::populateTritonArithToLinalgConversionPatterns(
         pidsToFuncArgs, addptrToLinalg, assertToCf, transposeReduceToRank0,
-        patterns);
+        patterns, config);
 
     if (pidsToFuncArgs) {
       for (auto func : getOperation().getOps<triton::FuncOp>()) {
@@ -217,6 +232,14 @@ public:
         funcFunc.setVisibility(func.getVisibility());
         funcFunc.setAllArgAttrs(argAttrs);
         funcFunc.setAllResultAttrs(resAttrs);
+        if (config.enableBOSCAME)
+          for (NamedAttribute attr : func->getAttrs())
+            if (attr.getName() != SymbolTable::getSymbolAttrName() &&
+                attr.getName() != "function_type" &&
+                attr.getName() != "arg_attrs" &&
+                attr.getName() != "res_attrs" &&
+                attr.getName() != "sym_visibility")
+              funcFunc->setAttr(attr.getName(), attr.getValue());
 
         auto &funcFuncBody = funcFunc.getBody();
         auto &funcBody = func.getBody();
@@ -245,9 +268,12 @@ public:
 
 std::unique_ptr<OperationPass<ModuleOp>>
 triton::createTritonArithToLinalgPass(bool tensorPtrToLinalg,
-                                      bool transposeReduceToRank0) {
+                                      bool transposeReduceToRank0,
+                                      TritonLoweringConfig config) {
   TritonArithToLinalgOptions options;
   options.tensorPtrToLinalg = tensorPtrToLinalg;
   options.transposeReduceToRank0 = transposeReduceToRank0;
-  return std::make_unique<TritonArithToLinalgPass>(options);
+  auto pass = std::make_unique<TritonArithToLinalgPass>(options);
+  pass->config = std::move(config);
+  return pass;
 }

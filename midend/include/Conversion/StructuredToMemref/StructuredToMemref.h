@@ -1,10 +1,15 @@
 #ifndef TRITON_CONVERSION_STRUCTUREDTOMEMREF_STRUCTUREDTOMEMREF_H
 #define TRITON_CONVERSION_STRUCTUREDTOMEMREF_STRUCTUREDTOMEMREF_H
 
+#include "Conversion/TritonLoweringConfig.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
 
 #include "Triton/IR/Dialect.h"
+
+namespace buddy::boscame::lowering {
+class Workspace;
+}
 
 namespace mlir {
 class TypeConverter;
@@ -15,13 +20,15 @@ namespace triton {
 
 void populateStructuredToMemrefConversionPatterns(
     RewritePatternSet &patterns, TypeConverter &typeConverter,
-    bool enableTensorFirstVectorCpu = false);
+    bool enableTensorFirstVectorCpu = false, TritonLoweringConfig config = {},
+    ::buddy::boscame::lowering::Workspace *workspace = nullptr);
 
 void populateStructuredToMemrefPreConversionPatterns(
     RewritePatternSet &patterns, bool enableTensorFirstVectorCpu = false);
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createStructuredToMemrefPass(bool enableTensorFirstVectorCpu = false);
+createStructuredToMemrefPass(bool enableTensorFirstVectorCpu = false,
+                             TritonLoweringConfig config = {});
 
 } // namespace triton
 } // namespace mlir

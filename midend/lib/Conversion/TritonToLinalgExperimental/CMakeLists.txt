@@ -15,6 +15,8 @@ add_mlir_library(BuddyTritonToLinalgExperimental
   BuddyTritonToLinalgExperimentalPassIncGen
 
   LINK_LIBS PUBLIC
+  BuddyBOSCAMEHelpers
+  BuddyBOSCAMETransforms
   BuddyTPtrIR
   BuddyTritonAnalysis
   BuddyTritonAnalysisStructured
@@ -29,6 +31,7 @@ add_mlir_library(BuddyTritonToLinalgExperimental
   MLIRAffineDialect
   MLIRArithDialect
   MLIRBufferizationDialect
+  MLIRBufferizationTransforms
   MLIRControlFlowDialect
   MLIRDialectUtils
   MLIRFuncDialect

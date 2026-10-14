@@ -7,7 +7,9 @@
 
 #include "Triton/IR/Dialect.h"
 
+#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
+#include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/TPtr/IR/TPtrDialect.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
@@ -85,14 +87,23 @@ public:
                 scf::SCFDialect, tensor::TensorDialect,
                 bufferization::BufferizationDialect, triton::TritonDialect,
                 memref::MemRefDialect, vector::VectorDialect>();
+    registry.insert<buddy::boscame::BOSCAMEDialect>();
   }
+
+  TritonLoweringConfig config;
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
+    buddy::boscame::lowering::Workspace workspace;
+    if (config.enableBOSCAME &&
+        failed(buddy::boscame::lowering::declareDdrPolicies(moduleOp))) {
+      signalPassFailure();
+      return;
+    }
 
     RewritePatternSet prePatterns(&getContext());
     triton::populateStructuredToMemrefPreConversionPatterns(
-        prePatterns, enableTensorFirstVectorCpu);
+        prePatterns, enableTensorFirstVectorCpu && !config.enableBOSCAME);
     if (failed(applyPatternsGreedily(moduleOp, std::move(prePatterns)))) {
       signalPassFailure();
       return;
@@ -107,6 +118,7 @@ public:
                            cf::ControlFlowDialect, tensor::TensorDialect,
                            bufferization::BufferizationDialect,
                            memref::MemRefDialect, vector::VectorDialect>();
+    target.addLegalDialect<buddy::boscame::BOSCAMEDialect>();
 
     target.addIllegalOp<tts::LoadOp, tts::StoreOp, tts::MakeTensorPtrOp>();
 
@@ -115,7 +127,8 @@ public:
     PtrToUnrankedMemrefConverter typeConverter;
 
     triton::populateStructuredToMemrefConversionPatterns(
-        patterns, typeConverter, enableTensorFirstVectorCpu);
+        patterns, typeConverter, enableTensorFirstVectorCpu, config,
+        &workspace);
 
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
       signalPassFailure();
@@ -125,8 +138,11 @@ public:
 } // namespace
 
 std::unique_ptr<OperationPass<ModuleOp>>
-triton::createStructuredToMemrefPass(bool enableTensorFirstVectorCpu) {
+triton::createStructuredToMemrefPass(bool enableTensorFirstVectorCpu,
+                                     TritonLoweringConfig config) {
   StructuredToMemrefOptions options;
   options.enableTensorFirstVectorCpu = enableTensorFirstVectorCpu;
-  return std::make_unique<StructuredToMemrefPass>(options);
+  auto pass = std::make_unique<StructuredToMemrefPass>(options);
+  pass->config = std::move(config);
+  return pass;
 }

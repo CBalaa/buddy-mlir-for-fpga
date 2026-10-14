@@ -5,9 +5,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
 #include "Conversion/TritonArithToLinalg/TritonArithToLinalg.h"
-#include "Conversion/TritonLoweringConfig.h"
 #include "Conversion/TritonPtrToMemref/TritonPtrToMemref.h"
 #include "Conversion/TritonToLinalgExperimental/CollapseShape.h"
 #include "Conversion/TritonToLinalgExperimental/ReconcilePtrCasts.h"
@@ -16,7 +16,9 @@
 #include "Conversion/TritonToStructured/TritonToStructured.h"
 #include "Conversion/TritonToUnstructured/TritonToUnstructured.h"
 #include "Conversion/UnstructuredToMemref/UnstructuredToMemref.h"
+#include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/SpmDma.h"
+#include "Dialect/BOSCAME/Transform.h"
 #include "Dialect/TPtr/IR/TPtrDialect.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 #include "mlir/Dialect/Ptr/IR/PtrDialect.h"
@@ -24,6 +26,7 @@
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -52,6 +55,8 @@ public:
                     bufferization::BufferizationDialect, memref::MemRefDialect,
                     vector::VectorDialect, tts::TritonStructuredDialect,
                     tptr::TPtrDialect, ptr::PtrDialect>();
+    if (boscame)
+      registry.insert<buddy::boscame::BOSCAMEDialect>();
   }
 
   void runOnOperation() override {
@@ -90,14 +95,8 @@ public:
       }
       moduleOp->setAttr(kDmaAbiAttrName,
                         StringAttr::get(&getContext(), config.dmaAbi));
-      moduleOp->setAttr("bosc_ame.cpu_ddr_policy",
+      moduleOp->setAttr(buddy::boscame::lowering::kCpuDdrPolicy,
                         UnitAttr::get(&getContext()));
-    }
-    if (config.enableBOSCAME) {
-      moduleOp.emitError(
-          "BOSCAME memory lowering is not installed at this pipeline stage");
-      signalPassFailure();
-      return;
     }
     PassManager pm(&getContext(), moduleOp.getOperationName());
     bool enableTensorFirstVectorCpu = false;
@@ -112,6 +111,10 @@ public:
       signalPassFailure();
       return;
     }
+    // Tensor-first fusion consumes loads/stores before DMA staging can see
+    // them.
+    if (config.enableBOSCAME)
+      enableTensorFirstVectorCpu = false;
 
     pm.addPass(createTritonToStructuredPass(enableMakeGatherScatterTensorPtr));
 
@@ -124,10 +127,11 @@ public:
     // force dimension 0 creates large temporary buffers after bufferization
     // and is particularly costly for CPU row reductions.
     pm.addPass(createTritonArithToLinalgPass(
-        /*tensorPtrToLinalg=*/true, /*transposeReduceToRank0=*/false));
+        /*tensorPtrToLinalg=*/true, /*transposeReduceToRank0=*/false, config));
 
-    pm.addPass(createStructuredToMemrefPass(enableTensorFirstVectorCpu));
-    pm.addPass(createUnstructuredToMemrefPass());
+    pm.addPass(
+        createStructuredToMemrefPass(enableTensorFirstVectorCpu, config));
+    pm.addPass(createUnstructuredToMemrefPass(config));
     pm.addPass(createTritonPtrToMemrefPass());
     pm.addPass(createTritonToPtrPass());
     pm.addPass(createReconcileUnrealizedCastsPass());
@@ -136,7 +140,12 @@ public:
     // Now that remove-dead-values fully works with linalg ops, clean up the IR
     // again, particularly unused loop iter-args that were created
     // during triton-to-structured.
-    pm.addPass(createRemoveDeadValuesPass());
+    if (config.enableBOSCAME)
+      // Preserve private function signatures and their argument/result attrs;
+      // only simplify values inside each function in this mode.
+      pm.addNestedPass<func::FuncOp>(createRemoveDeadValuesPass());
+    else
+      pm.addPass(createRemoveDeadValuesPass());
     pm.addPass(createCSEPass());
     pm.addPass(createCanonicalizerPass());
     if (enableCollapseShape) {
@@ -148,7 +157,23 @@ public:
 
     if (failed(runPipeline(pm, getOperation()))) {
       signalPassFailure();
+      return;
     }
+    if (!config.enableBOSCAME)
+      return;
+    WalkResult integerTargets = moduleOp.walk([&](linalg::MatmulOp matmul) {
+      auto input = cast<ShapedType>(matmul.getInputs()[0].getType());
+      auto output = cast<ShapedType>(matmul.getOutputs()[0].getType());
+      if (input.getElementType().isInteger(8) &&
+          output.getElementType().isInteger(32)) {
+        matmul.emitError(
+            "AME matmul lowering is not installed at this pipeline stage");
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+    if (integerTargets.wasInterrupted())
+      signalPassFailure();
   }
 };
 } // namespace

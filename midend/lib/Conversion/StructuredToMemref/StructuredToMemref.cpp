@@ -8,6 +8,7 @@
 #include "Triton/IR/Types.h"
 
 #include "Analysis/OpFoldResultUtils.h"
+#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
@@ -46,6 +47,7 @@
 #define DEBUG_TYPE "structured-to-memref"
 
 using namespace mlir;
+using mlir::triton::TritonLoweringConfig;
 
 static const std::string WRAP_SIDE_BY_SIDE = "wrap_side_by_side";
 static const std::string WRAP_STACKED = "wrap_stacked";
@@ -1676,6 +1678,9 @@ struct MakeGatherScatterTensorPtrConverter
 };
 
 struct LoadConverter : public OpConversionPattern<tts::LoadOp> {
+  bool enableBOSCAME;
+  buddy::boscame::lowering::Workspace *workspace;
+
 private:
   bool enableTensorFirstVectorCpu;
 
@@ -2438,8 +2443,11 @@ private:
 
 public:
   LoadConverter(const TypeConverter &typeConverter,
-                bool enableTensorFirstVectorCpu, MLIRContext *context)
+                bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
+                buddy::boscame::lowering::Workspace *workspace,
+                MLIRContext *context)
       : OpConversionPattern<tts::LoadOp>(typeConverter, context),
+        enableBOSCAME(config.enableBOSCAME), workspace(workspace),
         enableTensorFirstVectorCpu(enableTensorFirstVectorCpu) {}
 
   LogicalResult
@@ -2448,6 +2456,9 @@ public:
     auto originalPtr = op.getPtr();
     if (auto gatherScatterPtr =
             originalPtr.getDefiningOp<tts::MakeGatherScatterTensorPtrOp>()) {
+      if (enableBOSCAME)
+        return op.emitError(
+            "BOSCAME gather/scatter load is unsupported; cannot bypass DMA");
       FailureOr<Value> memRefPtr = materializeGatherScatterBaseMemRef(
           gatherScatterPtr, op.getLoc(), rewriter);
       if (failed(memRefPtr)) {
@@ -2476,7 +2487,16 @@ public:
     }
 
     LogicalResult result = failure();
-    if (isTensorFirstFastPathCandidate(op, ptr)) {
+    if (enableBOSCAME) {
+      auto tensor = buddy::boscame::lowering::lowerLoad(
+          rewriter, op, ptr, cast<RankedTensorType>(op.getType()),
+          op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{},
+          op.getOther(), *workspace);
+      if (failed(tensor))
+        return failure();
+      rewriter.replaceOp(op, *tensor);
+      result = success();
+    } else if (isTensorFirstFastPathCandidate(op, ptr)) {
       result = op.hasMask() ? rewriteTensorFirstMaskedLoad(op, ptr, rewriter)
                             : rewriteTensorFirstUnmaskedLoad(op, ptr, rewriter);
     } else if (op.hasMask()) {
@@ -2493,6 +2513,9 @@ public:
 };
 
 struct StoreConverter : public OpConversionPattern<tts::StoreOp> {
+  bool enableBOSCAME;
+  buddy::boscame::lowering::Workspace *workspace;
+
 private:
   bool enableTensorFirstVectorCpu;
 
@@ -2779,8 +2802,11 @@ private:
 
 public:
   StoreConverter(const TypeConverter &typeConverter,
-                 bool enableTensorFirstVectorCpu, MLIRContext *context)
+                 bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
+                 buddy::boscame::lowering::Workspace *workspace,
+                 MLIRContext *context)
       : OpConversionPattern<tts::StoreOp>(typeConverter, context),
+        enableBOSCAME(config.enableBOSCAME), workspace(workspace),
         enableTensorFirstVectorCpu(enableTensorFirstVectorCpu) {}
 
   LogicalResult
@@ -2791,6 +2817,9 @@ public:
     auto originalPtr = op.getPtr();
     if (auto gatherScatterPtr =
             originalPtr.getDefiningOp<tts::MakeGatherScatterTensorPtrOp>()) {
+      if (enableBOSCAME)
+        return op.emitError(
+            "BOSCAME gather/scatter store is unsupported; cannot bypass DMA");
       FailureOr<Value> memRefPtr = materializeGatherScatterBaseMemRef(
           gatherScatterPtr, op.getLoc(), rewriter);
       if (failed(memRefPtr)) {
@@ -2817,6 +2846,19 @@ public:
             op, "expected pointer operand to lower from tts.make_tptr");
       }
       ptr = *materialized;
+    }
+
+    if (enableBOSCAME) {
+      if (failed(buddy::boscame::lowering::lowerStore(
+              rewriter, op, ptr, adaptor.getValue(),
+              op.hasMask() ? op.getMixedMaskDims()
+                           : SmallVector<OpFoldResult>{},
+              *workspace)))
+        return failure();
+      rewriter.eraseOp(op);
+      if (makeTPtr && makeTPtr->use_empty())
+        rewriter.eraseOp(makeTPtr);
+      return success();
     }
 
     if (isTensorFirstFastPathCandidate(op, ptr)) {
@@ -2933,9 +2975,11 @@ void mlir::triton::populateStructuredToMemrefPreConversionPatterns(
 
 void mlir::triton::populateStructuredToMemrefConversionPatterns(
     RewritePatternSet &patterns, TypeConverter &typeConverter,
-    bool enableTensorFirstVectorCpu) {
+    bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
+    buddy::boscame::lowering::Workspace *workspace) {
   patterns.add<MakeTensorPtrConverter, MakeGatherScatterTensorPtrConverter>(
       typeConverter, patterns.getContext());
   patterns.add<LoadConverter, StoreConverter>(
-      typeConverter, enableTensorFirstVectorCpu, patterns.getContext());
+      typeConverter, enableTensorFirstVectorCpu, config, workspace,
+      patterns.getContext());
 }

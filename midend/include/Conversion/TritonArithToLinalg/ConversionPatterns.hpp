@@ -1022,7 +1022,9 @@ struct MulHiUIOpConverter : public OpConversionPattern<triton::MulhiUIOp> {
 };
 
 struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
-  using OpConversionPattern<triton::DotOp>::OpConversionPattern;
+  MatmulConverter(MLIRContext *context, TritonLoweringConfig config = {})
+      : OpConversionPattern(context), enableBOSCAME(config.enableBOSCAME) {}
+  bool enableBOSCAME;
 
   // true means tensor elements are zeros
   // false means not zero or it cannot be determined

@@ -810,6 +810,7 @@ class UnstructuredToMemrefPass
     : public ::impl::UnstructuredToMemrefBase<UnstructuredToMemrefPass> {
 
 public:
+  TritonLoweringConfig config;
   void getDependentDialects(DialectRegistry &registry) const override {
     registry
         .insert<func::FuncDialect, arith::ArithDialect, math::MathDialect,
@@ -820,6 +821,20 @@ public:
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
+    if (config.enableBOSCAME) {
+      WalkResult unsupported = moduleOp.walk([&](Operation *op) {
+        if (!isa<tts::GatherOp, tts::ScatterOp, tts::AtomicRMWOp,
+                 tts::AtomicCASOp, triton::LoadOp, triton::StoreOp>(op))
+          return WalkResult::advance();
+        op->emitError("BOSCAME unstructured/scalar memory access is "
+                      "unsupported; cannot bypass DMA");
+        return WalkResult::interrupt();
+      });
+      if (unsupported.wasInterrupted()) {
+        signalPassFailure();
+        return;
+      }
+    }
 
     RewritePatternSet patterns(&getContext());
     ConversionTarget target(getContext());
@@ -907,8 +922,10 @@ public:
 } // namespace
 
 std::unique_ptr<OperationPass<ModuleOp>>
-triton::createUnstructuredToMemrefPass() {
-  return std::make_unique<UnstructuredToMemrefPass>();
+triton::createUnstructuredToMemrefPass(TritonLoweringConfig config) {
+  auto pass = std::make_unique<UnstructuredToMemrefPass>();
+  pass->config = std::move(config);
+  return pass;
 }
 
 std::unique_ptr<OperationPass<ModuleOp>>
