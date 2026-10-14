@@ -1065,6 +1065,11 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     auto dstType = cast<RankedTensorType>(op.getType());
     auto elementType = dstType.getElementType();
     bool integers = elementType.isInteger();
+    if (enableBOSCAME && integers &&
+        (!elementType.isInteger(32) ||
+         !cast<RankedTensorType>(opa.getType()).getElementType().isInteger(8) ||
+         !cast<RankedTensorType>(opb.getType()).getElementType().isInteger(8)))
+      return op.emitError("BOSCAME integer dot requires signed i8 x i8 -> i32");
     bool skipC = isZeroTensor(opc, integers);
     auto init =
         rewriter.create<tensor::EmptyOp>(loc, dstType.getShape(), elementType);
@@ -1114,6 +1119,10 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
                                           ValueRange{zeroes})
                 .getResult(0);
     }
+
+    if (enableBOSCAME && integers)
+      res.getDefiningOp()->setAttr("bosc_ame.lower_to_ame",
+                                   rewriter.getUnitAttr());
 
     if (!skipC) {
       if (integers) {

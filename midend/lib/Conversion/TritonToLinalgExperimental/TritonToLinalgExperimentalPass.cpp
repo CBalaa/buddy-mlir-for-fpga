@@ -169,6 +169,15 @@ public:
         function->setAttr("llvm.emit_c_interface",
                           UnitAttr::get(&getContext()));
     });
+    auto countTargets = [&]() {
+      unsigned count = 0;
+      moduleOp.walk([&](linalg::MatmulOp op) {
+        count += op->hasAttr(buddy::boscame::lowering::kLowerToAme);
+      });
+      return count;
+    };
+    unsigned tensorTargets = countTargets();
+
     // Keep tensor computations in ordinary memory. Only the explicit vector
     // copies and tile operations constructed by the helpers access SPM.
     PassManager bufferize(&getContext(), moduleOp.getOperationName());
@@ -183,6 +192,17 @@ public:
       signalPassFailure();
       return;
     }
+    if (countTargets() != tensorTargets) {
+      moduleOp.emitError(
+          "BOSCAME matmul markers were lost during bufferization");
+      signalPassFailure();
+      return;
+    }
+    if (failed(buddy::boscame::lowering::lowerMarkedMatmuls(moduleOp))) {
+      signalPassFailure();
+      return;
+    }
+
     PassManager finish(&getContext(), moduleOp.getOperationName());
     finish.addNestedPass<func::FuncOp>(
         bufferization::createPromoteBuffersToStackPass([](Value value) {
