@@ -8,6 +8,7 @@ add_mlir_library(BuddyBOSCAMETransforms
   MLIRBOSCAMEIncGen
 
   LINK_LIBS PUBLIC
+  BuddyBOSCAMEHelpers
   BuddyBOSCAME
   MLIRAffineDialect
   MLIRAffineToStandard

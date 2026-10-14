@@ -161,18 +161,40 @@ public:
     }
     if (!config.enableBOSCAME)
       return;
-    WalkResult integerTargets = moduleOp.walk([&](linalg::MatmulOp matmul) {
-      auto input = cast<ShapedType>(matmul.getInputs()[0].getType());
-      auto output = cast<ShapedType>(matmul.getOutputs()[0].getType());
-      if (input.getElementType().isInteger(8) &&
-          output.getElementType().isInteger(32)) {
-        matmul.emitError(
-            "AME matmul lowering is not installed at this pipeline stage");
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
+    // The experimental entry uses typed unranked descriptors. Emit the real
+    // MLIR C wrapper for public kernels; conversion of arguments/program IDs
+    // has already happened once in the common pipeline.
+    moduleOp.walk([&](func::FuncOp function) {
+      if (!function.isExternal() && function.isPublic())
+        function->setAttr("llvm.emit_c_interface",
+                          UnitAttr::get(&getContext()));
     });
-    if (integerTargets.wasInterrupted())
+    // Keep tensor computations in ordinary memory. Only the explicit vector
+    // copies and tile operations constructed by the helpers access SPM.
+    PassManager bufferize(&getContext(), moduleOp.getOperationName());
+    bufferize.addPass(bufferization::createEmptyTensorToAllocTensorPass());
+    bufferization::OneShotBufferizePassOptions options;
+    options.bufferizeFunctionBoundaries = true;
+    options.bufferAlignment = 64;
+    bufferize.addPass(bufferization::createOneShotBufferizePass(options));
+    bufferize.addPass(createCanonicalizerPass());
+    bufferize.addPass(createCSEPass());
+    if (failed(runPipeline(bufferize, moduleOp))) {
+      signalPassFailure();
+      return;
+    }
+    PassManager finish(&getContext(), moduleOp.getOperationName());
+    finish.addNestedPass<func::FuncOp>(
+        bufferization::createPromoteBuffersToStackPass([](Value value) {
+          auto type = dyn_cast<MemRefType>(value.getType());
+          return type && !buddy::boscame::spmdma::getSpmBank(type) &&
+                 buddy::boscame::spmdma::getStaticByteSize(type).has_value();
+        }));
+    finish.addPass(createCanonicalizerPass());
+    finish.addPass(createCSEPass());
+    if (failed(runPipeline(finish, moduleOp)) ||
+        failed(buddy::boscame::lowering::verifyExit(moduleOp)) ||
+        failed(buddy::boscame::verifySpmDmaContract(moduleOp)))
       signalPassFailure();
   }
 };

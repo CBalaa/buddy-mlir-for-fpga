@@ -3,8 +3,19 @@
 // RUN: diff %t.default %t.false
 // RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true' 2>&1 | FileCheck %s --check-prefix=MISSING
 // RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=unknown' 2>&1 | FileCheck %s --check-prefix=INVALID
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' | FileCheck %s --check-prefix=UNMASKED
 // MISSING: boscame=true requires dma-abi=args_aligned64_nonalias
 // INVALID: invalid dma-abi: unknown
+// UNMASKED-LABEL: func.func @copy
+// UNMASKED: bosc_ame.dma.start
+// UNMASKED: bosc_ame.dma.wait
+// UNMASKED: vector.load {{.*}} : memref<16xf32, #bosc_ame.spm<0>>, vector<16xf32>
+// UNMASKED: vector.store {{.*}} : memref<16xf32>, vector<16xf32>
+// UNMASKED: vector.load {{.*}} : memref<16xf32>, vector<16xf32>
+// UNMASKED: vector.store {{.*}} : memref<16xf32, #bosc_ame.spm<1>>, vector<16xf32>
+// UNMASKED: bosc_ame.dma.start
+// UNMASKED: bosc_ame.dma.wait
+// UNMASKED-NOT: bosc_ame.dma.start
 
 module {
   tt.func public @copy(%src: !tt.ptr<f32>, %dst: !tt.ptr<f32>) {

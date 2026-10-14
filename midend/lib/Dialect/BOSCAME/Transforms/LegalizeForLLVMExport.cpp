@@ -67,6 +67,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 #include "Dialect/BOSCAME/BOSCAMEAttrs.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
@@ -689,6 +690,8 @@ LogicalResult runBOSCAMELowering(ModuleOp module, MLIRContext &context,
   if (failed(runPreparationPipeline(module, context)))
     return failure();
   prepareVectorOps(module, context);
+  if (failed(buddy::boscame::lowering::emitCpuDdrPolicies(module)))
+    return failure();
 
   // Stage 3: the loop structure follows automatically from the type conversion
   // of stage 4 (see `convertToLLVM`), which converts the matrix value type and
