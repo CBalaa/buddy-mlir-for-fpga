@@ -2,7 +2,7 @@
 #
 #     kernels.py (Triton)                      [make ttir]
 #       -> kernel.ttir  + kernel.linalg.mlir
-#     kernel.ttir --triton-to-boscame          [make boscame]
+#     kernel.ttir --triton-to-linalg-experimental=boscame=true          [make boscame]
 #       -> kernel.boscame.mlir                 (DDR -> SPM -> AME registers)
 #     --lower-bosc-ame + --buddy-to-llvmir     [make llvm]
 #       -> kernel.llvm.mlir + kernel.ll
@@ -14,7 +14,7 @@
 # `make` runs all of it.  Every stage is a file rule, so re-running only
 # rebuilds what changed.
 #
-# AME=1 (default) rewrites the TTIR with `--triton-to-boscame`, so the matmul
+# AME=1 (default) uses the experimental BOSCAME path, so the matmul
 # runs on the AME tile datapath (DDR -> SPM -> AME registers).  AME=0 skips
 # that pass and lowers the same kernel to scalar RISC-V through the
 # Triton-to-linalg path, so the E6 core computes the matmul itself.  Both
@@ -69,12 +69,11 @@ UART := $(REPO)/runtime/boscame/uart
 PLATFORM := $(REPO)/runtime/boscame/nh_e6
 NR := $(REPO)/runtime/boscame/nr
 
-# DDR scratch the driver hands to `_mlir_ciface_kernel_*`.  Must match
-# `SCRATCH_BYTES` in launch.c; `make check` fails the build when the pass
-# records a larger requirement than this window.  Only the AME=1 image uses it.
+# Legacy launcher scratch facade; the experimental kernel stages on its
+# aligned DDR stack and does not take this buffer.
 SCRATCH_BYTES := 1024
 
-# --- datapath selection: AME=1 runs --triton-to-boscame, AME=0 does not ---
+# --- datapath selection: experimental BOSCAME or scalar CPU ---
 AME ?= 1
 ifeq ($(filter 0 1,$(AME)),)
 $(error AME must be 0 or 1, got '$(AME)')
@@ -94,12 +93,11 @@ V_DIR := $(OUT)$(if $(VARIANT),/$(VARIANT))
 V_NAME := $(NAME)$(if $(VARIANT),.$(VARIANT),)
 V_CFLAGS := $(if $(filter debug,$(VAR)),-DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=16) \
   -DMATMUL_I8_USE_AME=$(AME)
-V_AME := --triton-to-boscame=dma-abi=args_aligned64_nonalias
-# ABI bridge: four descriptors + grid for the pass output, three descriptors
-# for the scalar linalg kernel.  The two differ, so they get distinct names in
-# the shared scratch directory instead of going stale on an AME switch.
+V_AME := --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias"
+# ABI bridge: three typed unranked descriptors + six grid scalars. The new
+# kernel needs no caller scratch. Retain the launcher facade for legacy users.
 AME_TAG := $(if $(filter 0,$(AME)),noame,ame)
-ADAPTER := $(if $(filter 0,$(AME)),linalg-to-boscame,triton-to-boscame)
+ADAPTER := $(if $(filter 0,$(AME)),linalg-to-boscame,experimental-boscame)
 ADAPTER_C := $(SCRATCH)/adapter-$(AME_TAG).c
 OBJ := $(V_DIR)/obj
 ELF := $(V_DIR)/$(V_NAME).elf
@@ -111,11 +109,11 @@ RISCV_FLAGS := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -mcmodel=medany \
   -I$(ROOT) -I$(RUNTIME) -I$(UART) -I$(PLATFORM) -I$(NR)
 # Freestanding image: the DMA runtime's programming assertions compile out,
 # exactly as in the other FPGA examples; `bosc_ame_dma_wait` keeps its fatal
-# hardware checks.  The AME tile instructions need no RVV, and the kernel must
-# not acquire accidental vector memory operations.
+# hardware checks. Explicit one-dimensional RVV transfers move data between
+# SPM and ordinary stack buffers; the existing NR allowlist audits their forms.
 C_FLAGS := $(RISCV_FLAGS) -fno-vectorize -fno-slp-vectorize '-DBOSC_AME_DMA_ASSERT(x)='
 LLC_FLAGS := -O2 -filetype=asm -mtriple=riscv64 -target-abi=lp64d \
-  -mattr=+m,+a,+f,+d,+c,-v,+xboscame -code-model=medium
+  -mattr=+m,+a,+f,+d,+c,$(if $(filter 1,$(AME)),+v,-v),+xboscame -code-model=medium
 
 .PHONY: all ttir boscame llvm asm bin debug host check audit simcheck clean
 all: bin
@@ -133,12 +131,9 @@ ttir: $(OUT)/kernel.ttir
 
 # --- 2. TTIR -> BOSCAME (AME=1) -----------------------------------------
 ifeq ($(AME),1)
-# The pass analyses the whole target region (addresses, masks, types, layouts)
-# before rewriting it, stages DDR into SPM through real DMA where the 64 B
-# contract is provable, drives the AME tile registers and writes the result
-# back through SPM. `dma-abi=` is the caller's alignment/non-overlap promise.
-# Boundary tiles are packed in DDR scratch before DMA; CPU copying into SPM
-# is unsupported and the pass rejects a missing ABI promise.
+# Loads/stores independently use DMA plus explicit 1-D vectors. Arithmetic
+# stays in ordinary buffers. Marked, bufferized integer matmuls lower to AME.
+# The explicit ABI promises aligned, nonalias caller buffers.
 $(V_DIR)/kernel.boscame.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(V_DIR)
 	$(BUDDY_OPT) $< $(V_AME) -o $@
 
@@ -183,18 +178,14 @@ $(V_DIR)/kernel.nr.s: $(V_DIR)/kernel.encoded.s $(TOOLS)/restrict_fpga_assembly.
 	$(PYTHON) $(TOOLS)/restrict_fpga_assembly.py < $< > $@
 
 $(V_DIR)/kernel.o: $(V_DIR)/kernel.nr.s $(BUILD_MAKEFILE)
-	$(RISCV_CC) $(RISCV_FLAGS) -c $< -o $@
+	$(RISCV_CC) $(RISCV_FLAGS) -march=rv64imafdc$(if $(filter 1,$(AME)),v)_zicsr_zifencei -c $< -o $@
 
 asm: $(V_DIR)/kernel.nr.s
 
 # --- 6. application driver, ABI bridge, platform and DMA runtime ---------
-# AME=1: the kernel takes four byte-addressable memrefs (A/B/C and 1024 B
-# scratch) plus the launch grid; AME=0: three memrefs, no scratch.  Either way
-# build.py generates a bridge that calls the actual MLIR C wrapper with
-# descriptor pointers.  Boot, platform and UART come from the shared
-# runtime/boscame modules and are linked once, so both images share the
-# platform setup.  The DMA runtime stays linked in both: the driver registers
-# its failure hook, and the platform's diagnostics live there.
+# The MLIR wrapper takes three typed unranked descriptor pointers plus grid
+# scalars. The launcher adapter validates the DMA ABI and uses element counts.
+# Boot, platform, UART and DMA runtime are linked once in either variant.
 $(ADAPTER_C): $(ROOT)/build.py $(BUILD_MAKEFILE) | $(SCRATCH)
 	$(PYTHON) -B $(ROOT)/build.py --adapter $(ADAPTER) > $@
 
@@ -268,25 +259,21 @@ ifeq ($(AME),1)
 	@test "$$(grep -cE '# (mlae8|mlbe8|mlce32|msce32|mqma)' $(V_DIR)/kernel.nr.s)" \
 	  = "5" || { echo "FAIL: expected the five AME instructions in the NR asm"; exit 1; }
 	@grep -q '# mqma.b.mm' $(V_DIR)/kernel.nr.s || { echo "FAIL: no mqma"; exit 1; }
-	@python3 -c "import re,sys; t=open('$(V_DIR)/kernel.boscame.mlir').read(); \
-	  m=re.search(r'bosc_ame.scratch_bytes = (\d+)', t); \
-	  need=int(m.group(1)) if m else -1; \
-	  sys.exit(0 if 0 <= need <= $(SCRATCH_BYTES) else 1)" \
-	  || { echo "FAIL: the pass needs more than the $(SCRATCH_BYTES) B scratch window in launch.c"; exit 1; }
+	$(PYTHON) -B $(ROOT)/build.py --check-abi $(V_DIR)/kernel.ll
 else
 	@test "$$(grep -cE '# (mlae8|mlbe8|mlce32|msce32|mqma)' $(V_DIR)/kernel.nr.s)" \
 	  = "0" || { echo "FAIL: the AME=0 image must not carry AME instructions"; exit 1; }
 endif
 	@python3 -c "import json,sys; a=json.load(open('$(V_DIR)/elf-audit.json')); \
 	  ok = a['status'] == 'PASS' and not a['errors'] and \
-	       ($(AME) == 0 or a['ame_instructions'] > 0); \
+	       ($(AME) == 0 or (a['ame_instructions'] > 0 and a['vector_memory_instructions'] > 0)); \
 	  sys.exit(0 if ok else 1)" \
 	  || { echo "FAIL: the NR ELF audit did not pass"; exit 1; }
 	@echo "ok: $(V_NAME) passed the $(if $(filter 0,$(AME)),scalar,AME) checks and the NR ELF audit"
 
 # --- 10. AME-path functional check that needs no board ------------------
 # `make host` covers the scalar (Triton-to-linalg) path only; this runs the
-# pass output in tools/boscame_sim.py (real DMA/SPM/AME model) for every
+# pass output in tools/boscame_buffer_sim.py (functional DMA/SPM/AME model) for every
 # program of the grid and compares all outputs with a NumPy INT32 oracle.
 simcheck:
 	@test "$(AME)" = "1" || { echo "FAIL: simcheck checks the pass output; build with AME=1 (or use 'make host' for the scalar path)"; exit 1; }

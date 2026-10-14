@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Bit-exact DDR-level check of the generated `--triton-to-boscame` kernel.
+"""Bit-exact DDR-level check of the generated experimental BOSCAME kernel.
 
 `make host` verifies the Triton-to-linalg path, which does not contain the
 DMA/SPM/AME datapath at all.  This script runs the *AME* output instead:
-every program of the launch grid is executed by `tools/boscame_sim.py` (the
+every program of the launch grid is executed by `tools/boscame_buffer_sim.py` (the
 functional NH/E6 model -- real DMA contract, two 128 KiB SPM banks, AME tile
 semantics) and the resulting C is compared against an independent NumPy INT32
-oracle.  The scratch window starts poisoned, so the check also proves the pass
-initializes it before use.
+oracle. SPM persists between programs, and guards/access logs check excluded DDR.
 
     python3 simcheck.py [--module PATH] [--programs N]
 
@@ -16,7 +15,9 @@ place where the problem size is written down.  Requires numpy.
 """
 
 import argparse
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +28,8 @@ sys.path.insert(0, str(ROOT))
 import build as example  # noqa: E402  (frontend owner of the fixed shape)
 
 sys.path.insert(0, str(REPO / "examples/FPGA-BOSCAME/tools"))
-import boscame_sim  # noqa: E402
+from boscame_buffer_sim import Machine  # noqa: E402
+from boscame_check import buddy_opt_path  # noqa: E402
 
 
 def operands():
@@ -63,13 +65,28 @@ def main():
         raise SystemExit("missing " + str(args.module) + "; run `make boscame`")
 
     a, b, c0 = operands()
+    guard = bytes([0xA7]) * 1024
     buffers = {
-        "%arg0": bytearray(a.tobytes()),
-        "%arg1": bytearray(b.tobytes()),
-        "%arg2": bytearray(c0.tobytes()),
-        # Deliberately poisoned: the pass initializes scratch every program.
-        "%arg3": bytearray([0xAA] * example.SCRATCH_BYTES),
+        "%arg0": bytearray(a.tobytes() + guard),
+        "%arg1": bytearray(b.tobytes() + guard),
+        "%arg2": bytearray(c0.tobytes() + guard),
     }
+    # Parse only supported emitted operations; unknown forms fail closed.
+    with tempfile.TemporaryDirectory() as temp:
+        loops = Path(temp) / "kernel.loops.mlir"
+        subprocess.run(
+            [
+                buddy_opt_path(),
+                str(args.module),
+                "--convert-linalg-to-loops",
+                "--lower-affine",
+                "--canonicalize",
+                "-o",
+                str(loops),
+            ],
+            check=True,
+        )
+        machine = Machine(loops, example.SYMBOL)
     total = example.GRID[0] * example.GRID[1] * example.GRID[2]
     limit = args.programs or total
     launched = 0
@@ -78,24 +95,30 @@ def main():
             for z in range(example.GRID[2]):
                 if launched >= limit:
                     break
-                boscame_sim.simulate(
-                    args.module,
-                    example.SYMBOL,
+                machine.launch(
                     buffers,
                     {
-                        "%arg4": example.GRID[0],
-                        "%arg5": example.GRID[1],
-                        "%arg6": example.GRID[2],
-                        "%arg7": x,
-                        "%arg8": y,
-                        "%arg9": z,
+                        "%arg3": example.GRID[0],
+                        "%arg4": example.GRID[1],
+                        "%arg5": example.GRID[2],
+                        "%arg6": x,
+                        "%arg7": y,
+                        "%arg8": z,
                     },
                 )
                 launched += 1
 
     want = c0.astype(np.int64) + a.astype(np.int64) @ b.astype(np.int64).T
-    got = np.frombuffer(bytes(buffers["%arg2"]), dtype="<i4").reshape(
-        example.M, example.N
+    got = np.frombuffer(
+        bytes(buffers["%arg2"]), dtype="<i4", count=example.M * example.N
+    ).reshape(example.M, example.N)
+    assert buffers["%arg0"] == a.tobytes() + guard
+    assert buffers["%arg1"] == b.tobytes() + guard
+    assert buffers["%arg2"][-len(guard) :] == guard
+    limits = {"%arg0": a.nbytes, "%arg1": b.nbytes, "%arg2": c0.nbytes}
+    assert all(
+        0 <= start < end <= limits[name]
+        for name, start, end, _ in machine.accesses
     )
     max_abs = int(np.abs(got.astype(np.int64) - want).max())
     print(f"simulated {launched}/{total} programs, max_abs={max_abs}")

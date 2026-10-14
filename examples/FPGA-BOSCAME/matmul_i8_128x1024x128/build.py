@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
 """Triton matmul_i8 [128,128] x [1024,128]^T -> BOSCAME NR FPGA image.
 
-Frontend, configuration and backend live in this single file:
+The makefile builds TTIR with the experimental BOSCAME path, then runs
+``--lower-bosc-ame`` and LLVM translation. This file owns the real Triton
+frontend, fixed shape, typed-unranked ABI adapter and host reference path.
 
-  1. Triton AST -> TTIR -> triton-riscv linalg          (``export_frontend``)
-  2. linalg -> bufferize -> BOSCAME AME -> LLVM dialect (``lower``)
-  3. LLVM IR -> RISC-V asm -> AME encoding -> NR ELF    (``link_nr``)
-  4. ELF -> flat ``.bin`` for ``../fpga_run.sh``
+    A[i8, 128, 128] row-major @ B[i8, 1024, 128] physical [N,K]
+      -> C[i32, 128, 1024]
 
-This is the ``matmul_i8_196x768x768`` example with the fixed problem size
-changed to a small, exactly tile-aligned shape:
-
-    A[i8, 128, 128] row-major  @  B[i8, 1024, 128] physical [N,K]  ->  C[i32, 128, 1024]
-
-``tl.dot`` accumulates into ``C`` (AME ``mqma.b.mm`` has += semantics), so the
-launcher pre-loads ``C`` and checks the sum against an independent INT32
-reduction.  ``M`` is already a multiple of the AME 16-row tile, so
-``PADDED_M == VALID_M == M``: every tile in the 8 x 64 grid is fully valid and
-the pass takes the direct DDR -> SPM DMA path everywhere.  ``BK`` is 64 (two
-reduction blocks) rather than the whole ``K``: a single-iteration
-``scf.for`` is folded away by the Triton frontend, which merges the zero
-accumulator and the ``previous`` epilogue into one dot whose accumulator is a
-``tt.load``, a form the pass rejects (it requires a splat initial accumulator
-plus an explicit ``previous`` add).
-
-``--triton-to-boscame`` is what puts the matmul on the AME datapath.  The
-makefile can skip it (``make AME=0``) and lower the same kernel to scalar
-RISC-V instead; that image and the host oracle share ``lower(host=True)``, so
-the scalar image runs exactly the IR ``make host`` validated.
+Each dot is materialized at its boundary; the outer K loop and original C
+addition retain the Triton semantics. Ordinary aligned stack buffers stage
+Linalg and AME packing. No caller scratch argument is passed to the new kernel.
+The legacy ``--adapter triton-to-boscame`` generator remains available.
 
 Build artifacts (``build/matmul_i8_128x1024x128/``) are intentionally limited
 to IR and the final image:
@@ -369,6 +353,59 @@ void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c,
 """
 
 
+def adapter_source_experimental():
+    """Typed unranked descriptors for the experimental BOSCAME C wrapper.
+
+    Descriptor sizes/offsets are elements, including i32 C. The launcher facade
+    retains its legacy scratch parameter, but the new kernel has three buffers.
+    The launcher's aligned, nonalias contiguous buffers satisfy the DMA ABI.
+    """
+    return f"""#include <stdint.h>
+#if defined(MATMUL_I8_TRACE)
+extern void nh_e6_progress(uint32_t marker);
+#define MATMUL_I8_MARK(value) nh_e6_progress(value)
+#else
+#define MATMUL_I8_MARK(value) ((void)0)
+#endif
+typedef struct {{ void *allocated, *aligned; int64_t offset; int64_t sizes[2], strides[2]; }} MemRef2;
+typedef struct {{ void *allocated, *aligned; int64_t offset, size, stride; }} Descriptor1D;
+typedef struct {{ int64_t rank; void *descriptor; }} Unranked;
+extern void _mlir_ciface_{SYMBOL}(Unranked *, Unranked *, Unranked *,
+                     int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
+void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c,
+                                void *scratch) {{
+  (void)scratch;
+  void *ap = (int8_t *)a->aligned + a->offset;
+  void *bp = (int8_t *)b->aligned + b->offset;
+  void *cp = (int32_t *)c->aligned + c->offset;
+  if (((uintptr_t)ap | (uintptr_t)bp | (uintptr_t)cp) & 63u) __builtin_trap();
+  if (a->sizes[0] < {M} || a->sizes[1] < {K} ||
+      b->sizes[0] < {N} || b->sizes[1] < {K} ||
+      c->sizes[0] < {M} || c->sizes[1] < {N} ||
+      a->strides[0] != {K} || a->strides[1] != 1 ||
+      b->strides[0] != {K} || b->strides[1] != 1 ||
+      c->strides[0] != {N} || c->strides[1] != 1) __builtin_trap();
+  uintptr_t starts[3] = {{(uintptr_t)ap, (uintptr_t)bp, (uintptr_t)cp}};
+  uintptr_t lengths[3] = {{{M} * {K}, {N} * {K}, {M} * {N} * 4}};
+  for (int i = 0; i < 3; ++i) {{
+    if (lengths[i] > UINTPTR_MAX - starts[i]) __builtin_trap();
+    for (int j = 0; j < i; ++j)
+      if (starts[i] < starts[j] + lengths[j] && starts[j] < starts[i] + lengths[i]) __builtin_trap();
+  }}
+  Descriptor1D da = {{a->allocated, ap, 0, (int64_t){M} * {K}, 1}};
+  Descriptor1D db = {{b->allocated, bp, 0, (int64_t){N} * {K}, 1}};
+  Descriptor1D dc = {{c->allocated, cp, 0, (int64_t){M} * {N}, 1}};
+  Unranked ma = {{1, &da}}, mb = {{1, &db}}, mc = {{1, &dc}};
+  for (int32_t x = 0; x < {GRID[0]}; ++x)
+    for (int32_t y = 0; y < {GRID[1]}; ++y)
+      for (int32_t z = 0; z < {GRID[2]}; ++z) {{
+        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {GRID[1]} + y) & 0xfffu));
+        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, {GRID[0]}, {GRID[1]}, {GRID[2]}, x, y, z);
+      }}
+}}
+"""
+
+
 def export_frontend():
     """Compile the real ``@triton.jit`` kernel into TTIR and shared linalg."""
     configure_environment()
@@ -506,6 +543,27 @@ def lower(stage, host):
     """linalg -> memrefs -> AME -> LLVM dialect -> kernel.ll in ``stage``."""
     opt = shlex.split(BUDDY_OPT)
     translate = shlex.split(BUDDY_TRANSLATE)
+    if not host:
+        boscame = stage / "kernel.boscame.mlir"
+        llvm_mlir = stage / "kernel.llvm.mlir"
+        llvm_ir = stage / "kernel.ll"
+        command(
+            [
+                *opt,
+                OUT / "kernel.ttir",
+                "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+                "-o",
+                boscame,
+            ],
+            cwd=ROOT,
+        )
+        command([*opt, boscame, "--lower-bosc-ame", "-o", llvm_mlir], cwd=ROOT)
+        command(
+            [*translate, llvm_mlir, "--buddy-to-llvmir", "-o", llvm_ir],
+            cwd=ROOT,
+        )
+        verify_abi(llvm_ir)
+        return llvm_ir
     bufferized = stage / "kernel.bufferized.mlir"
     command(
         [
@@ -519,16 +577,6 @@ def lower(stage, host):
         cwd=ROOT,
     )
     lowered = bufferized
-    if not host:
-        lowered = stage / "kernel.ame.mlir"
-        command([*opt, bufferized, *ame_pipeline(), "-o", lowered], cwd=ROOT)
-        text = lowered.read_text()
-        if 'bosc_ame.target = "nr-fpga"' not in text:
-            raise RuntimeError(
-                "This runtime only accepts explicit nr-fpga lowering"
-            )
-        if "bosc_ame.mqma.b.mm" not in text or "linalg.matmul" in text:
-            raise RuntimeError("Integer Triton dot was not lowered to NR AME")
     promoted = stage / "kernel.stack.mlir"
     command(
         [
@@ -621,15 +669,24 @@ def main():
         help="Only export kernel.ttir / kernel.linalg.mlir",
     )
     parser.add_argument(
+        "--check-abi",
+        type=Path,
+        help="Verify the typed entry LLVM ABI and absence of heap allocation",
+    )
+    parser.add_argument(
         "--adapter",
-        choices=("triton-to-boscame", "linalg-to-boscame"),
+        choices=(
+            "experimental-boscame",
+            "triton-to-boscame",
+            "linalg-to-boscame",
+        ),
         help="Only write the launcher adapter for that path",
     )
     parser.add_argument(
         "--llvm",
         choices=("ame", "noame"),
         help="Only lower kernel.linalg.mlir to kernel.ll: `ame` runs "
-        "--triton-to-boscame, `noame` lowers straight to scalar CPU code "
+        "the experimental BOSCAME path, `noame` lowers straight to scalar CPU code "
         "(the AME=0 image and the host oracle share this path)",
     )
     parser.add_argument(
@@ -638,17 +695,20 @@ def main():
         help="Output directory for --llvm (defaults to the build output dir)",
     )
     args = parser.parse_args()
+    if args.check_abi:
+        verify_abi(args.check_abi)
+        return
     global BUILD_ROOT, OUT, SCRATCH
     if args.output is not None:
         BUILD_ROOT = args.output.resolve()
         OUT = BUILD_ROOT / NAME
         SCRATCH = BUILD_ROOT / ".scratch"
     if args.adapter is not None:
-        generator = (
-            adapter_source_boscame
-            if args.adapter == "triton-to-boscame"
-            else adapter_source
-        )
+        generator = {
+            "experimental-boscame": adapter_source_experimental,
+            "triton-to-boscame": adapter_source_boscame,
+            "linalg-to-boscame": adapter_source,
+        }[args.adapter]
         sys.stdout.write(generator())
         return
     if args.llvm is not None:

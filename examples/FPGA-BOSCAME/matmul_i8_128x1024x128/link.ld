@@ -28,7 +28,6 @@ SECTIONS {
 
   .stacks 0x800e0000 (NOLOAD) : {
     __nh_stack_bottom = .; . += 64K; __nh_stack_top = .;
-    __e6_stack_bottom = .; . += 64K; __e6_stack_top = .;
   } > RAM
 
   /* A[128,128] i8 = 16384 B, B[1024,128] i8 = 131072 B and the 1024 B accumu-
@@ -38,6 +37,11 @@ SECTIONS {
    * image does not have to carry ~660 KiB of zeros. */
   .dma_source 0x80100000 (NOLOAD) : { KEEP(*(.dma_source)) } > RAM
   .dma_output 0x80200000 (NOLOAD) : { KEEP(*(.dma_output)) } > RAM
+  /* The experimental kernel's aligned ordinary packs are DMA endpoints.
+   * Its stack therefore belongs to the exported DDR/PMP window as well. */
+  .e6_stack 0x802e0000 (NOLOAD) : {
+    __e6_stack_bottom = .; . += 64K; __e6_stack_top = .;
+  } > RAM
   . = ALIGN(4096);
   _end = .;
 
@@ -55,5 +59,13 @@ SECTIONS {
   ASSERT(__nh_e6_ddr_window_start <= ADDR(.dma_output) &&
          ADDR(.dma_output) + SIZEOF(.dma_output) <= __nh_e6_ddr_window_end,
          "output staging outside the PMP DDR window")
+  ASSERT(ADDR(.dma_source) + SIZEOF(.dma_source) <= ADDR(.dma_output),
+         "source staging overlaps output")
+  ASSERT(ADDR(.dma_output) + SIZEOF(.dma_output) <= __e6_stack_bottom,
+         "output staging overlaps the E6 stack")
+  ASSERT(__nh_e6_ddr_window_start <= __e6_stack_bottom &&
+         __e6_stack_top <= __nh_e6_ddr_window_end,
+         "E6 DMA stack outside the PMP DDR window")
+  ASSERT(__bss_end <= __nh_stack_bottom, "image overlaps the NH stack")
   ASSERT(_end <= ORIGIN(RAM) + LENGTH(RAM), "image exceeds 4MiB")
 }

@@ -141,12 +141,9 @@ static int8_t b_matrix[B_BYTES]
     __attribute__((section(".dma_source"), aligned(4096), used));
 static int32_t c_matrix[M * N]
     __attribute__((section(".dma_output"), aligned(4096), used));
-/* The accumulator tile of one program is transferred out of SPM into this
- * window before the DDR-side epilogue reads it: the E6 CPU cannot complete a
- * load from the SPM window.  It is a DMA endpoint, so it lives in the DDR
- * staging window and is 64 B aligned.  Keep in sync with SCRATCH_BYTES in the
- * makefile (the pass records its real requirement in
- * `bosc_ame.scratch_bytes`, which `make check` compares against this size). */
+/* Legacy launcher scratch facade. The experimental adapter keeps this
+ * parameter for compatibility but the new kernel uses aligned stack packs
+ * and does not receive scratch. */
 #define SCRATCH_BYTES 1024u
 static uint8_t scratch[SCRATCH_BYTES]
     __attribute__((section(".dma_source"), aligned(64), used));
@@ -250,15 +247,14 @@ int e6_main(void) {
   bosc_ame_dma_fail_hook = nh_e6_publish_dma_failure;
 
   e6_stage(0x11u);
-  /* The pass initializes scratch itself on each program; the operands keep
-   * their logical shape and every tile of this grid is fully valid. */
+  /* The operands keep their logical shape; every tile is fully valid. */
   fill_operands();
   __asm__ volatile("fence rw, rw" ::: "memory");
 
   MemRef2 a = make_2(a_matrix, M, K);
   MemRef2 b = make_2(b_matrix, N, K);
-  b.strides[0] = 1;
-  b.strides[1] = K; /* the physical [N,K] tile the AME B load wants */
+  /* B is physically [N,K], so its descriptor has strides [K,1]. The
+   * compiler's logical [K,N] AME view is built inside the kernel. */
   MemRef2 c = make_2(c_matrix, M, N);
 
   e6_stage(0x30u);
