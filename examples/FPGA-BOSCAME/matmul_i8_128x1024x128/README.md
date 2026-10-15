@@ -2,8 +2,10 @@
 
 This example lowers `A[128,128] i8 @ B[1024,128] i8ᵀ + C[128,1024] i32`
 through the experimental BOSCAME entry. B is physically `[N,K]`, with K
-contiguous. The Triton kernel body and its two outer K blocks are unchanged.
-Each program computes a 16×16 tile; the launch grid is 8×64×1.
+contiguous. The kernel's global compile-time constants are `M=128`, `N=1024`,
+`K=128`, `BM=64`, `BN=64`, and `BK=128` in `kernels.py`.
+Each program computes a 64×64 tile; the launch grid is 2×16×1 (32 programs).
+The single Triton K block is lowered to two internal 64-wide AME blocks.
 
 ```bash
 make ttir
@@ -29,20 +31,20 @@ buddy-translate build/matmul_i8_128x1024x128/kernel.llvm.mlir \
 ```
 
 Loads independently DMA-stage A, B and previous C into SPM. Standard marked
-matmuls are bufferized before their AME lowering. A and B already have the
-required AME layouts (`[64,1]` and `[1,64]` logical strides), so `tile.load_a/b`
-consume those SPM buffers directly, without an ordinary A/B pack or second DMA.
-C initialization/materialization still uses ordinary helper buffers. The outer
-K loop and previous-C addition use one-dimensional SPM vector arithmetic;
-compatible results DMA-store directly from SPM to DDR.
+matmuls are bufferized before their AME lowering. With `BK=128`, the matmul
+consumer takes bounded vector snapshots of A/B and packs each 64-wide AME K
+block in ordinary helper buffers before DMA. C initialization/materialization
+also uses ordinary helper buffers. Previous-C addition uses one-dimensional
+SPM vector arithmetic; compatible results DMA-store directly from SPM to DDR.
 
 General matmul layouts may still require explicit vector snapshots and ordinary
 packing inside the matmul consumer. Each dot materializes its accumulator; it
 does not retain AME registers across the outer K loop.
-The direct-SPM image passed FPGA4 execution: 262144 board comparisons and
+The earlier `BM=16`, `BN=16`, `BK=64` image passed FPGA4 execution: 262144 board comparisons and
 131072 independently read-back final-round values were all exact, with zero
 input/guard errors. See the [current board evidence](../../../docs/validation/experimental-boscame-direct-spm/README.md),
-including the full-check launcher and final-image hashes.
+including the full-check launcher and final-image hashes. Those results do
+not validate the new block configuration on hardware.
 
 No baseline performance comparison has been made. The default `boscame=false` and the legacy
 `--triton-to-boscame` entry remain compatible; this example now selects the new
@@ -102,7 +104,7 @@ make boardcheck       # Two full launches with signed extremes, wrapping and gua
 
 `make boardcheck` builds
 `build/matmul_i8_128x1024x128/boardcheck/matmul_i8_128x1024x128.boardcheck.bin`.
-The driver runs two different complete 512-program launches, with 262144
+The driver runs two different complete 32-program launches, with 262144
 output comparisons against its independent C oracle. A/B include signed-i8
 extremes, B retains its asymmetric physical `[N,K]` layout, and nonzero C
 exercises i32 wrap. The oracle uses unsigned arithmetic to define that wrap

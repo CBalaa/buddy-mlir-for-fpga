@@ -262,8 +262,9 @@ host:
 
 check: bin
 ifeq ($(AME),1)
+# BK=128 produces two internal 64-wide blocks, with five AME operations each.
 	@test "$$(grep -cE '# (mlae8|mlbe8|mlce32|msce32|mqma)' $(V_DIR)/kernel.nr.s)" \
-	  = "5" || { echo "FAIL: expected the five AME instructions in the NR asm"; exit 1; }
+	  = "10" || { echo "FAIL: expected ten AME instructions for two K blocks in the NR asm"; exit 1; }
 	@grep -q '# mqma.b.mm' $(V_DIR)/kernel.nr.s || { echo "FAIL: no mqma"; exit 1; }
 	$(PYTHON) -B $(ROOT)/build.py --check-abi $(V_DIR)/kernel.ll
 else

@@ -10,8 +10,8 @@ oracle. SPM persists between programs, and guards/access logs check excluded DDR
 
     python3 simcheck.py [--module PATH] [--programs N]
 
-The shape, grid and default module path come from `build.py`, so there is one
-place where the problem size is written down.  Requires numpy.
+The oracle and launch use this example's fixed shapes and 2 x 16 x 1 grid;
+`build.py` supplies only the default module path and entry symbol. Requires numpy.
 """
 
 import argparse
@@ -25,7 +25,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[2]
 sys.path.insert(0, str(ROOT))
-import build as example  # noqa: E402  (frontend owner of the fixed shape)
+import build as example  # noqa: E402  (artifact path and entry symbol)
 
 sys.path.insert(0, str(REPO / "examples/FPGA-BOSCAME/tools"))
 from boscame_buffer_sim import Machine  # noqa: E402
@@ -34,15 +34,9 @@ from boscame_check import buddy_opt_path  # noqa: E402
 
 def operands():
     """The deterministic A, B and initial C the launcher fills (launch.c)."""
-    a = (
-        np.arange(example.M)[:, None] * 13 + np.arange(example.K)[None, :] * 7
-    ) % 31 - 15
-    b = (
-        np.arange(example.N)[:, None] * 11 + np.arange(example.K)[None, :] * 5
-    ) % 29 - 14
-    c = (
-        np.arange(example.M)[:, None] * 3 + np.arange(example.N)[None, :]
-    ) % 7 - 3
+    a = (np.arange(128)[:, None] * 13 + np.arange(128)[None, :] * 7) % 31 - 15
+    b = (np.arange(1024)[:, None] * 11 + np.arange(128)[None, :] * 5) % 29 - 14
+    c = (np.arange(128)[:, None] * 3 + np.arange(1024)[None, :]) % 7 - 3
     return a.astype(np.int8), b.astype(np.int8), c.astype("<i4")
 
 
@@ -87,20 +81,20 @@ def main():
             check=True,
         )
         machine = Machine(loops, example.SYMBOL)
-    total = example.GRID[0] * example.GRID[1] * example.GRID[2]
+    total = 32
     limit = args.programs or total
     launched = 0
-    for x in range(example.GRID[0]):
-        for y in range(example.GRID[1]):
-            for z in range(example.GRID[2]):
+    for x in range(2):
+        for y in range(16):
+            for z in range(1):
                 if launched >= limit:
                     break
                 machine.launch(
                     buffers,
                     {
-                        "%arg3": example.GRID[0],
-                        "%arg4": example.GRID[1],
-                        "%arg5": example.GRID[2],
+                        "%arg3": 2,
+                        "%arg4": 16,
+                        "%arg5": 1,
                         "%arg6": x,
                         "%arg7": y,
                         "%arg8": z,
@@ -110,8 +104,8 @@ def main():
 
     want = c0.astype(np.int64) + a.astype(np.int64) @ b.astype(np.int64).T
     got = np.frombuffer(
-        bytes(buffers["%arg2"]), dtype="<i4", count=example.M * example.N
-    ).reshape(example.M, example.N)
+        bytes(buffers["%arg2"]), dtype="<i4", count=128 * 1024
+    ).reshape(128, 1024)
     assert buffers["%arg0"] == a.tobytes() + guard
     assert buffers["%arg1"] == b.tobytes() + guard
     assert buffers["%arg2"][-len(guard) :] == guard
@@ -126,7 +120,7 @@ def main():
         print("SIM CHECK FAIL")
         return 1
     print(
-        f"SIM CHECK PASS: {example.M * example.N} outputs match the NumPy "
+        "SIM CHECK PASS: 131072 outputs match the NumPy "
         f"INT32 oracle after {total} programs"
     )
     return 0

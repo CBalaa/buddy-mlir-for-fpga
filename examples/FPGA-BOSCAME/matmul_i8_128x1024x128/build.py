@@ -3,7 +3,9 @@
 
 The makefile builds TTIR with the experimental BOSCAME path, then runs
 ``--lower-bosc-ame`` and LLVM translation. This file owns the real Triton
-frontend, fixed shape, typed-unranked ABI adapter and host reference path.
+frontend, typed-unranked ABI adapter and host reference path. The fixed shape
+and tile constants are defined as Triton ``tl.constexpr`` globals in
+``kernels.py``; this file only emits their fixed ABI bridge.
 
     A[i8, 128, 128] row-major @ B[i8, 1024, 128] physical [N,K]
       -> C[i32, 128, 1024]
@@ -59,40 +61,18 @@ BUILD_ROOT = Path(
 OUT = BUILD_ROOT / "matmul_i8_128x1024x128"
 SCRATCH = BUILD_ROOT / ".scratch"
 sys.path.insert(0, str(ROOT))
+import kernels  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Fixed problem size (the only place these numbers are defined).
-# ---------------------------------------------------------------------------
-M, N, K = 128, 1024, 128  # logical C[M,N] = A[M,K] @ B[N,K]^T
-AME_M_TILE = 16  # AME msettilem is fixed at 16 rows on patch6
-PADDED_M = (M + AME_M_TILE - 1) // AME_M_TILE * AME_M_TILE  # 128
-VALID_M = M  # rows >= VALID_M are zero padding only
-BM = 16  # Triton M block; PADDED_M / BM = 8 programs
-BN = 16  # Triton N block; must match AME nr-tile-n
-BK = 64  # K reduction block; K / BK = 2 iterations
-GRID = (PADDED_M // BM, N // BN, 1)
-# The pass transfers the accumulator tile of one program into a caller
-# scratch window. It also holds one masked A/B slab during prologue packing.
-# All views reuse offset zero, after the preceding DMA has completed.
-SCRATCH_BYTES = max(
-    BM * ((BN * 4 + 63) // 64 * 64), max(BM, BN) * ((BK + 63) // 64 * 64)
-)
+# The pass transfers the accumulator tile of one program into a caller scratch
+# window. It also holds one masked A/B slab during prologue packing. All views
+# reuse offset zero, after the preceding DMA has completed.
 NAME = "matmul_i8_128x1024x128"
 SYMBOL = "triton_" + NAME
 KERNEL = "matmul_i8"
 SIGNATURE = {"A": "*i8", "B": "*i8", "C": "*i32"}
-CONSTEXPRS = {
-    "M": PADDED_M,
-    "VALID_M": VALID_M,
-    "N": N,
-    "K": K,
-    "BM": BM,
-    "BN": BN,
-    "BK": BK,
-}
-
-assert PADDED_M % AME_M_TILE == 0 and PADDED_M >= M
-assert K % BK == 0, "the reduction loop must not need a partial k block"
+assert kernels.K.value % kernels.BK.value == 0, (
+    "the reduction loop must not need a partial k block"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -255,11 +235,8 @@ def configure_environment():
 def adapter_source():
     """Descriptor/grid glue around the raw Triton entry.
 
-    AME does not accept a short M tile, so the kernel is compiled for
-    ``PADDED_M`` while the public ABI stays ``[M,N]``.  ``M == PADDED_M`` for
-    this shape, so the staging copy is the identity, but the adapter keeps the
-    general form: it stages ``PADDED_M`` rows and copies only the logical ones
-    back.
+    This specialized shape has complete 64-row M tiles, so the staging copy
+    is an identity and the public ABI remains the fixed ``[128,1024]`` shape.
 
     This is the bridge of the *scalar* kernel (the ``AME=0`` image and the host
     oracle): three descriptors and no scratch, because no DMA/SPM is involved.
@@ -278,29 +255,29 @@ typedef struct {{ void *allocated, *aligned; int64_t offset; }} MemRef0;
 extern void {SYMBOL}("""
         + ", ".join(["int64_t, MemRef0 *"] * 3 + ["int32_t"] * 6)
         + f""");
-static int8_t padded_a[{PADDED_M} * {K}] __attribute__((aligned(64)));
-static int32_t padded_c[{PADDED_M} * {N}] __attribute__((aligned(64)));
+static int8_t padded_a[{kernels.M.value} * {kernels.K.value}] __attribute__((aligned(64)));
+static int32_t padded_c[{kernels.M.value} * {kernels.N.value}] __attribute__((aligned(64)));
 void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c) {{
   const int8_t *src_a = (const int8_t *)a->aligned + a->offset;
   int32_t *dst_c = (int32_t *)c->aligned + c->offset;
-  for (int i = 0; i < {PADDED_M} * {K}; ++i) padded_a[i] = 0;
-  for (int i = 0; i < {M}; ++i) for (int j = 0; j < {K}; ++j)
-    padded_a[i * {K} + j] = src_a[i * a->strides[0] + j * a->strides[1]];
-  for (int i = 0; i < {PADDED_M} * {N}; ++i) padded_c[i] = 0;
-  for (int i = 0; i < {M}; ++i) for (int j = 0; j < {N}; ++j)
-    padded_c[i * {N} + j] = ((const int32_t *)c->aligned + c->offset)[i * c->strides[0] + j * c->strides[1]];
+  for (int i = 0; i < {kernels.M.value} * {kernels.K.value}; ++i) padded_a[i] = 0;
+  for (int i = 0; i < {kernels.M.value}; ++i) for (int j = 0; j < {kernels.K.value}; ++j)
+    padded_a[i * {kernels.K.value} + j] = src_a[i * a->strides[0] + j * a->strides[1]];
+  for (int i = 0; i < {kernels.M.value} * {kernels.N.value}; ++i) padded_c[i] = 0;
+  for (int i = 0; i < {kernels.M.value}; ++i) for (int j = 0; j < {kernels.N.value}; ++j)
+    padded_c[i * {kernels.N.value} + j] = ((const int32_t *)c->aligned + c->offset)[i * c->strides[0] + j * c->strides[1]];
   MemRef0 ma = {{padded_a, padded_a, 0}};
   void *bp = (unsigned char *)b->aligned + b->offset;
   MemRef0 mb = {{bp, bp, 0}};
   MemRef0 mc = {{padded_c, padded_c, 0}};
-  for (int32_t x = 0; x < {GRID[0]}; ++x)
-    for (int32_t y = 0; y < {GRID[1]}; ++y)
-      for (int32_t z = 0; z < {GRID[2]}; ++z) {{
-        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {GRID[1]} + y) & 0xfffu));
-        {SYMBOL}(0, &ma, 0, &mb, 0, &mc, {GRID[0]}, {GRID[1]}, {GRID[2]}, x, y, z);
+  for (int32_t x = 0; x < 2; ++x)
+    for (int32_t y = 0; y < 16; ++y)
+      for (int32_t z = 0; z < 1; ++z) {{
+        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * 16 + y) & 0xfffu));
+        {SYMBOL}(0, &ma, 0, &mb, 0, &mc, 2, 16, 1, x, y, z);
       }}
-  for (int i = 0; i < {M}; ++i) for (int j = 0; j < {N}; ++j)
-    dst_c[i * c->strides[0] + j * c->strides[1]] = padded_c[i * {N} + j];
+  for (int i = 0; i < {kernels.M.value}; ++i) for (int j = 0; j < {kernels.N.value}; ++j)
+    dst_c[i * c->strides[0] + j * c->strides[1]] = padded_c[i * {kernels.N.value} + j];
 }}
 """
     )
@@ -336,18 +313,18 @@ void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c,
   void *ap = (int8_t *)a->aligned + a->offset;
   void *bp = (int8_t *)b->aligned + b->offset;
   void *cp = (int32_t *)c->aligned + c->offset;
-  Descriptor1D ma = {{a->allocated, ap, 0, (int64_t){M} * {K}, 1}};
-  Descriptor1D mb = {{b->allocated, bp, 0, (int64_t){N} * {K}, 1}};
-  Descriptor1D mc = {{c->allocated, cp, 0, (int64_t){M} * {N} * 4, 1}};
+  Descriptor1D ma = {{a->allocated, ap, 0, (int64_t){kernels.M.value} * {kernels.K.value}, 1}};
+  Descriptor1D mb = {{b->allocated, bp, 0, (int64_t){kernels.N.value} * {kernels.K.value}, 1}};
+  Descriptor1D mc = {{c->allocated, cp, 0, (int64_t){kernels.M.value} * {kernels.N.value} * 4, 1}};
   /* The accumulator tile leaves SPM through a transfer (the E6 cannot read
    * the SPM window), so the kernel writes it here before the DDR-side
    * epilogue reads it back. */
-  Descriptor1D ms = {{scratch, scratch, 0, (int64_t){SCRATCH_BYTES}, 1}};
-  for (int32_t x = 0; x < {GRID[0]}; ++x)
-    for (int32_t y = 0; y < {GRID[1]}; ++y)
-      for (int32_t z = 0; z < {GRID[2]}; ++z) {{
-        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {GRID[1]} + y) & 0xfffu));
-        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, &ms, {GRID[0]}, {GRID[1]}, {GRID[2]}, x, y, z);
+  Descriptor1D ms = {{scratch, scratch, 0, (int64_t)16384, 1}};
+  for (int32_t x = 0; x < 2; ++x)
+    for (int32_t y = 0; y < 16; ++y)
+      for (int32_t z = 0; z < 1; ++z) {{
+        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * 16 + y) & 0xfffu));
+        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, &ms, 2, 16, 1, x, y, z);
       }}
 }}
 """
@@ -379,28 +356,28 @@ void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c,
   void *bp = (int8_t *)b->aligned + b->offset;
   void *cp = (int32_t *)c->aligned + c->offset;
   if (((uintptr_t)ap | (uintptr_t)bp | (uintptr_t)cp) & 63u) __builtin_trap();
-  if (a->sizes[0] < {M} || a->sizes[1] < {K} ||
-      b->sizes[0] < {N} || b->sizes[1] < {K} ||
-      c->sizes[0] < {M} || c->sizes[1] < {N} ||
-      a->strides[0] != {K} || a->strides[1] != 1 ||
-      b->strides[0] != {K} || b->strides[1] != 1 ||
-      c->strides[0] != {N} || c->strides[1] != 1) __builtin_trap();
+  if (a->sizes[0] < {kernels.M.value} || a->sizes[1] < {kernels.K.value} ||
+      b->sizes[0] < {kernels.N.value} || b->sizes[1] < {kernels.K.value} ||
+      c->sizes[0] < {kernels.M.value} || c->sizes[1] < {kernels.N.value} ||
+      a->strides[0] != {kernels.K.value} || a->strides[1] != 1 ||
+      b->strides[0] != {kernels.K.value} || b->strides[1] != 1 ||
+      c->strides[0] != {kernels.N.value} || c->strides[1] != 1) __builtin_trap();
   uintptr_t starts[3] = {{(uintptr_t)ap, (uintptr_t)bp, (uintptr_t)cp}};
-  uintptr_t lengths[3] = {{{M} * {K}, {N} * {K}, {M} * {N} * 4}};
+  uintptr_t lengths[3] = {{{kernels.M.value} * {kernels.K.value}, {kernels.N.value} * {kernels.K.value}, {kernels.M.value} * {kernels.N.value} * 4}};
   for (int i = 0; i < 3; ++i) {{
     if (lengths[i] > UINTPTR_MAX - starts[i]) __builtin_trap();
     for (int j = 0; j < i; ++j)
       if (starts[i] < starts[j] + lengths[j] && starts[j] < starts[i] + lengths[i]) __builtin_trap();
   }}
-  Descriptor1D da = {{a->allocated, ap, 0, (int64_t){M} * {K}, 1}};
-  Descriptor1D db = {{b->allocated, bp, 0, (int64_t){N} * {K}, 1}};
-  Descriptor1D dc = {{c->allocated, cp, 0, (int64_t){M} * {N}, 1}};
+  Descriptor1D da = {{a->allocated, ap, 0, (int64_t){kernels.M.value} * {kernels.K.value}, 1}};
+  Descriptor1D db = {{b->allocated, bp, 0, (int64_t){kernels.N.value} * {kernels.K.value}, 1}};
+  Descriptor1D dc = {{c->allocated, cp, 0, (int64_t){kernels.M.value} * {kernels.N.value}, 1}};
   Unranked ma = {{1, &da}}, mb = {{1, &db}}, mc = {{1, &dc}};
-  for (int32_t x = 0; x < {GRID[0]}; ++x)
-    for (int32_t y = 0; y < {GRID[1]}; ++y)
-      for (int32_t z = 0; z < {GRID[2]}; ++z) {{
-        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {GRID[1]} + y) & 0xfffu));
-        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, {GRID[0]}, {GRID[1]}, {GRID[2]}, x, y, z);
+  for (int32_t x = 0; x < 2; ++x)
+    for (int32_t y = 0; y < 16; ++y)
+      for (int32_t z = 0; z < 1; ++z) {{
+        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * 16 + y) & 0xfffu));
+        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, 2, 16, 1, x, y, z);
       }}
 }}
 """
@@ -409,7 +386,6 @@ void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c,
 def export_frontend():
     """Compile the real ``@triton.jit`` kernel into TTIR and shared linalg."""
     configure_environment()
-    import kernels
     import triton
     from triton._C.libtriton import ir
     from triton.backends.compiler import GPUTarget
@@ -423,7 +399,7 @@ def export_frontend():
     target = GPUTarget("cpu", 0, 0)
     backend = CPUBackend(target)
     options = backend.parse_options({"enable_fp_fusion": False})
-    source = ASTSource(fn=fn, signature=SIGNATURE, constexprs=CONSTEXPRS)
+    source = ASTSource(fn=fn, signature=SIGNATURE, constexprs={})
     context = ir.context()
     ir.load_dialects(context)
     backend.load_dialects(context)
@@ -483,10 +459,10 @@ def ame_pipeline():
         raise ValueError("Expected one explicit NR AME lowering pass")
     index = candidates[0]
     found = re.search(r"\bnr-tile-n=(\d+)", passes[index])
-    if found and int(found[1]) != BN:
+    if found and int(found[1]) != kernels.BN.value:
         raise ValueError("Triton BN and NR nr-tile-n disagree")
-    if not found and BN != 16:
-        passes[index] += " nr-tile-n=" + str(BN)
+    if not found:
+        passes[index] += " nr-tile-n=" + str(kernels.BN.value)
     return passes
 
 
