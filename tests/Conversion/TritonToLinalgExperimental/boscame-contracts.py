@@ -113,7 +113,7 @@ def main():
         return
       }
     }""",
-        expect="AME target requires static ordinary i8/i8/i32 rank-2 buffers",
+        expect="AME target requires static i8/i8/i32 rank-2 buffers",
     )
     attrs = invoke(
         "attrs",

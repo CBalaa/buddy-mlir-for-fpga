@@ -28,15 +28,22 @@ buddy-translate build/matmul_i8_128x1024x128/kernel.llvm.mlir \
   --buddy-to-llvmir -o build/matmul_i8_128x1024x128/kernel.ll
 ```
 
-Loads independently DMA-stage A, B and previous C into SPM, then copy them
-with one-dimensional vectors into ordinary buffers. Standard marked matmuls
-are bufferized before their AME lowering. The helper packs A/B/zero C, executes
-DMA and AME, then materializes each dot output in ordinary memory. The outer
-K loop carries ordinary results. The original previous C is added once, and
-stores vector-stage valid results into SPM before DMA writes DDR.
+Loads independently DMA-stage A, B and previous C into SPM. Standard marked
+matmuls are bufferized before their AME lowering. A and B already have the
+required AME layouts (`[64,1]` and `[1,64]` logical strides), so `tile.load_a/b`
+consume those SPM buffers directly, without an ordinary A/B pack or second DMA.
+C initialization/materialization still uses ordinary helper buffers. The outer
+K loop and previous-C addition use one-dimensional SPM vector arithmetic;
+compatible results DMA-store directly from SPM to DDR.
 
-This first version uses ordinary temporary buffers and extra DMA/vector
-movement. It does not retain AME accumulators across the outer K loop.
+General matmul layouts may still require explicit vector snapshots and ordinary
+packing inside the matmul consumer. Each dot materializes its accumulator; it
+does not retain AME registers across the outer K loop.
+The direct-SPM image passed FPGA4 execution: 262144 board comparisons and
+131072 independently read-back final-round values were all exact, with zero
+input/guard errors. See the [current board evidence](../../../docs/validation/experimental-boscame-direct-spm/README.md),
+including the full-check launcher and final-image hashes.
+
 No baseline performance comparison has been made. The default `boscame=false` and the legacy
 `--triton-to-boscame` entry remain compatible; this example now selects the new
 entry by default. See [the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md).

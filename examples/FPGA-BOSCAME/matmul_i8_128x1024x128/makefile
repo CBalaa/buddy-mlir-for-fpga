@@ -132,8 +132,8 @@ ttir: $(OUT)/kernel.ttir
 
 # --- 2. TTIR -> BOSCAME (AME=1) -----------------------------------------
 ifeq ($(AME),1)
-# Loads/stores independently use DMA plus explicit 1-D vectors. Arithmetic
-# stays in ordinary buffers. Marked, bufferized integer matmuls lower to AME.
+# Loads/stores independently use DMA. RVV computations consume SPM directly;
+# marked, bufferized integer matmuls reuse compatible SPM A/B inputs for AME.
 # The explicit ABI promises aligned, nonalias caller buffers.
 $(V_DIR)/kernel.boscame.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(V_DIR)
 	$(BUDDY_OPT) $< $(V_AME) -o $@

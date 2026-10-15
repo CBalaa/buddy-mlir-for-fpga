@@ -204,6 +204,29 @@ LogicalResult copyVectors(OpBuilder &builder, Location loc, Value src,
   return success();
 }
 
+LogicalResult fillVectors(OpBuilder &builder, Location loc, Value buffer,
+                          Value value) {
+  auto type = dyn_cast<MemRefType>(buffer.getType());
+  unsigned bytes = type ? getSpmElementByteWidth(type.getElementType()) : 0;
+  if (!type || type.getRank() != 1 || !type.hasStaticShape() || !bytes ||
+      type.getNumElements() % (kDmaAlignmentBytes / bytes))
+    return emitError(loc,
+                     "BOSCAME vector initialization needs full 64 B blocks");
+  int64_t lanes = kDmaAlignmentBytes / bytes;
+  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value end =
+      arith::ConstantIndexOp::create(builder, loc, type.getNumElements());
+  Value step = arith::ConstantIndexOp::create(builder, loc, lanes);
+  auto loop = scf::ForOp::create(builder, loc, zero, end, step);
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(loop.getBody());
+  auto vectorType = VectorType::get({lanes}, type.getElementType());
+  Value splat = vector::BroadcastOp::create(builder, loc, vectorType, value);
+  vector::StoreOp::create(builder, loc, splat, buffer,
+                          ValueRange{loop.getInductionVar()});
+  return success();
+}
+
 static FailureOr<int64_t> getRank1Count(Operation *anchor, Value ptr,
                                         RankedTensorType type,
                                         ArrayRef<OpFoldResult> mask) {
@@ -248,25 +271,45 @@ FailureOr<Value> lowerLoad(OpBuilder &builder, Operation *anchor, Value ptr,
     return failure();
   Location loc = anchor->getLoc();
   Value ddr = rank1Prefix(builder, loc, ptr, *count);
+  int64_t lanes =
+      kDmaAlignmentBytes / getSpmElementByteWidth(type.getElementType());
+  int64_t capacity = llvm::alignTo(type.getDimSize(0), lanes);
   auto spm = workspace.allocate(
-      builder, anchor, MemRefType::get({*count}, type.getElementType()));
+      builder, anchor, MemRefType::get({capacity}, type.getElementType()));
   if (failed(spm))
     return failure();
-  auto ordinaryType = MemRefType::get(type.getShape(), type.getElementType());
-  Value ordinary = memref::AllocOp::create(builder, loc, ordinaryType,
-                                           builder.getI64IntegerAttr(64));
-  if (other)
-    linalg::FillOp::create(builder, loc, ValueRange{other},
-                           ValueRange{ordinary});
-  emitDmaAndWait(builder, loc, ddr, *spm,
-                 *count * getSpmElementByteWidth(type.getElementType()));
-  // The CPU reads the newly arrived SPM data and writes the ordinary buffer.
-  emitDdrPolicy(builder, loc, /*write=*/false);
-  emitDdrPolicy(builder, loc, /*write=*/true);
-  if (failed(copyVectors(builder, loc, *spm, ordinary, *count)))
+  if (other && failed(fillVectors(builder, loc, *spm, other)))
     return failure();
-  return bufferization::ToTensorOp::create(builder, loc, type, ordinary, true,
+  Value destination = rank1Prefix(builder, loc, *spm, *count);
+  emitDmaAndWait(builder, loc, ddr, destination,
+                 *count * getSpmElementByteWidth(type.getElementType()));
+  Value logical = rank1Prefix(builder, loc, *spm, type.getDimSize(0));
+  return bufferization::ToTensorOp::create(builder, loc, type, logical, true,
                                            true)
+      .getResult();
+}
+
+FailureOr<Value> getStoreBuffer(OpBuilder &builder, Operation *anchor,
+                                Value tensor) {
+  // Preserve the producer's memory space and physical layout. Asking for an
+  // ordinary buffer here would force an unnecessary SPM-to-DDR copy during
+  // bufferization. A store only reads the tensor's buffer.
+  bufferization::BufferizationOptions options;
+  bufferization::BufferizationState state;
+  auto inferred = bufferization::getBufferType(tensor, options, state);
+  if (failed(inferred) || !isa<MemRefType>(*inferred)) {
+    anchor->emitError("cannot infer BOSCAME store producer buffer");
+    return failure();
+  }
+  auto type = cast<MemRefType>(*inferred);
+  // Unknown ordinary producers may infer a fully dynamic layout. Request an
+  // explicit contiguous materialization for that consumer, rather than emit
+  // vector loads from an unproven stride.
+  if (!getSpmBank(type))
+    type = MemRefType::get(type.getShape(), type.getElementType());
+  return bufferization::ToBufferOp::create(builder, anchor->getLoc(), type,
+                                           tensor,
+                                           /*read_only=*/true)
       .getResult();
 }
 
@@ -283,25 +326,24 @@ LogicalResult lowerStore(OpBuilder &builder, Operation *anchor, Value ptr,
     return failure();
   Location loc = anchor->getLoc();
   Value ddr = rank1Prefix(builder, loc, ptr, *count);
-  if (auto source = tensor.getDefiningOp<bufferization::ToTensorOp>()) {
-    auto sourceType = dyn_cast<MemRefType>(source.getBuffer().getType());
-    if (sourceType && getSpmBank(sourceType)) {
-      if (!getDmaEndpoint(sourceType))
-        return anchor->emitError(
-            "BOSCAME direct SPM store needs a static contiguous source");
-      Value spm = rank1Prefix(builder, loc, source.getBuffer(), *count);
-      emitDmaAndWait(builder, loc, spm, ddr,
-                     *count * getSpmElementByteWidth(type.getElementType()));
-      return success();
-    }
+  auto source = getStoreBuffer(builder, anchor, tensor);
+  if (failed(source))
+    return failure();
+  auto sourceType = cast<MemRefType>(source->getType());
+  if (getSpmBank(sourceType)) {
+    if (!getDmaEndpoint(sourceType))
+      return anchor->emitError(
+          "BOSCAME direct SPM store needs a static contiguous source");
+    Value spm = rank1Prefix(builder, loc, *source, *count);
+    emitDmaAndWait(builder, loc, spm, ddr,
+                   *count * getSpmElementByteWidth(type.getElementType()));
+    return success();
   }
   auto spm = workspace.allocate(
       builder, anchor, MemRefType::get({*count}, type.getElementType()));
   if (failed(spm))
     return failure();
-  auto ordinaryType = MemRefType::get(type.getShape(), type.getElementType());
-  Value ordinary =
-      bufferization::ToBufferOp::create(builder, loc, ordinaryType, tensor);
+  Value ordinary = *source;
   emitDdrPolicy(builder, loc, /*write=*/false);
   if (failed(copyVectors(builder, loc, ordinary, *spm, *count)))
     return failure();

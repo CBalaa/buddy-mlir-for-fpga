@@ -2,6 +2,8 @@ add_mlir_library(BuddyBOSCAMEHelpers
   BOSCAMEHelpers.cpp
   StructuredMemory.cpp
   MarkedMatmul.cpp
+  SPMPlacement.cpp
+  SPMComputations.cpp
 
   LINK_LIBS PUBLIC
   BuddyBOSCAME
@@ -10,6 +12,7 @@ add_mlir_library(BuddyBOSCAMEHelpers
   MLIRFuncDialect
   MLIRIR
   MLIRLinalgDialect
+  MLIRMathDialect
   MLIRMemRefDialect
   MLIRSCFDialect
   MLIRVectorDialect

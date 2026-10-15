@@ -153,40 +153,34 @@ FailureOr<Value> lowerRank2Load(OpBuilder &builder, Operation *anchor,
   if (failed(plan))
     return failure();
   Location loc = anchor->getLoc();
-  auto flatType =
-      MemRefType::get({plan->rows * plan->width}, type.getElementType());
   auto spm = workspace.allocate(
       builder, anchor,
       MemRefType::get({plan->rows * plan->spmPitch}, type.getElementType()));
   if (failed(spm))
     return failure();
-  Value flat = memref::AllocOp::create(builder, loc, flatType,
-                                       builder.getI64IntegerAttr(64));
-  if (other)
-    linalg::FillOp::create(builder, loc, ValueRange{other}, ValueRange{flat});
+  if (other && failed(fillVectors(builder, loc, *spm, other)))
+    return failure();
   if (failed(
           emitPackets(builder, anchor, *plan, [&](int64_t row, int64_t start) {
             Value ddr = rowView(builder, loc, ptr, plan->fastAxis, row, start,
                                 plan->chunk);
             Value spmRow = slice1D(builder, loc, *spm,
                                    row * plan->spmPitch + start, plan->chunk);
-            Value ordinary = slice1D(builder, loc, flat,
-                                     row * plan->width + start, plan->chunk);
             emitDmaAndWait(builder, loc, ddr, spmRow,
                            plan->chunk *
                                getSpmElementByteWidth(type.getElementType()));
-            emitDdrPolicy(builder, loc, /*write=*/true);
-            return copyVectors(builder, loc, spmRow, ordinary, plan->chunk);
+            return success();
           })))
     return failure();
   SmallVector<int64_t> logicalStrides(2);
   logicalStrides[plan->fastAxis] = 1;
-  logicalStrides[1 - plan->fastAxis] = plan->width;
+  logicalStrides[1 - plan->fastAxis] = plan->spmPitch;
   auto logicalType = MemRefType::get(
       type.getShape(), type.getElementType(),
-      StridedLayoutAttr::get(builder.getContext(), 0, logicalStrides));
+      StridedLayoutAttr::get(builder.getContext(), 0, logicalStrides),
+      cast<MemRefType>((*spm).getType()).getMemorySpace());
   Value logical = memref::ReinterpretCastOp::create(
-      builder, loc, logicalType, flat, 0, type.getShape(), logicalStrides);
+      builder, loc, logicalType, *spm, 0, type.getShape(), logicalStrides);
   return bufferization::ToTensorOp::create(builder, loc, type, logical, true,
                                            true)
       .getResult();
@@ -200,31 +194,29 @@ LogicalResult lowerRank2Store(OpBuilder &builder, Operation *anchor, Value ptr,
   if (failed(plan))
     return failure();
   Location loc = anchor->getLoc();
-  if (auto source = tensor.getDefiningOp<bufferization::ToTensorOp>()) {
-    auto sourceType = dyn_cast<MemRefType>(source.getBuffer().getType());
-    if (sourceType && getSpmBank(sourceType)) {
-      SmallVector<int64_t> strides;
-      int64_t offset;
-      if (failed(sourceType.getStridesAndOffset(strides, offset)) ||
-          strides[plan->fastAxis] != 1)
-        return anchor->emitError("BOSCAME direct SPM store needs a matching "
-                                 "unit-stride physical axis");
-      return emitPackets(
-          builder, anchor, *plan, [&](int64_t row, int64_t start) {
-            Value ddr = rowView(builder, loc, ptr, plan->fastAxis, row, start,
-                                plan->chunk);
-            Value spm = rowView(builder, loc, source.getBuffer(),
-                                plan->fastAxis, row, start, plan->chunk);
-            emitDmaAndWait(builder, loc, spm, ddr,
-                           plan->chunk *
-                               getSpmElementByteWidth(type.getElementType()));
-            return success();
-          });
-    }
+  auto source = getStoreBuffer(builder, anchor, tensor);
+  if (failed(source))
+    return failure();
+  auto sourceType = cast<MemRefType>(source->getType());
+  if (getSpmBank(sourceType)) {
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (failed(sourceType.getStridesAndOffset(strides, offset)) ||
+        strides[plan->fastAxis] != 1)
+      return anchor->emitError("BOSCAME direct SPM store needs a matching "
+                               "unit-stride physical axis");
+    return emitPackets(builder, anchor, *plan, [&](int64_t row, int64_t start) {
+      Value ddr =
+          rowView(builder, loc, ptr, plan->fastAxis, row, start, plan->chunk);
+      Value spm = rowView(builder, loc, *source, plan->fastAxis, row, start,
+                          plan->chunk);
+      emitDmaAndWait(builder, loc, spm, ddr,
+                     plan->chunk *
+                         getSpmElementByteWidth(type.getElementType()));
+      return success();
+    });
   }
-  Value ordinary = bufferization::ToBufferOp::create(
-      builder, loc, MemRefType::get(type.getShape(), type.getElementType()),
-      tensor);
+  Value ordinary = *source;
   auto spm = workspace.allocate(
       builder, anchor,
       MemRefType::get({plan->rows * plan->spmPitch}, type.getElementType()));

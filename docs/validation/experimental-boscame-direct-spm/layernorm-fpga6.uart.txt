@@ -1,0 +1,2 @@
+[5.5296MHz][layernorm-197x768-dma] PASS
+[5.5296MHz][layernorm-197x768-dma] checked=302592 errors=0 guard_errors=0 exact=302592 max_abs_bits=0x00000000 cycles=0x0000000003a8f59d round=1

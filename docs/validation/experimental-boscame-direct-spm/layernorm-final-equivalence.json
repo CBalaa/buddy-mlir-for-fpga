@@ -1,0 +1,49 @@
+{
+  "tools_sha256": {
+    "build/bin/buddy-opt": "ce9aaaaa4e2a065460dacfd4c4d89a45b3f3b9833efe06aee740b7139166b171",
+    "build/bin/buddy-translate": "8218d10085d4a75f9527470abaa2ba632a57b0d79d3c0e9ad2bb5fc2bb086b59",
+    "llvm/build/bin/llc": "40fc7ff18e2122512298194aee334dc8068ec7b306c3caa3214e072c284b1e8c"
+  },
+  "tools_unchanged_during_check": true,
+  "all_artifacts_equal": true,
+  "comparisons": {
+    "kernel.ttir": {
+      "same_bytes": true,
+      "fresh_sha256": "1104be7145f4b2e20efbe92ceb18dbea600a0ccf32580399fd7769b635402dd4",
+      "board_candidate_sha256": "1104be7145f4b2e20efbe92ceb18dbea600a0ccf32580399fd7769b635402dd4",
+      "bytes": 6961
+    },
+    "kernel.boscame.mlir": {
+      "same_bytes": true,
+      "fresh_sha256": "f9ddcb5d0954af8a9e0cf69239d4cfac9a3c57d1251fcefa9648543891c8d130",
+      "board_candidate_sha256": "f9ddcb5d0954af8a9e0cf69239d4cfac9a3c57d1251fcefa9648543891c8d130",
+      "bytes": 8009
+    },
+    "kernel.llvm.mlir": {
+      "same_bytes": true,
+      "fresh_sha256": "9bf53b3929b53214a85d159e3ff5e9e20a7a37c7ff838881de639a68cee3f204",
+      "board_candidate_sha256": "9bf53b3929b53214a85d159e3ff5e9e20a7a37c7ff838881de639a68cee3f204",
+      "bytes": 38660
+    },
+    "kernel.ll": {
+      "same_bytes": true,
+      "fresh_sha256": "3e4c1eead7c5756991e767caf41765eb7ca4ce98a76804db3d829b36a0c837eb",
+      "board_candidate_sha256": "3e4c1eead7c5756991e767caf41765eb7ca4ce98a76804db3d829b36a0c837eb",
+      "bytes": 18732
+    },
+    "kernel.s": {
+      "same_bytes": true,
+      "fresh_sha256": "5e1263b985b6ab26b3bf9553bf4b16b8005ed88c44567e6fb500486b90595769",
+      "board_candidate_sha256": "5e1263b985b6ab26b3bf9553bf4b16b8005ed88c44567e6fb500486b90595769",
+      "bytes": 8377
+    },
+    "kernel.nr.s": {
+      "same_bytes": true,
+      "fresh_sha256": "655a7478b9e70f30fbac4daaad76a6271d848b52598d08102a3716e754dc9043",
+      "board_candidate_sha256": "655a7478b9e70f30fbac4daaad76a6271d848b52598d08102a3716e754dc9043",
+      "bytes": 8833
+    }
+  },
+  "board_binary_sha256": "434d941b8116548f9db5cc66e82e5c70a0807ac46c81675bd3116cb06204a2e0",
+  "board_elf_sha256": "2df4b3ecf402c8adcf3f2261928f9947198b7257fb6ea6d1fed69b4d63493f77"
+}

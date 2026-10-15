@@ -1,0 +1,27 @@
+{
+  "kernel.boscame.mlir": {
+    "equal": true,
+    "sha256": "d070a0c4e450c7b37f7ba59341ce04b12e1b539325e56ae0e4c14c1ef43dc384"
+  },
+  "kernel.llvm.mlir": {
+    "equal": true,
+    "sha256": "fe56760cd98b0d45355cf2fd71921fed7b2f1f01abc59849a26d428e44828206"
+  },
+  "kernel.ll": {
+    "equal": true,
+    "sha256": "94df9b8fcc4b405612de3c27ee4af87b989bda2994456a3ba5ddcbce39f20f0b"
+  },
+  "kernel.nr.s": {
+    "equal": true,
+    "sha256": "11892f737afc1c7820642ee8693c700f0e4f8dde6a93065ba05ca7c512a41380"
+  },
+  "matmul_i8_128x1024x128.direct-spm.boardcheck.elf": {
+    "equal": true,
+    "sha256": "37156b5a04a9688144b1ec615ff088457cb5344089ebf42d992058aff2196bb1"
+  },
+  "matmul_i8_128x1024x128.direct-spm.boardcheck.bin": {
+    "equal": true,
+    "sha256": "3a46d5b9e226dd27a0b919d2e4a1bc199d3ea4302a402e5b7bbebbaf0851b784"
+  },
+  "compiler_sha256": "ce9aaaaa4e2a065460dacfd4c4d89a45b3f3b9833efe06aee740b7139166b171"
+}

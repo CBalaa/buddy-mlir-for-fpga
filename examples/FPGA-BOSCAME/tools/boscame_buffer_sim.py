@@ -54,6 +54,17 @@ def rounded(value, element):
     return value
 
 
+def element_type(type_text):
+    """The scalar element of a supported scalar or one-dimensional vector."""
+    type_text = type_text.strip()
+    if type_text.startswith("vector<"):
+        shape, element = type_shape(type_text)
+        if len(shape) != 1:
+            raise SimError("ordinary vector arithmetic must be one-dimensional")
+        return element
+    return type_text
+
+
 class Buffer:
     def __init__(
         self,
@@ -159,65 +170,181 @@ class Machine:
         get = self.value
         if name == "arith.constant":
             payload = body[len(name) :].strip()
-            value = (
-                float(payload)
-                if types.startswith("f")
-                else int(payload == "true")
-                if payload in ("true", "false")
-                else int(payload)
-            )
-            self.result(op, [rounded(value, types)])
+            element = element_type(types)
+
+            def scalar(text):
+                return rounded(
+                    float(text)
+                    if element.startswith("f")
+                    else int(text == "true")
+                    if text in ("true", "false")
+                    else int(text),
+                    element,
+                )
+
+            if types.startswith("vector<"):
+                lanes = type_shape(types)[0][0]
+                dense = re.fullmatch(r"dense<(.*)>", payload)
+                if not dense:
+                    raise SimError("unsupported vector constant: " + op.text)
+                entries = dense[1].strip()
+                value = (
+                    [
+                        scalar(entry.strip())
+                        for entry in entries[1:-1].split(",")
+                    ]
+                    if entries.startswith("[")
+                    else [scalar(entries)] * lanes
+                )
+                if len(value) != lanes:
+                    raise SimError("vector constant lane count mismatch")
+            else:
+                value = scalar(payload)
+            self.result(op, [value])
         elif name.startswith("arith.") or name.startswith("math."):
             args = [get(v) for v in operands]
             code = name.split(".")[1]
-            if code in ("addi", "addf"):
-                value = args[0] + args[1]
-            elif code in ("subi", "subf"):
-                value = args[0] - args[1]
-            elif code in ("muli", "mulf"):
-                value = args[0] * args[1]
-            elif code == "divf":
-                value = args[0] / args[1]
-            elif code in ("divui", "divsi"):
-                value = args[0] // args[1]
-            elif code == "remui":
-                value = args[0] % args[1]
-            elif code in ("minsi", "minui"):
-                value = min(args)
-            elif code in ("maxsi", "maxui"):
-                value = max(args)
-            elif code == "cmpi":
-                predicate = body.split()[1].strip(",")
-                a, b = args
-                value = {
-                    "eq": a == b,
-                    "ne": a != b,
-                    "slt": a < b,
-                    "ult": a < b,
-                    "sle": a <= b,
-                    "ule": a <= b,
-                    "sgt": a > b,
-                    "sge": a >= b,
-                }[predicate]
-            elif code == "select":
-                value = args[1] if args[0] else args[2]
-            elif code == "andi":
-                value = args[0] & args[1]
-            elif code == "ori":
-                value = args[0] | args[1]
-            elif code in (
-                "index_cast",
-                "index_castui",
-                "extsi",
-                "extui",
-                "trunci",
-            ):
-                value = args[0]
-            elif code == "rsqrt":
-                value = 1.0 / math.sqrt(args[0])
+            result_element = element_type(
+                _split_top_level(types.split(" to ")[-1])[-1]
+            )
+            source_element = element_type(types.split(" to ")[0])
+
+            def evaluate(values):
+                unsigned_codes = {
+                    "divui",
+                    "remui",
+                    "minui",
+                    "maxui",
+                    "extui",
+                    "uitofp",
+                }
+                predicate = body.split()[1].strip(",") if code == "cmpi" else ""
+                if code in unsigned_codes or predicate.startswith("u"):
+                    bits = (
+                        64
+                        if source_element == "index"
+                        else int(source_element[1:])
+                    )
+                    values = [int(value) % (1 << bits) for value in values]
+                if code in ("addi", "addf"):
+                    value = values[0] + values[1]
+                elif code in ("subi", "subf"):
+                    value = values[0] - values[1]
+                elif code in ("muli", "mulf"):
+                    value = values[0] * values[1]
+                elif code == "divf":
+                    value = values[0] / values[1]
+                elif code in ("divui", "divsi"):
+                    value = abs(values[0]) // abs(values[1])
+                    if (values[0] < 0) != (values[1] < 0):
+                        value = -value
+                elif code == "remui":
+                    value = values[0] % values[1]
+                elif code in ("minsi", "minui"):
+                    value = min(values)
+                elif code in ("maxsi", "maxui"):
+                    value = max(values)
+                elif code == "cmpi":
+                    a, b = values
+                    value = {
+                        "eq": a == b,
+                        "ne": a != b,
+                        "slt": a < b,
+                        "ult": a < b,
+                        "sle": a <= b,
+                        "ule": a <= b,
+                        "sgt": a > b,
+                        "ugt": a > b,
+                        "sge": a >= b,
+                        "uge": a >= b,
+                    }[predicate]
+                elif code == "select":
+                    value = values[1] if values[0] else values[2]
+                elif code == "andi":
+                    value = values[0] & values[1]
+                elif code == "ori":
+                    value = values[0] | values[1]
+                elif code in (
+                    "index_cast",
+                    "index_castui",
+                    "extsi",
+                    "trunci",
+                    "extf",
+                    "truncf",
+                    "sitofp",
+                ) or code in ("extui", "uitofp"):
+                    value = values[0]
+                elif code == "negf":
+                    value = -values[0]
+                elif code == "rsqrt":
+                    value = 1.0 / math.sqrt(values[0])
+                elif code == "sqrt":
+                    value = math.sqrt(values[0])
+                else:
+                    raise SimError("unsupported arithmetic: " + op.text)
+                # Each emitted operation rounds independently, including each
+                # lane. This does not borrow the test's independent oracle.
+                return rounded(value, result_element)
+
+            vector_lengths = {
+                len(value) for value in args if isinstance(value, list)
+            }
+            if vector_lengths:
+                if len(vector_lengths) != 1:
+                    raise SimError("vector arithmetic lane count mismatch")
+                value = [
+                    evaluate(
+                        [
+                            arg[i] if isinstance(arg, list) else arg
+                            for arg in args
+                        ]
+                    )
+                    for i in range(next(iter(vector_lengths)))
+                ]
             else:
-                raise SimError("unsupported arithmetic: " + op.text)
-            self.result(op, [rounded(value, types.split(" to ")[-1])])
+                value = evaluate(args)
+            self.result(op, [value])
+        elif name == "vector.broadcast":
+            shape, element = type_shape(types.split(" to ")[-1])
+            if len(shape) != 1 or isinstance(get(operands[0]), list):
+                raise SimError(
+                    "only scalar-to-1D vector broadcast is supported"
+                )
+            self.result(op, [[rounded(get(operands[0]), element)] * shape[0]])
+        elif name == "vector.reduction":
+            if not re.match(r"vector.reduction\s+<add>,", body):
+                raise SimError("only ordered ADD vector reduction is supported")
+            if "reassoc" in body:
+                raise SimError("reassociated vector reduction is unsupported")
+            element = types.split(" into ")[-1].strip()
+            values = get(operands[0])
+            if not isinstance(values, list) or any(
+                isinstance(v, list) for v in values
+            ):
+                raise SimError(
+                    "vector reduction requires a one-dimensional vector"
+                )
+            if len(operands) == 2:
+                value = get(operands[1])
+            else:
+                value, values = values[0], values[1:]
+            for lane in values:
+                value = rounded(value + lane, element)
+            self.result(op, [value])
+        elif name == "vector.extract":
+            values = get(operands[0])
+            positions = re.search(r"\[(.*?)\]", body)
+            if positions is None:
+                raise SimError("vector extract requires an explicit position")
+            positions = _split_top_level(positions[1])
+            if len(positions) != 1 or not isinstance(values, list):
+                raise SimError(
+                    "only scalar extraction from a 1D vector is supported"
+                )
+            position = get(positions[0])
+            if position < 0 or position >= len(values):
+                raise SimError("vector extract index outside vector")
+            self.result(op, [values[position]])
         elif name in ("memref.alloc", "memref.alloca"):
             shape, element = type_shape(types)
             if any(n is None for n in shape):

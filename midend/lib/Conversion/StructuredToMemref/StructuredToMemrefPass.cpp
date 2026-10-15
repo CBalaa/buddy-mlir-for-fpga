@@ -121,6 +121,10 @@ public:
     target.addLegalDialect<buddy::boscame::BOSCAMEDialect>();
 
     target.addIllegalOp<tts::LoadOp, tts::StoreOp, tts::MakeTensorPtrOp>();
+    // Resolve every load's backing buffer before choosing the store's source
+    // memory space. Stores may consume computations whose DPS init is a load.
+    if (config.enableBOSCAME)
+      target.addLegalOp<tts::StoreOp, tts::MakeTensorPtrOp>();
 
     target.addLegalOp<UnrealizedConversionCastOp>();
 
@@ -132,6 +136,16 @@ public:
 
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
       signalPassFailure();
+      return;
+    }
+    if (config.enableBOSCAME) {
+      target.addIllegalOp<tts::StoreOp, tts::MakeTensorPtrOp>();
+      RewritePatternSet stores(&getContext());
+      triton::populateStructuredToMemrefConversionPatterns(
+          stores, typeConverter, enableTensorFirstVectorCpu, config,
+          &workspace);
+      if (failed(applyPartialConversion(moduleOp, target, std::move(stores))))
+        signalPassFailure();
     }
   }
 };

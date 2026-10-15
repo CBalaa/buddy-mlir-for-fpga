@@ -2,6 +2,7 @@
 """Real exported TTIR, persistent SPM, guards, and an independent padded oracle."""
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,36 @@ def main():
     source = Path(__file__).parent / "Inputs/layernorm.ttir"
     candidate = lower(source, str(prefix) + ".boscame.mlir", True)
     baseline = lower(source, str(prefix) + ".default.mlir", False)
+    candidate_text = Path(str(prefix) + ".boscame.mlir").read_text()
+    assert "vector.reduction" not in candidate_text
+    assert candidate_text.count("vector.extract ") == 2
+    assert (
+        len(
+            re.findall(
+                r"vector\.extract [^\n]*\[0\] : f32 from vector<1xf32>",
+                candidate_text,
+            )
+        )
+        == 2
+    )
+    assert (
+        len(
+            re.findall(
+                r"scf\.for[^\n]*iter_args\([^\n]*-> \(f32\)", candidate_text
+            )
+        )
+        == 2
+    )
+    for operation in ("subf", "mulf", "addf"):
+        assert re.search(
+            rf"arith\.{operation}[^\n]*: vector<\d+xf32>", candidate_text
+        ), "LayerNorm computation did not consume SPM vectors"
+    for line in candidate_text.splitlines():
+        if "vector.load " in line or "vector.store " in line:
+            assert "#bosc_ame.spm<" in line, (
+                "LayerNorm must compute directly on its SPM buffers"
+            )
+    assert "memref.memory_space_cast" not in candidate_text
     rng = np.random.default_rng(71)
     rows, width = 197, 768
     x = rng.normal(0.8, 1.5, (rows, width)).astype(np.float32)
@@ -139,6 +170,8 @@ def main():
     print(
         "PASS guards: last row, Weight/Bias tails and persistent poisoned SPM"
     )
+    # CHECK: PASS SPM: direct vector arithmetic and two scalar-order reductions
+    print("PASS SPM: direct vector arithmetic and two scalar-order reductions")
 
 
 if __name__ == "__main__":

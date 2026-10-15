@@ -67,22 +67,59 @@ UnstructuredToMemref, the common pointer/function conversions and cast cleanup.
 Tensor-first preconversion fusion is disabled in BOSCAME mode because it can
 consume loads/stores before DMA staging sees them.
 
-Loads DMA only the authorized DDR region into a bounded SPM view, wait, copy
-complete 64-byte blocks with **one-dimensional** vector loads/stores into an
-aligned ordinary buffer, then create a real `bufferization.to_tensor`.
-Masked-off ordinary lanes retain the original `other` value. Stores use a real
-`bufferization.to_buffer`, vector-copy valid lanes into SPM, DMA only the
-original valid DDR region and wait. Ordinary arithmetic, reduction and rsqrt
-therefore access ordinary memory even when lowered to scalar loops.
+Loads prepare a bounded SPM workspace covering the logical shape, initialize
+masked lanes with the original `other` using one-dimensional vector stores,
+DMA only the authorized DDR region, and wait. A real
+`bufferization.to_tensor` exposes that SPM buffer to the remaining tensor
+computation. There is no unconditional SPM-to-ordinary-buffer load copy.
+Structured conversion resolves loads before stores so store buffer inference
+can retain the producer's actual memory space and layout. Stores use a
+read-only `bufferization.to_buffer`: compatible SPM results DMA directly to
+the authorized DDR region; ordinary results explicitly stage through vectors.
+
+After standard empty-tensor and one-shot bufferization, the driver plans static
+local computation buffers in the shared SPM workspace. Non-escaping static
+rank-one/rank-two allocations connected to SPM computations are eligible;
+rank-zero reduction accumulators stay ordinary. SPM fill, elementwise Linalg
+generic, copy and reduction operations are then lowered internally, before the
+strict SPM exit checker. Elementwise operations use one-dimensional 64-byte
+vectors, static matching shapes and identity maps with a contiguous final
+axis. Supported computation elements are f32 and native integers; arithmetic
+that would require unsupported runtime calls is rejected. Short vector tails,
+unsupported layouts and unsupported SPM consumers fail explicitly. This does
+not weaken the separate typed DMA element support.
+
+The f32 rank-one sum keeps its scalar accumulator in `scf.for` iter_args.
+Each iteration reads SPM with `vector.load` of `vector<1xf32>`, extracts lane
+zero and clones the original scalar `arith.addf`, without reassociation.
+This preserves one f32 rounding per addition and the original operand order;
+it deliberately does not use `vector.reduction`.
+The tested FPGA image's reduction-instruction results matched a model that
+rounds once per 16-lane packet instead of once per lane, so the instruction
+mnemonic alone is insufficient evidence of numerical equivalence. Extracting
+all lanes from a wider vector generated unsupported slide instructions, so the
+current sum uses single-lane vector reads. Other vector transfers remain
+64-byte blocks. No scalar SPM loads, ordinary accumulator accesses or policy
+calls occur inside the reduction loop. Scalar rsqrt remains between the
+vector loops. This sum prioritizes source rounding semantics; its small vector
+reads can cost more than a hardware reduction.
 
 Integer dots first become standard tensor `linalg.matmul` operations carrying
-the unit attribute `bosc_ame.lower_to_ame`. After empty-tensor and one-shot
-bufferization, the driver verifies the number of marked matmuls survived and
-calls a C++ helper on the buffer form. The helper packs ordinary A/B/C buffers,
-DMA-stages them, emits tile load/mma/store, and materializes each dot result
-back into the original ordinary output buffer. K blocks are 64 wide; partial
-AME tiles are padded in ordinary memory. MatmulConverter's separate original-C
-addition is preserved and is not repeated inside the AME helper.
+the unit attribute `bosc_ame.lower_to_ame`. After bufferization, the driver
+verifies the markers survived and calls a C++ helper on the buffer form.
+Compatible SPM A/B buffers go directly to `tile.load_a/b`; the required example
+uses A strides `[64,1]` and logical B strides `[1,64]`. The B workspace already
+has the AME physical `[N,K]` layout and needs no second pack or DMA. Ordinary
+inputs, larger K blocks and incompatible SPM layouts are materialized/packed
+by the matmul consumer: SPM snapshots use complete one-dimensional vectors,
+never scalar SPM accesses. Every snapshot range must fit the real `spm.view`.
+C is initialized and materialized at each dot boundary. K blocks remain 64
+wide; padding and MatmulConverter's separate original-C addition are preserved.
+Unmarked floating matmuls keep their standard Linalg arithmetic. Their consumer
+explicitly snapshots any SPM operands into ordinary buffers with bounded
+one-dimensional vector copies, then copies an SPM result back after the matmul.
+This keeps the subsequent standard scalar loop lowering away from SPM without
+converting floating dots to integer AME.
 
 All DMA/cache-policy calls finish outside AME register live ranges. Final
 lowering inserts the existing DDR read/write policies at the actual ordinary
@@ -153,14 +190,24 @@ SPM and DDR guards are checked. A separate 64×64×256 test checks four internal
 K blocks, a nonzero dot initializer and dynamic rectangular masks/nonzero
 `other`; excluded DDR addresses are inspected in the access log.
 
-This implementation deliberately adds ordinary temporary buffers, packing and
-extra DMA/vector copies. It materializes results at every dot boundary instead
-of keeping an accumulator across the outer K loop. No baseline latency or speedup comparison has been made; the board drivers
-record cycles for diagnostics. An ELF containing RVV/AME instructions establishes
+LayerNorm computes directly in SPM, including its 1024-lane padded values;
+compatible GEMM A/B loads also remain in SPM until AME consumes them. General
+matmul packing and C materialization still use ordinary temporary buffers and
+extra DMA/vector copies. Results are materialized at every dot boundary rather
+than kept in accumulator registers across the outer K loop. No baseline latency
+or speedup comparison has been made; the board drivers record cycles for
+diagnostics. An ELF containing RVV/AME instructions establishes
 code generation; numerical board validation requires execution and final-DDR
 comparison as described below.
 
 ## Board execution and post-execution readback
+
+The direct-SPM revision passed actual FPGA execution and independent final-DDR
+comparison on 2026-10-15: LayerNorm on FPGA6 (NR patch9) and GEMM on FPGA4
+(NR patch7). All final-round values matched their independent oracles exactly,
+with unchanged inputs and guards. See the [current direct-SPM validation](validation/experimental-boscame-direct-spm/README.md)
+for image hashes, numerical details, remaining movement and source binding.
+The earlier reports below describe the previous ordinary-buffer staging path.
 
 `make check bin` for LayerNorm builds the NH/E6 launcher, typed adapter,
 freestanding math, DMA runtime and audited kernel into

@@ -42,6 +42,11 @@ void emitDmaAndWait(mlir::OpBuilder &builder, mlir::Location loc,
 mlir::LogicalResult copyVectors(mlir::OpBuilder &builder, mlir::Location loc,
                                 mlir::Value src, mlir::Value dst,
                                 int64_t elementCount);
+mlir::LogicalResult fillVectors(mlir::OpBuilder &builder, mlir::Location loc,
+                                mlir::Value buffer, mlir::Value value);
+mlir::FailureOr<mlir::Value> getStoreBuffer(mlir::OpBuilder &builder,
+                                            mlir::Operation *anchor,
+                                            mlir::Value tensor);
 
 mlir::FailureOr<mlir::Value> lowerLoad(mlir::OpBuilder &builder,
                                        mlir::Operation *anchor, mlir::Value ptr,
@@ -56,6 +61,8 @@ mlir::LogicalResult lowerStore(mlir::OpBuilder &builder,
 
 inline constexpr llvm::StringLiteral kLowerToAme = "bosc_ame.lower_to_ame";
 mlir::LogicalResult lowerMarkedMatmuls(mlir::ModuleOp module);
+mlir::LogicalResult planSpmComputationBuffers(mlir::ModuleOp module);
+mlir::LogicalResult lowerSpmComputations(mlir::ModuleOp module);
 mlir::LogicalResult verifyExit(mlir::ModuleOp module);
 
 } // namespace buddy::boscame::lowering

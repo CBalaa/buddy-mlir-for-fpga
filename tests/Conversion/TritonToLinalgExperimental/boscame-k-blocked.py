@@ -49,6 +49,16 @@ def main():
         assert text.count("bosc_ame.tile.mma") == 4, (
             "K=256 must use four 64-wide AME blocks"
         )
+        assert (
+            "linalg.matmul" not in text and "bosc_ame.lower_to_ame" not in text
+        )
+        assert "memref.memory_space_cast" not in text
+        assert "bufferization.to_tensor" not in text
+        assert "bufferization.to_buffer" not in text
+        assert any(
+            "vector.load " in line and "#bosc_ame.spm<" in line
+            for line in text.splitlines()
+        ), "AME preparation must consume the DMA-populated SPM buffers"
         subprocess.run(
             [
                 opt,

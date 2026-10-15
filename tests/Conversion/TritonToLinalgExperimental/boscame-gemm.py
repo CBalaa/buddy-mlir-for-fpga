@@ -1,6 +1,7 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
 """Full example grid: signed i8, physical [N,K] B, nonzero C and i32 wrap."""
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,12 @@ def main():
     text = Path(output).read_text()
     assert "bosc_ame.tile.mma" in text and "linalg.matmul" not in text
     assert "bosc_ame.lower_to_ame" not in text
+    assert re.search(r"arith\.addi[^\n]*: vector<\d+xi32>", text), (
+        "integer accumulation must use SPM vectors"
+    )
+    assert "memref.memory_space_cast" not in text
+    assert "bufferization.to_tensor" not in text
+    assert "bufferization.to_buffer" not in text
     subprocess.run(
         [
             opt,

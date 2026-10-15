@@ -9,13 +9,12 @@
 // UNMASKED-LABEL: func.func @copy
 // UNMASKED: bosc_ame.dma.start
 // UNMASKED: bosc_ame.dma.wait
-// UNMASKED: vector.load {{.*}} : memref<16xf32, #bosc_ame.spm<0>>, vector<16xf32>
-// UNMASKED: vector.store {{.*}} : memref<16xf32>, vector<16xf32>
-// UNMASKED: vector.load {{.*}} : memref<16xf32>, vector<16xf32>
-// UNMASKED: vector.store {{.*}} : memref<16xf32, #bosc_ame.spm<1>>, vector<16xf32>
 // UNMASKED: bosc_ame.dma.start
 // UNMASKED: bosc_ame.dma.wait
 // UNMASKED-NOT: bosc_ame.dma.start
+// UNMASKED-NOT: vector.load
+// UNMASKED-NOT: vector.store
+// UNMASKED-NOT: memref.alloc
 
 module {
   tt.func public @copy(%src: !tt.ptr<f32>, %dst: !tt.ptr<f32>) {

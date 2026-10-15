@@ -178,8 +178,8 @@ public:
     };
     unsigned tensorTargets = countTargets();
 
-    // Keep tensor computations in ordinary memory. Only the explicit vector
-    // copies and tile operations constructed by the helpers access SPM.
+    // Bufferize the tensor graph before lowering its SPM consumers. The load
+    // buffers already reside in SPM; buffer computations choose RVV or AME.
     PassManager bufferize(&getContext(), moduleOp.getOperationName());
     bufferize.addPass(bufferization::createEmptyTensorToAllocTensorPass());
     bufferization::OneShotBufferizePassOptions options;
@@ -198,7 +198,9 @@ public:
       signalPassFailure();
       return;
     }
-    if (failed(buddy::boscame::lowering::lowerMarkedMatmuls(moduleOp))) {
+    if (failed(buddy::boscame::lowering::planSpmComputationBuffers(moduleOp)) ||
+        failed(buddy::boscame::lowering::lowerMarkedMatmuls(moduleOp)) ||
+        failed(buddy::boscame::lowering::lowerSpmComputations(moduleOp))) {
       signalPassFailure();
       return;
     }

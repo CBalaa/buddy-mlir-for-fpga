@@ -29,17 +29,22 @@ The logical tensor has 1024 lanes; the valid DDR prefix has 768 f32 elements,
 so **each DMA transfers 3072 bytes**. X and Out have dynamic row offsets
 `programId * 768` elements, proved to be `programId * 3072` aligned bytes.
 
-| Buffer | DDR address | Padded ordinary lanes |
+| Buffer | DDR address | Padded SPM lanes |
 | --- | --- | --- |
 | X | X + row × 768 | 0 |
 | Weight | Weight | 1 |
 | Bias | Bias | 0 |
 | Out | Out + row × 768 | No DDR write |
 
-Each load waits for DMA, then vector-copies SPM to an ordinary 1024-element
-buffer. Stores vector-stage only the valid 768 elements into SPM and DMA them
-to Out. Neither scalar computation nor ordinary Linalg touches SPM, and no
-4096-byte user DDR access is emitted.
+Each load prepares a 1024-element SPM buffer, initializes its padded lanes
+with one-dimensional vectors, and DMA-loads only the valid 768 elements.
+Elementwise computation reads/writes SPM with one-dimensional RVV vectors.
+Each reduction uses single-lane vector loads from SPM and adds lane zero in
+the original f32 order; scalar arithmetic accesses registers or ordinary
+scalar temporaries. This preserves per-addition rounding without requiring
+unsupported vector slides. Elementwise operations retain 64-byte vectors.
+The final result DMA-stores directly from SPM to Out. No 4096-byte user DDR
+access, scalar SPM load/store or ordinary-buffer bounce is emitted.
 
 Both reductions still use all 1024 logical lanes. In particular, the centered
 padded X lanes contribute `mean²` to variance. The compiler preserves this
@@ -48,13 +53,12 @@ original TTIR behavior and does not replace it with a 768-lane reduction.
 `make adapter` generates a bridge with four typed unranked f32 descriptors
 and six grid/program scalars. Descriptor sizes and offsets are elements. The
 bridge checks 64-byte root alignment, nonalias ranges, capacities and strides,
-then launches all 197 rows. Generated ordinary buffers live on an aligned
-stack. `link.ld` puts user DDR in PMP entry 5 at
+then launches all 197 rows. Computation buffers live in bounded SPM views;
+ordinary scalar temporaries and descriptors live on an aligned stack. `link.ld` puts user DDR in PMP entry 5 at
 `0x80100000..0x802e0000`, and the E6 stack in entry 6 at
 `0x802e0000..0x802f0000`. The stack keeps the `0x0f` write-through policy during
 both DDR phases. This prevents descriptor spills from being read through a
-stale cache entry after a policy switch. Stack packs are DMA sources; results
-return through explicit vectors. The image links the existing DMA/cache-policy
+stale cache entry after a policy switch. The image links the existing DMA/cache-policy
 runtime, NH/E6 boot/platform code and freestanding `nr_math.c` implementations
 of `sqrtf` and `rsqrtf`. `rsqrtf` rounds the f32 square root and division
 separately, with floating-point contraction disabled in the build.
@@ -102,10 +106,14 @@ matched all 151296 final-round values bit for bit with the sequential-f32
 oracle (maximum absolute error 0). This is the measured result for these
 inputs, not a general floating-point bit-identity guarantee. Against the f64
 padded formula, maximum absolute error was 2.993e-5.
-See [the board evidence](../../../docs/validation/experimental-boscame/README.md).
+Those reports describe the earlier staging implementation. The direct-SPM
+revision also passed on FPGA6 (NR patch9) on 2026-10-15: all 302592 board
+comparisons and 151296 independently read-back final-round values were exact,
+with zero input/guard errors. See the [current board evidence](../../../docs/validation/experimental-boscame-direct-spm/README.md).
 
-Ordinary temporary buffers and vector copies add work. Performance is
-unmeasured. ELF/RVV checks establish code generation; hardware correctness
+The direct-SPM path removes the unconditional ordinary-buffer staging.
+SPM capacity includes the full 1024-lane buffers and static intermediate values.
+No controlled baseline latency comparison has been made. ELF/RVV checks establish code generation; hardware correctness
 requires the execution and numerical readback checks above.
 
 See [the compiler contract and tests](../../../docs/TritonToLinalgExperimentalBOSCAME.md).

@@ -1,0 +1,24 @@
+{
+  "kind": "gemm",
+  "passed": true,
+  "failures": [],
+  "board_diagnostics": {
+    "e6_diag_round": 1,
+    "e6_diag_checked_rows": 256,
+    "e6_diag_errors": 0,
+    "e6_diag_guard_errors": 0
+  },
+  "shape": [
+    128,
+    1024,
+    128
+  ],
+  "final_round_values_checked": 131072,
+  "output_mismatches": 0,
+  "exact_final_round_values": 131072,
+  "oracle": "signed i8 multiply, independent i64 accumulation, explicit i32 wrap",
+  "elf_sha256": "37156b5a04a9688144b1ec615ff088457cb5344089ebf42d992058aff2196bb1",
+  "dump_sha256": "0b08d0e6ba82eb3ca8f16e8b476318f6f9fc78e9ad087a2e3c521adae27839ac",
+  "dump_bytes": 3145728,
+  "ddr_base": "0x80000000"
+}
