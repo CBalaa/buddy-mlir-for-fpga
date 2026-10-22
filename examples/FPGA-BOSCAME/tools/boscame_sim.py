@@ -90,14 +90,14 @@ class TokenType:
 
 
 def _split_top_level(text, separator=","):
-    """Split on `separator`, ignoring separators inside <>, () and []."""
+    """Split on `separator`, ignoring separators inside nested syntax."""
     parts = []
     depth = 0
     current = ""
     for char in text:
-        if char in "<([":
+        if char in "<([{":
             depth += 1
-        elif char in ">)]":
+        elif char in ">)]}":
             depth -= 1
         if char == separator and depth == 0:
             parts.append(current)
@@ -227,8 +227,21 @@ class MemRef:
 
     def store(self, indices, value, machine):
         address = self.byte_address(indices)
+        self.store_byte_address(address, value, machine)
+
+    def store_byte_address(self, address, value, machine, direct=False):
+        """Store an element at a byte address supplied by an AME operation.
+
+        Descriptor-based CPU stores use ``store(indices, ...)``.  The AME
+        ``msce32.m`` instruction instead advances each row by its explicit
+        byte stride, so it needs this small escape hatch to model flat pointer
+        views without changing the descriptor's logical strides.
+        """
         self._check_bounds(address, machine)
-        machine.record_access(self, address, self.element_bytes, write=True)
+        if direct:
+            machine.record_direct_access(self, address, self.element_bytes)
+        else:
+            machine.record_access(self, address, self.element_bytes, write=True)
         for i in range(self.element_bytes):
             self.data[address + i] = (
                 (value >> (8 * i)) & 0xFF
@@ -311,7 +324,7 @@ def read_block(lines, index, end, top=False):
         index += 1
         if not text:
             continue
-        if text == "}" or text == "} else {":
+        if text == "}" or text.startswith("} {") or text == "} else {":
             return ops, index - 1
         if text.endswith("{"):
             head = text[:-1].strip()
@@ -325,7 +338,10 @@ def read_block(lines, index, end, top=False):
                 index += 1
                 else_children, index = read_block(lines, index, end)
                 op.blocks.append(else_children)
-            if index < end and lines[index].split("//")[0].strip() == "}":
+            if index < end and (
+                lines[index].split("//")[0].strip() == "}"
+                or lines[index].split("//")[0].strip().startswith("} {")
+            ):
                 index += 1
             else:
                 raise SimError(
@@ -371,6 +387,19 @@ class Machine:
                 "start": address,
                 "end": address + size,
                 "kind": "write" if write else "read",
+            }
+        )
+
+    def record_direct_access(self, memref, address, size):
+        """Record a hardware AME DDR write without a CPU policy call."""
+        if memref.spm_bank is not None:
+            raise SimError("AME direct store cannot target an SPM window")
+        self.accesses.append(
+            {
+                "buffer": memref.name,
+                "start": address,
+                "end": address + size,
+                "kind": "write",
             }
         )
 
@@ -747,6 +776,58 @@ def _run_op_impl(op, machine, args):
             f"spm{bank}",
         )
         return
+    if name in (
+        "bosc_ame.msce32.m",
+        "bosc_ame.intr.msce32.m",
+        "ame.msce32.m",
+    ):
+        # Model the direct AME accumulator write before LLVM lowers it to the
+        # target intrinsic.  The stride is expressed in bytes and therefore
+        # does not necessarily match the destination memref's logical row
+        # stride (a flat descriptor is valid too).
+        operands = parse_operands(op_body, 0)
+        if len(operands) < 3:
+            raise SimError("msce32.m expects accumulator, destination, stride")
+        matrix = value_of(machine, operands[0])
+        destination = value_of(machine, operands[1])
+        stride = constant_of(machine, operands[2])
+        if machine.outstanding:
+            raise SimError("direct msce32.m before DMA wait")
+        if destination.spm_bank is not None:
+            raise SimError("direct msce32.m destination must be external DDR")
+        if (
+            not isinstance(matrix, list)
+            or not matrix
+            or not isinstance(matrix[0], list)
+            or not matrix[0]
+            or any(
+                not isinstance(row, list) or len(row) != len(matrix[0])
+                for row in matrix
+            )
+        ):
+            raise SimError("msce32.m requires a rectangular accumulator")
+        rows, columns = len(matrix), len(matrix[0])
+        stride = int(stride)
+        row_bytes = columns * destination.element_bytes
+        if stride < row_bytes or stride % destination.element_bytes:
+            raise SimError("invalid msce32.m byte stride")
+        if len(destination.sizes) == 2 and (
+            rows > destination.sizes[0] or columns > destination.sizes[1]
+        ):
+            raise SimError("msce32.m tile exceeds destination shape")
+        base = destination.byte_address([0] * len(destination.sizes))
+        for row, values in enumerate(matrix):
+            row_start = base + row * stride
+            if row_start < 0 or row_start + row_bytes > len(destination.data):
+                raise SimError("msce32.m writes outside backing storage")
+            for column, value in enumerate(values):
+                destination.store_byte_address(
+                    row_start + column * destination.element_bytes,
+                    value,
+                    machine,
+                    direct=True,
+                )
+        return
     if name.startswith("bosc_ame.tile."):
         interpret_tile_op(op, machine, op_body, op_types)
         return
@@ -996,9 +1077,22 @@ def interpret_tile_op(op, machine, op_body, op_types):
     if name == "bosc_ame.tile.store_acc":
         matrix = value_of(machine, operands[0])
         memref = value_of(machine, operands[1])
+        if machine.outstanding:
+            raise SimError("tile store before DMA wait")
+        direct = "bosc_ame.direct_ddr" in op.text
+        if direct and memref.spm_bank is not None:
+            raise SimError("direct tile store must target external DDR")
         for i in range(len(matrix)):
             for j in range(len(matrix[0])):
-                memref.store([i, j], matrix[i][j], machine)
+                if direct:
+                    memref.store_byte_address(
+                        memref.byte_address([i, j]),
+                        matrix[i][j],
+                        machine,
+                        direct=True,
+                    )
+                else:
+                    memref.store([i, j], matrix[i][j], machine)
         return
     raise SimError("unsupported tile op: " + op.text)
 

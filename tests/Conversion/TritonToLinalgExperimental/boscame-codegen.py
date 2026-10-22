@@ -9,7 +9,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "examples/FPGA-BOSCAME/tools"))
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import (  # noqa: E402
+    buddy_opt_path,
+    experimental_pipeline,
+    specialize_full_gemm,
+)
 
 
 def run(command, input_text=None):
@@ -39,11 +43,16 @@ def main():
             work / (name + suffix)
             for suffix in (".mlir", ".llvm.mlir", ".ll", ".s")
         )
+        input_path = Path(__file__).parent / "Inputs" / source
+        if name == "gemm":
+            input_path = specialize_full_gemm(
+                input_path, work / "gemm.static.ttir"
+            )
         run(
             [
                 opt,
-                Path(__file__).parent / "Inputs" / source,
-                "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+                input_path,
+                *experimental_pipeline(store_policy="spm-dma"),
                 "-o",
                 module,
             ]
@@ -81,9 +90,17 @@ def main():
         encoded = assembly.read_text()
         if ame:
             encoded = run(
-                [sys.executable, tools / "ame_to_word.py", "--gpr-mode=fixed"],
+                [
+                    sys.executable,
+                    tools / "ame_to_word.py",
+                    "--gpr-mode=fixed",
+                    "--preserve-matrix-registers",
+                ],
                 encoded,
             )
+        assert not re.search(r"\bvid\.v\b", encoded), (
+            "NR FPGA ISA does not permit lane-index generation"
+        )
         checked = run(
             [sys.executable, tools / "restrict_fpga_assembly.py"], encoded
         )

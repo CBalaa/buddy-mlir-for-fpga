@@ -224,6 +224,32 @@ public:
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "unsupported accumulator type");
 
+    if (op->hasAttr("bosc_ame.ordered")) {
+      // The independent emitter has one serial accumulator and consumes each
+      // A/B pair before loading the next pair. LLVM's existing pure MMA
+      // intrinsic cannot express its dependence on msettile*/msettype. A
+      // side-effecting assembly bundle keeps configuration and MMA together;
+      // its tied accumulator and memory clobber order both surrounding tile
+      // loads and the reduction. Named matrix constraints are understood by
+      // the existing backend and require no matrix moves for this schedule.
+      SmallVector<Value> arguments(operands);
+      for (int64_t value : {lhsType.getShape()[0], rhsType.getShape()[1],
+                            lhsType.getShape()[1], kFpgaMtypeMmaI8})
+        arguments.push_back(buddy::boscame::detail::createI64Constant(
+            rewriter, op->getLoc(), value));
+      auto ordered = LLVM::InlineAsmOp::create(
+          rewriter, op->getLoc(), resultType, arguments,
+          "msettilem zero, $4\n\tmsettilen zero, $5\n\t"
+          "msettilek zero, $6\n\tmsettype zero, $7\n\t"
+          "mqma.b.mm $0, $2, $3",
+          "={acc0},0,{tr0},{tr1},r,r,r,r,~{memory}",
+          /*has_side_effects=*/true, /*is_align_stack=*/false,
+          LLVM::TailCallKind::None, /*convergent=*/false,
+          LLVM::AsmDialectAttr(), ArrayAttr());
+      rewriter.replaceOp(op, ordered.getResults());
+      return success();
+    }
+
     // M and N come from A and B, K is their shared inner dimension.
     emitTileConfiguration(rewriter, op->getLoc(), lhsType.getShape()[0],
                           rhsType.getShape()[1], lhsType.getShape()[1],

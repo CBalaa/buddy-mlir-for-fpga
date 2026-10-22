@@ -24,10 +24,12 @@
 
 #include "Dialect/BOSCAME/TileOps.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
-
+#include "Dialect/BOSCAME/DmaAlignment.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
 using namespace mlir;
 using namespace buddy::boscame;
@@ -81,6 +83,62 @@ static StringRef getTileRoleRequirement(TileRole role) {
   llvm_unreachable("unknown tile role");
 }
 
+/// Return the storage root of a direct DDR endpoint.  Direct AME operations
+/// may address a function argument through descriptor-only memref views, but
+/// compiler-owned allocations and unknown producers are not external DDR.
+static Value getDirectDdrRoot(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    if (auto cast = dyn_cast<memref::CastOp>(def))
+      value = cast.getSource();
+    else if (auto cast = dyn_cast<memref::ReinterpretCastOp>(def))
+      value = cast.getSource();
+    else if (auto subview = dyn_cast<memref::SubViewOp>(def))
+      value = subview.getSource();
+    else if (auto transpose = dyn_cast<memref::TransposeOp>(def))
+      value = transpose.getIn();
+    else if (auto cast = dyn_cast<memref::MemorySpaceCastOp>(def))
+      value = cast.getSource();
+    else if (auto view = dyn_cast<memref::ViewOp>(def))
+      value = view.getSource();
+    else if (auto collapse = dyn_cast<memref::CollapseShapeOp>(def))
+      value = collapse.getSrc();
+    else if (auto expand = dyn_cast<memref::ExpandShapeOp>(def))
+      value = expand.getSrc();
+    else if (auto metadata = dyn_cast<memref::ExtractStridedMetadataOp>(def))
+      value = metadata.getSource();
+    else if (auto cast = dyn_cast<UnrealizedConversionCastOp>(def)) {
+      if (cast.getNumOperands() != 1)
+        return Value();
+      value = cast.getOperand(0);
+    } else {
+      return Value();
+    }
+  }
+  return value;
+}
+
+static LogicalResult verifyDirectDdrProvenance(Operation *op, Value endpoint) {
+  auto root = dyn_cast_or_null<BlockArgument>(getDirectDdrRoot(endpoint));
+  auto rootType =
+      root ? dyn_cast<BaseMemRefType>(root.getType()) : BaseMemRefType();
+  if (!root || !root.getOwner()->isEntryBlock() ||
+      !isa<func::FuncOp>(root.getOwner()->getParentOp()) || !rootType ||
+      rootType.getMemorySpace())
+    return op->emitOpError()
+           << "direct DDR tile endpoint must trace to an external function "
+              "entry argument";
+
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  auto abi = module ? module->getAttrOfType<StringAttr>(spmdma::kDmaAbiAttrName)
+                    : StringAttr();
+  if (!abi || abi.getValue() != spmdma::kDmaAbiAlignedNonAliasing)
+    return op->emitOpError()
+           << "direct DDR tile endpoint requires module attribute `"
+           << spmdma::kDmaAbiAttrName << " = \""
+           << spmdma::kDmaAbiAlignedNonAliasing << "\"`";
+  return success();
+}
+
 std::optional<TileStorageLayout>
 buddy::boscame::computeTileStorageLayout(MemRefType type, TileRole role) {
   if (!type || type.getRank() != 2 || !type.hasStaticShape())
@@ -95,17 +153,24 @@ buddy::boscame::computeTileStorageLayout(MemRefType type, TileRole role) {
   int64_t offset = 0;
   if (failed(type.getStridesAndOffset(strides, offset)))
     return std::nullopt;
-  if (offset == ShapedType::kDynamic || strides[0] == ShapedType::kDynamic ||
-      strides[1] == ShapedType::kDynamic)
+  if (strides[0] == ShapedType::kDynamic || strides[1] == ShapedType::kDynamic)
     return std::nullopt;
-  if (offset < 0 || strides[0] <= 0 || strides[1] <= 0)
+  if ((offset != ShapedType::kDynamic && offset < 0) || strides[0] <= 0 ||
+      strides[1] <= 0)
     return std::nullopt;
 
   TileStorageLayout layout;
   layout.shape = {type.getShape()[0], type.getShape()[1]};
   layout.strides = {strides[0], strides[1]};
   layout.elementBytes = *elementBytes;
-  layout.byteOffset = offset * layout.elementBytes;
+  // A direct DDR descriptor may carry a runtime subview offset.  The caller's
+  // aligned-pointer ABI supplies the alignment proof; keep the static layout
+  // usable for stride checks and let tile lowering recover the dynamic offset
+  // from the memref descriptor.
+  if (offset == ShapedType::kDynamic)
+    layout.byteOffset = 0;
+  else if (llvm::MulOverflow(offset, layout.elementBytes, layout.byteOffset))
+    return std::nullopt;
 
   // The hardware row stride is the *physical* row distance.  For B, whose
   // storage is `N x K` with K contiguous, that is the stride between two
@@ -118,7 +183,9 @@ buddy::boscame::computeTileStorageLayout(MemRefType type, TileRole role) {
     return std::nullopt;
   if (strides[rowIndex] < layout.shape[innerIndex])
     return std::nullopt;
-  layout.rowStrideBytes = strides[rowIndex] * layout.elementBytes;
+  if (llvm::MulOverflow(strides[rowIndex], layout.elementBytes,
+                        layout.rowStrideBytes))
+    return std::nullopt;
   return layout;
 }
 
@@ -129,7 +196,12 @@ LogicalResult buddy::boscame::verifyTileStorageLayout(
                                 "`#bosc_ame.spm<bank>`, got an "
                                 "unranked memref";
 
-  if (!isa_and_nonnull<SPMAttr>(type.getMemorySpace()))
+  // AME tile loads/stores normally address the fixed SPM windows.  A placement
+  // decision may explicitly select the external DDR descriptor instead.  The
+  // opt-in is kept on each operation so ordinary clients (and compiler-owned
+  // temporaries) retain the historical SPM contract.
+  bool directDdr = op->hasAttr("bosc_ame.direct_ddr");
+  if (!isa_and_nonnull<SPMAttr>(type.getMemorySpace()) && !directDdr)
     return op->emitOpError()
            << "operand " << type
            << " must carry the `#bosc_ame.spm<bank>` storage space; a DDR "
@@ -171,6 +243,14 @@ LogicalResult buddy::boscame::verifyTileStorageLayout(
            << getTileRoleRequirement(role);
 
   layout = *computed;
+  if (directDdr && layout.byteOffset % spmdma::kDmaAlignmentBytes != 0)
+    return op->emitOpError()
+           << "direct DDR " << stringifyTileRole(role) << " descriptor offset "
+           << layout.byteOffset << " bytes is not 64-byte aligned";
+  if (directDdr && layout.rowStrideBytes % spmdma::kDmaAlignmentBytes != 0)
+    return op->emitOpError() << "direct DDR " << stringifyTileRole(role)
+                             << " physical row stride " << layout.rowStrideBytes
+                             << " bytes is not 64-byte aligned";
   return success();
 }
 
@@ -181,7 +261,15 @@ LogicalResult buddy::boscame::verifyTileMemRefOperand(
     return op->emitOpError()
            << "operand " << operand << " must be a ranked memref, got "
            << operand.getType();
-  return verifyTileStorageLayout(op, type, role, layout);
+  if (failed(verifyTileStorageLayout(op, type, role, layout)))
+    return failure();
+  if (op->hasAttr("bosc_ame.direct_ddr")) {
+    if (failed(verifyDirectDdrProvenance(op, operand)) ||
+        failed(spmdma::verifyEndpointPointerAlignment(
+            op, operand, "direct DDR tile", spmdma::kDmaAlignmentBytes)))
+      return failure();
+  }
+  return success();
 }
 
 LogicalResult

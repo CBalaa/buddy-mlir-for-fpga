@@ -47,6 +47,13 @@ static void ensureMaskDimsCoverRank(triton::MaskState &mstate,
   }
 }
 
+static void copyBOSCAMEOrigin(Operation *source, Operation *target) {
+  if (Attribute id = source->getAttr("bosc_ame.origin_id"))
+    target->setAttr("bosc_ame.origin_id", id);
+  if (Attribute kind = source->getAttr("bosc_ame.event_kind"))
+    target->setAttr("bosc_ame.event_kind", kind);
+}
+
 // Try to apply unstructured mask on the ptr.
 static Value applyUnstructuredMask(Operation *op, Value ptr,
                                    triton::MaskState &mstate, Location loc,
@@ -1652,6 +1659,7 @@ LogicalResult PtrAnalysis::rewriteLoadOp(triton::LoadOp op,
   }
 
   auto loadOp = builder.create<tts::LoadOp>(loc, ptr, dims, scalarOther);
+  copyBOSCAMEOrigin(op, loadOp);
 
   LLVM_DEBUG({
     llvm::dbgs() << "creating tts::load:\n";
@@ -1782,6 +1790,7 @@ LogicalResult PtrAnalysis::rewriteStoreOp(triton::StoreOp op,
   }
 
   auto storeOp = builder.create<tts::StoreOp>(loc, ptr, val, dims);
+  copyBOSCAMEOrigin(op, storeOp);
 
   LLVM_DEBUG({
     llvm::dbgs() << "creating tts::store:\n";

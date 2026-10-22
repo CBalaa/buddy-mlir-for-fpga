@@ -129,6 +129,7 @@ def layernorm_oracle(x, weight, bias):
         dtype=np.float32,
     )
     centered = np.subtract(padded, mean, dtype=np.float32)
+    centered[:, 768:] = np.float32(0)
     squares = np.multiply(centered, centered, dtype=np.float32)
     variance = np.divide(
         np.cumsum(squares, axis=1, dtype=np.float32)[:, -1:],
@@ -184,7 +185,7 @@ def check_layernorm(ddr, failures):
             float(np.max(delta)) if np.all(np.isfinite(delta)) else None
         ),
         "tolerance": "2e-5 * (1 + abs(expected))",
-        "oracle": "sequential f32, 1024 padded variance lanes, f32 sqrt then division",
+        "oracle": "sequential f32, 1024 logical lanes with padded centered lanes zeroed before variance, f32 sqrt then division",
     }
 
 

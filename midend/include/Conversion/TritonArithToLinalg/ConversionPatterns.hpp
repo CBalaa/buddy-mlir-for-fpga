@@ -21,8 +21,12 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
@@ -1054,6 +1058,250 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     return false;
   }
 
+  static Attribute findOriginId(Value value) {
+    SmallPtrSet<Operation *, 8> visited;
+    while (Operation *def = value.getDefiningOp()) {
+      if (!visited.insert(def).second)
+        return {};
+      auto eventKind = def->getAttrOfType<StringAttr>("bosc_ame.event_kind");
+      if (eventKind && eventKind.getValue() == "load")
+        return def->getAttr("bosc_ame.origin_id");
+      StringRef name = def->getName().getStringRef();
+      if (def->getNumOperands() != 1 ||
+          (name != "tensor.cast" && name != "tensor.expand_shape" &&
+           name != "tensor.collapse_shape" && name != "arith.extsi" &&
+           name != "arith.trunci" && name != "arith.extf" &&
+           name != "arith.truncf" && name != "tt.splat"))
+        return {};
+      value = def->getOperand(0);
+    }
+    return {};
+  }
+
+  struct SourceLoadLineage {
+    SmallVector<int64_t, 4> origins;
+    bool complete = true;
+  };
+
+  static void collectSourceLoadOrigins(Value value, DenseSet<Value> &visited,
+                                       SourceLoadLineage &lineage) {
+    if (!visited.insert(value).second)
+      return;
+
+    if (auto argument = dyn_cast<BlockArgument>(value)) {
+      Region *parentRegion = argument.getOwner()->getParent();
+      auto whileOp = dyn_cast_or_null<scf::WhileOp>(
+          parentRegion ? parentRegion->getParentOp() : nullptr);
+      if (whileOp) {
+        unsigned slot = argument.getArgNumber();
+        if (parentRegion == &whileOp.getBefore()) {
+          if (slot < whileOp.getInits().size())
+            collectSourceLoadOrigins(whileOp.getInits()[slot], visited,
+                                     lineage);
+          else
+            lineage.complete = false;
+
+          Region &after = whileOp.getAfter();
+          auto yieldOp =
+              after.empty()
+                  ? scf::YieldOp()
+                  : dyn_cast<scf::YieldOp>(after.front().getTerminator());
+          if (yieldOp && slot < yieldOp.getNumOperands())
+            collectSourceLoadOrigins(yieldOp.getOperand(slot), visited,
+                                     lineage);
+          else
+            lineage.complete = false;
+          return;
+        }
+
+        if (parentRegion == &whileOp.getAfter()) {
+          Region &before = whileOp.getBefore();
+          auto conditionOp =
+              before.empty()
+                  ? scf::ConditionOp()
+                  : dyn_cast<scf::ConditionOp>(before.front().getTerminator());
+          if (conditionOp && slot < conditionOp.getArgs().size())
+            collectSourceLoadOrigins(conditionOp.getArgs()[slot], visited,
+                                     lineage);
+          else
+            lineage.complete = false;
+          return;
+        }
+
+        lineage.complete = false;
+        return;
+      }
+
+      auto forOp =
+          dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
+      if (!forOp) {
+        lineage.complete = false;
+        return;
+      }
+      for (auto [index, iterArg] : llvm::enumerate(forOp.getRegionIterArgs())) {
+        if (iterArg != value)
+          continue;
+        if (index >= forOp.getInitArgs().size() ||
+            index >= forOp.getYieldedValues().size()) {
+          lineage.complete = false;
+          return;
+        }
+        collectSourceLoadOrigins(forOp.getInitArgs()[index], visited, lineage);
+        collectSourceLoadOrigins(forOp.getYieldedValues()[index], visited,
+                                 lineage);
+        return;
+      }
+      lineage.complete = false;
+      return;
+    }
+
+    Operation *def = value.getDefiningOp();
+    if (!def)
+      return;
+    auto eventKind = def->getAttrOfType<StringAttr>("bosc_ame.event_kind");
+    if (eventKind && eventKind.getValue() == "load") {
+      auto origin = def->getAttrOfType<IntegerAttr>("bosc_ame.origin_id");
+      if (origin && origin.getInt() >= 0)
+        lineage.origins.push_back(origin.getInt());
+      else
+        lineage.complete = false;
+      return;
+    }
+
+    if (auto ifOp = dyn_cast<scf::IfOp>(def)) {
+      auto result = dyn_cast<OpResult>(value);
+      if (!result) {
+        lineage.complete = false;
+        return;
+      }
+      unsigned resultIndex = result.getResultNumber();
+      for (Region &region : ifOp->getRegions()) {
+        if (region.empty()) {
+          lineage.complete = false;
+          continue;
+        }
+        Operation *terminator = region.front().getTerminator();
+        if (!isa<scf::YieldOp>(terminator) ||
+            resultIndex >= terminator->getNumOperands()) {
+          lineage.complete = false;
+          continue;
+        }
+        collectSourceLoadOrigins(terminator->getOperand(resultIndex), visited,
+                                 lineage);
+      }
+      return;
+    }
+
+    if (auto forOp = dyn_cast<scf::ForOp>(def)) {
+      auto result = dyn_cast<OpResult>(value);
+      if (!result) {
+        lineage.complete = false;
+        return;
+      }
+      unsigned resultIndex = result.getResultNumber();
+      if (resultIndex >= forOp.getInitArgs().size() ||
+          resultIndex >= forOp.getYieldedValues().size()) {
+        lineage.complete = false;
+        return;
+      }
+      collectSourceLoadOrigins(forOp.getInitArgs()[resultIndex], visited,
+                               lineage);
+      collectSourceLoadOrigins(forOp.getYieldedValues()[resultIndex], visited,
+                               lineage);
+      return;
+    }
+
+    if (auto whileOp = dyn_cast<scf::WhileOp>(def)) {
+      auto result = dyn_cast<OpResult>(value);
+      if (!result) {
+        lineage.complete = false;
+        return;
+      }
+      Region &before = whileOp.getBefore();
+      auto conditionOp =
+          before.empty()
+              ? scf::ConditionOp()
+              : dyn_cast<scf::ConditionOp>(before.front().getTerminator());
+      unsigned slot = result.getResultNumber();
+      if (conditionOp && slot < conditionOp.getArgs().size())
+        collectSourceLoadOrigins(conditionOp.getArgs()[slot], visited, lineage);
+      else
+        lineage.complete = false;
+      return;
+    }
+
+    if (auto switchOp = dyn_cast<scf::IndexSwitchOp>(def)) {
+      auto result = dyn_cast<OpResult>(value);
+      if (!result) {
+        lineage.complete = false;
+        return;
+      }
+      unsigned resultIndex = result.getResultNumber();
+      auto visitRegion = [&](Region &region) {
+        if (region.empty()) {
+          lineage.complete = false;
+          return;
+        }
+        Operation *terminator = region.front().getTerminator();
+        if (!isa<scf::YieldOp>(terminator) ||
+            resultIndex >= terminator->getNumOperands()) {
+          lineage.complete = false;
+          return;
+        }
+        collectSourceLoadOrigins(terminator->getOperand(resultIndex), visited,
+                                 lineage);
+      };
+      visitRegion(switchOp.getDefaultRegion());
+      for (Region &region : switchOp.getCaseRegions())
+        visitRegion(region);
+      return;
+    }
+
+    if (!isMemoryEffectFree(def)) {
+      lineage.complete = false;
+      return;
+    }
+    if (auto linalgOp = dyn_cast<linalg::LinalgOp>(def)) {
+      for (OpOperand *input : linalgOp.getDpsInputOperands())
+        collectSourceLoadOrigins(input->get(), visited, lineage);
+      for (OpOperand &init : linalgOp.getDpsInitsMutable())
+        if (linalgOp.payloadUsesValueFromOperand(&init))
+          collectSourceLoadOrigins(init.get(), visited, lineage);
+      return;
+    }
+    if (!def->getRegions().empty()) {
+      lineage.complete = false;
+      for (Value operand : def->getOperands())
+        collectSourceLoadOrigins(operand, visited, lineage);
+      return;
+    }
+    for (Value operand : def->getOperands())
+      collectSourceLoadOrigins(operand, visited, lineage);
+  }
+
+  static SourceLoadLineage findSourceLoadLineage(Value value) {
+    SourceLoadLineage lineage;
+    DenseSet<Value> visited;
+    collectSourceLoadOrigins(value, visited, lineage);
+    llvm::sort(lineage.origins);
+    lineage.origins.erase(
+        std::unique(lineage.origins.begin(), lineage.origins.end()),
+        lineage.origins.end());
+    return lineage;
+  }
+
+  static void attachSourceLoadLineage(Operation *matmul, StringRef operand,
+                                      Value value) {
+    SourceLoadLineage lineage = findSourceLoadLineage(value);
+    MLIRContext *context = matmul->getContext();
+    Builder builder(context);
+    std::string originsName = (operand + "_source_load_origin_ids").str();
+    std::string completeName = (operand + "_source_lineage_complete").str();
+    matmul->setAttr(originsName,
+                    DenseI64ArrayAttr::get(context, lineage.origins));
+    matmul->setAttr(completeName, builder.getBoolAttr(lineage.complete));
+  }
+
   LogicalResult
   matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1123,6 +1371,26 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     if (enableBOSCAME && integers)
       res.getDefiningOp()->setAttr("bosc_ame.lower_to_ame",
                                    rewriter.getUnitAttr());
+
+    if (Operation *matmul = res.getDefiningOp()) {
+      if (Attribute id = op->getAttr("bosc_ame.origin_id"))
+        matmul->setAttr("bosc_ame.origin_id", id);
+      if (Attribute eventKind = op->getAttr("bosc_ame.event_kind"))
+        matmul->setAttr("bosc_ame.event_kind", eventKind);
+      attachSourceLoadLineage(matmul, "bosc_ame.a", op.getA());
+      attachSourceLoadLineage(matmul, "bosc_ame.b", op.getB());
+      attachSourceLoadLineage(matmul, "bosc_ame.accumulator", op.getC());
+      if (Attribute id = findOriginId(op.getA());
+          id && !matmul->hasAttr("bosc_ame.a_origin_id"))
+        matmul->setAttr("bosc_ame.a_origin_id", id);
+      if (Attribute id = findOriginId(op.getB());
+          id && !matmul->hasAttr("bosc_ame.b_origin_id"))
+        matmul->setAttr("bosc_ame.b_origin_id", id);
+      if (!skipC)
+        if (Attribute id = findOriginId(op.getC());
+            id && !matmul->hasAttr("bosc_ame.accumulator_origin_id"))
+          matmul->setAttr("bosc_ame.accumulator_origin_id", id);
+    }
 
     if (!skipC) {
       if (integers) {

@@ -172,6 +172,30 @@ def is_vector_memory(word):
     return word & 0x7F in (0x07, 0x27) and (word >> 12) & 7 in (0, 5, 6, 7)
 
 
+def is_ame_store(word):
+    """Return whether *word* is the verified accumulator store form.
+
+    The AME opcode uses bit 25 to select the memory-store form.  For NR,
+    ``msce32.m`` is the non-transposed accumulator operation (funct6=0,
+    funct3=2) with a physical accumulator index below eight.  Decode these
+    fields from the raw word so an objdump ``.word`` line cannot hide a store
+    from the ELF audit.
+    """
+    return (
+        is_ame(word)
+        and (word >> 26) == 0
+        and ((word >> 12) & 7) == 2
+        and bool((word >> 25) & 1)
+        and not ((word >> 11) & 1)
+        and ((word >> 7) & 15) < 8
+    )
+
+
+def is_vector_store(word):
+    """Return whether *word* is an RVV vector memory store."""
+    return is_vector_memory(word) and word & 0x7F == 0x27
+
+
 def parse_disassembly(dump):
     records = []
     symbol = section = ""

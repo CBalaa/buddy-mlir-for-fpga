@@ -1,17 +1,16 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' | FileCheck %s
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias structured-ldst-mode=tensor-first-vector-cpu' | FileCheck %s
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='store-policy=spm-dma' --promote-buffers-to-stack | FileCheck %s
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias structured-ldst-mode=tensor-first-vector-cpu' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='store-policy=spm-dma' --promote-buffers-to-stack | FileCheck %s
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='store-policy=spm-dma' --promote-buffers-to-stack --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
 // CHECK: bosc_ame.dma.abi = "args_aligned64_nonalias"
 // CHECK-LABEL: func.func @masked
 // CHECK: arith.constant 3072 : index
 // CHECK: bosc_ame.spm.view {{.*}} : memref<1024xf32, #bosc_ame.spm<{{[01]}}>>
-// CHECK: vector.store {{.*}} : memref<1024xf32, #bosc_ame.spm<{{[01]}}>>, vector<16xf32>
+// CHECK: vector.store {{.*}} : memref<1024xf32, strided<[1]>, #bosc_ame.spm<{{[01]}}>>, vector<16xf32>
 // CHECK: bosc_ame.dma.start {{.*}} : (memref<768xf32, strided<[1], offset: ?>>,
 // CHECK: bosc_ame.dma.wait
-// CHECK: bosc_ame.dma.start {{.*}} : (memref<768xf32, strided<[1]>, #bosc_ame.spm<{{[01]}}>>, memref<768xf32, strided<[1], offset: ?>>
+// CHECK: bosc_ame.dma.start {{.*}} : (memref<768xf32, strided<[1], offset: ?>, #bosc_ame.spm<{{[01]}}>>, memref<768xf32, strided<[1], offset: ?>>
 // CHECK: bosc_ame.dma.wait
-// CHECK-NOT: vector.load
-// CHECK-NOT: memref.alloc
+// CHECK-NOT: memref.alloc(
 // CHECK-NOT: bufferization.
 // LLVM: store <16 x float>
 // LLVM: call i64 @bosc_ame_dma_start

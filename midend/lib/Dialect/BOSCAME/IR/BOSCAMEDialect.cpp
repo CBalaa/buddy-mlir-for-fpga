@@ -85,24 +85,47 @@ struct BankAnchoredRange {
 /// to the start of its bank.
 static std::optional<BankAnchoredRange> getBankAnchoredRange(Value value,
                                                              int64_t bytes) {
-  if (auto view = value.getDefiningOp<SpmViewOp>()) {
-    int64_t begin = static_cast<int64_t>(view.getOffset());
-    return BankAnchoredRange{view.getBank(), begin, begin + bytes};
+  auto type = dyn_cast<MemRefType>(value.getType());
+  auto bank = getSpmBank(type);
+  auto origin = getStaticPointerOrigin(value);
+  auto offset = getStaticDescriptorOffset(value);
+  unsigned elementBytes =
+      type ? getSpmElementByteWidth(type.getElementType()) : 0;
+  if (!bank || !origin || !offset || !elementBytes || bytes <= 0)
+    return std::nullopt;
+  int64_t begin, end;
+  if (llvm::MulOverflow(*offset, int64_t(elementBytes), begin) ||
+      llvm::AddOverflow(begin, origin->byteShift, begin) || begin < 0 ||
+      llvm::AddOverflow(begin, bytes, end))
+    return std::nullopt;
+
+  int64_t base = 0;
+  std::optional<int64_t> capacity;
+  if (auto view = origin->root.getDefiningOp<SpmViewOp>()) {
+    if (view.getBank() != *bank ||
+        view.getOffset() > uint64_t(kSpmBankCapacityBytes))
+      return std::nullopt;
+    base = static_cast<int64_t>(view.getOffset());
+    capacity =
+        getContiguousZeroOffsetByteSize(cast<MemRefType>(view.getType()));
   }
   // A block argument counts as bank-anchored only when it is exactly one
   // complete bank: the workspace contract maps each bank used by a kernel to
   // one such parameter.  A narrower SPM memref argument has no statically known
   // position inside its bank.
-  if (isa<BlockArgument>(value)) {
-    auto memref = dyn_cast<MemRefType>(value.getType());
+  else if (isa<BlockArgument>(origin->root)) {
+    auto memref = dyn_cast<MemRefType>(origin->root.getType());
     if (!memref)
       return std::nullopt;
-    std::optional<int64_t> bank = getSpmBank(memref);
-    std::optional<int64_t> size = getContiguousZeroOffsetByteSize(memref);
-    if (bank && size && *size == kSpmBankCapacityBytes)
-      return BankAnchoredRange{*bank, 0, bytes};
+    capacity = getContiguousZeroOffsetByteSize(memref);
+    if (getSpmBank(memref) != bank || !capacity ||
+        *capacity != kSpmBankCapacityBytes)
+      return std::nullopt;
   }
-  return std::nullopt;
+  if (!capacity || end > *capacity || llvm::AddOverflow(begin, base, begin) ||
+      llvm::AddOverflow(end, base, end) || end > kSpmBankCapacityBytes)
+    return std::nullopt;
+  return BankAnchoredRange{*bank, begin, end};
 }
 
 /// Verify the static part of an `bosc_ame.spm.view`.  Everything that is a
@@ -275,8 +298,8 @@ LogicalResult DmaStartOp::verify() {
       return emitOpError()
              << "cannot prove that the src and dst ranges in SPM bank "
              << *src->bank
-             << " are disjoint: at least one endpoint is not a direct "
-                "bosc_ame.spm.view or an SPM block argument";
+             << " are disjoint: cannot statically bound an endpoint within "
+                "its bosc_ame.spm.view or full-bank SPM block argument";
     if (srcRange->begin < dstRange->end && dstRange->begin < srcRange->end)
       return emitOpError() << "src range [" << srcRange->begin << ", "
                            << srcRange->end << ") and dst range ["

@@ -47,7 +47,7 @@ class TritonArithToLinalgPass
   // Add additional I32 arguments to represent:
   // - num_programs, 3 in total, one for each axis of the launch grid
   // - program_id, 3 in total, one for each axis of the launch grid
-  static void addProgramInfo(triton::FuncOp func) {
+  static void addProgramInfo(triton::FuncOp func, bool attachAxisAttrs) {
     OpBuilder b(func);
 
     auto origFuncType = func.getFunctionType();
@@ -60,17 +60,40 @@ class TritonArithToLinalgPass
 
     func.setFunctionType(newFuncType);
 
-    // Add empty attributes for each new argument if needed
-    if (func.getAllArgAttrs()) {
-      SmallVector<DictionaryAttr> newArgAttrs;
-      func.getAllArgAttrs(newArgAttrs);
-      newArgAttrs.append(TRITON_PROGRAM_INFO_ARG_COUNT, DictionaryAttr());
-      func.setAllArgAttrs(newArgAttrs);
-    }
-
-    // Add the corresponding arguments to function body
+    // Add the corresponding arguments to function body before installing
+    // argument attributes, whose interface verifier checks body argument
+    // count against the attribute list.
     for (unsigned int i = 0; i < TRITON_PROGRAM_INFO_ARG_COUNT; i++) {
       func.getBody().front().addArgument(b.getI32Type(), func.getLoc());
+    }
+
+    SmallVector<DictionaryAttr> newArgAttrs;
+    if (func.getAllArgAttrs() || attachAxisAttrs) {
+      if (func.getAllArgAttrs())
+        func.getAllArgAttrs(newArgAttrs);
+      newArgAttrs.resize(origInputTypes.size() + TRITON_PROGRAM_INFO_ARG_COUNT);
+      if (attachAxisAttrs) {
+        for (unsigned axis = 0; axis < LAUNCH_GRID_RANK; ++axis) {
+          NamedAttrList numProgramsAttrs(
+              newArgAttrs[origInputTypes.size() + axis]);
+          numProgramsAttrs.set("bosc_ame.program_role",
+                               b.getStringAttr("num_programs"));
+          numProgramsAttrs.set("bosc_ame.program_axis",
+                               b.getI32IntegerAttr(axis));
+          newArgAttrs[origInputTypes.size() + axis] =
+              numProgramsAttrs.getDictionary(b.getContext());
+
+          NamedAttrList programIdAttrs(
+              newArgAttrs[origInputTypes.size() + LAUNCH_GRID_RANK + axis]);
+          programIdAttrs.set("bosc_ame.program_role",
+                             b.getStringAttr("program_id"));
+          programIdAttrs.set("bosc_ame.program_axis",
+                             b.getI32IntegerAttr(axis));
+          newArgAttrs[origInputTypes.size() + LAUNCH_GRID_RANK + axis] =
+              programIdAttrs.getDictionary(b.getContext());
+        }
+      }
+      func.setAllArgAttrs(newArgAttrs);
     }
   }
 
@@ -203,7 +226,7 @@ public:
 
     if (pidsToFuncArgs) {
       for (auto func : getOperation().getOps<triton::FuncOp>()) {
-        addProgramInfo(func);
+        addProgramInfo(func, config.enableBOSCAME);
       }
     }
 

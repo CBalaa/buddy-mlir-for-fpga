@@ -72,9 +72,12 @@
 #include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/BOSCAME/Transform.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Interfaces/CallInterfaces.h"
@@ -137,10 +140,18 @@ struct ActiveRequest {
   Footprint dst;
 };
 
+struct AccumulatorChain {
+  /// Values that can still reach the register-file store.  Keeping leaves
+  /// rather than only the latest value handles a value used by two MMA chains
+  /// conservatively: the chain remains live until both leaves are stored.
+  llvm::SmallVector<Value, 4> leaves;
+};
+
 /// Per-block bookkeeping.  A request never outlives its block, so this state
 /// never has to be merged with a sibling block's state.
 struct BlockAnalysis {
   std::optional<ActiveRequest> active[static_cast<size_t>(kDmaChannelCount)];
+  llvm::SmallVector<AccumulatorChain, 4> accumulatorChains;
 };
 
 } // namespace
@@ -241,6 +252,10 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       current = subview.getSource();
       continue;
     }
+    if (auto transpose = dyn_cast<memref::TransposeOp>(defining)) {
+      current = transpose.getIn();
+      continue;
+    }
     if (auto cast = dyn_cast<memref::CastOp>(defining)) {
       current = cast.getSource();
       continue;
@@ -265,7 +280,7 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       current = metadata.getSource();
       continue;
     }
-    // `memref.reshape`, `memref.transpose`, call results, ... are not traced.
+    // `memref.reshape`, call results, ... are not traced.
     break;
   }
 
@@ -436,6 +451,112 @@ private:
     return false;
   }
 
+  static bool hasLiveAccumulator(const BlockAnalysis &analysis) {
+    for (const AccumulatorChain &chain : analysis.accumulatorChains)
+      if (!chain.leaves.empty())
+        return true;
+    return false;
+  }
+
+  static std::optional<size_t>
+  findAccumulatorChain(const BlockAnalysis &analysis, Value value) {
+    for (auto [index, chain] : llvm::enumerate(analysis.accumulatorChains))
+      if (llvm::is_contained(chain.leaves, value))
+        return index;
+    return std::nullopt;
+  }
+
+  static void addAccumulatorLeaf(AccumulatorChain &chain, Value value) {
+    if (!llvm::is_contained(chain.leaves, value))
+      chain.leaves.push_back(value);
+  }
+
+  static void removeAccumulatorLeaf(AccumulatorChain &chain, Value value) {
+    for (auto iterator = chain.leaves.begin(); iterator != chain.leaves.end();
+         ++iterator)
+      if (*iterator == value) {
+        chain.leaves.erase(iterator);
+        return;
+      }
+  }
+
+  static void addAccumulatorChain(BlockAnalysis &analysis, Value value) {
+    AccumulatorChain chain;
+    addAccumulatorLeaf(chain, value);
+    analysis.accumulatorChains.push_back(std::move(chain));
+  }
+
+  static void replaceAccumulatorLeaf(BlockAnalysis &analysis, Value oldValue,
+                                     Value newValue,
+                                     bool keepOldValue = false) {
+    std::optional<size_t> chain = findAccumulatorChain(analysis, oldValue);
+    if (!chain)
+      return;
+    if (!keepOldValue)
+      removeAccumulatorLeaf(analysis.accumulatorChains[*chain], oldValue);
+    addAccumulatorLeaf(analysis.accumulatorChains[*chain], newValue);
+  }
+
+  /// Whether a value remains needed after `current` in its containing block.
+  /// Uses in nested regions are ordered by the ancestor operation in that
+  /// block, so storing one branch of an SSA accumulator does not discharge a
+  /// later branch or a later loop that still needs the register-file value.
+  static bool hasLaterAccumulatorUser(Value value, Operation &current) {
+    for (Operation *user : value.getUsers()) {
+      Operation *ancestor = current.getBlock()->findAncestorOpInBlock(*user);
+      if (!ancestor ||
+          (ancestor != &current && current.isBeforeInBlock(ancestor)))
+        return true;
+    }
+    return false;
+  }
+
+  static void recordAccumulatorLoad(TileLoadAccOp load,
+                                    BlockAnalysis &analysis) {
+    addAccumulatorChain(analysis, load.getMatrix());
+  }
+
+  static void recordAccumulatorMma(TileMmaOp mma, BlockAnalysis &analysis) {
+    std::optional<size_t> chain = findAccumulatorChain(analysis, mma.getAcc());
+    if (!chain) {
+      // A matrix value may be carried into a structured region.  The tile
+      // verifier checks the value's origin, but the liveness walk deliberately
+      // treats an untracked origin as live as well.
+      addAccumulatorChain(analysis, mma.getMatrix());
+      return;
+    }
+
+    // Two branches can be live at once, but a user that already executed no
+    // longer needs the old leaf.
+    if (!hasLaterAccumulatorUser(mma.getAcc(), *mma))
+      removeAccumulatorLeaf(analysis.accumulatorChains[*chain], mma.getAcc());
+    addAccumulatorLeaf(analysis.accumulatorChains[*chain], mma.getMatrix());
+  }
+
+  static void recordAccumulatorStore(TileStoreAccOp store,
+                                     BlockAnalysis &analysis) {
+    std::optional<size_t> chain =
+        findAccumulatorChain(analysis, store.getMatrix());
+    if (!chain)
+      return;
+    AccumulatorChain &accumulator = analysis.accumulatorChains[*chain];
+    if (!hasLaterAccumulatorUser(store.getMatrix(), *store))
+      removeAccumulatorLeaf(accumulator, store.getMatrix());
+    if (accumulator.leaves.empty())
+      analysis.accumulatorChains.erase(analysis.accumulatorChains.begin() +
+                                       *chain);
+  }
+
+  static void recordAccumulatorOperation(Operation &op,
+                                         BlockAnalysis &analysis) {
+    if (auto load = dyn_cast<TileLoadAccOp>(&op))
+      recordAccumulatorLoad(load, analysis);
+    else if (auto mma = dyn_cast<TileMmaOp>(&op))
+      recordAccumulatorMma(mma, analysis);
+    else if (auto store = dyn_cast<TileStoreAccOp>(&op))
+      recordAccumulatorStore(store, analysis);
+  }
+
   LogicalResult checkFunction(func::FuncOp function) {
     for (BlockArgument argument : function.getArguments())
       if (isa<DMATokenType>(argument.getType()))
@@ -455,6 +576,10 @@ private:
 
   LogicalResult checkBlock(Block &block) {
     BlockAnalysis analysis;
+    return checkBlock(block, analysis);
+  }
+
+  LogicalResult checkBlock(Block &block, BlockAnalysis &analysis) {
     for (Operation &op : block)
       if (failed(checkOperation(op, analysis)))
         return failure();
@@ -471,11 +596,81 @@ private:
     return success();
   }
 
+  LogicalResult checkBlockWithAccumulatorState(Block &block,
+                                               const BlockAnalysis &parent) {
+    BlockAnalysis nested;
+    nested.accumulatorChains = parent.accumulatorChains;
+    return checkBlock(block, nested);
+  }
+
+  LogicalResult checkFor(scf::ForOp forOp, BlockAnalysis &analysis) {
+    BlockAnalysis bodyAnalysis;
+    bodyAnalysis.accumulatorChains = analysis.accumulatorChains;
+
+    Block &body = *forOp.getBody();
+    for (auto [index, init] : llvm::enumerate(forOp.getInitArgs())) {
+      if (index >= forOp.getRegionIterArgs().size())
+        break;
+      // A loop may carry an initial value more than once and also capture it
+      // directly.  Keep it until every iter_arg has been mapped, and preserve
+      // any direct capture after stores of those iter_args.
+      bool capturesInit = llvm::any_of(init.getUsers(), [&](Operation *user) {
+        return user != forOp.getOperation() && forOp->isAncestor(user);
+      });
+      bool repeatsInit =
+          llvm::is_contained(forOp.getInitArgs().drop_front(index + 1), init);
+      replaceAccumulatorLeaf(bodyAnalysis, init,
+                             forOp.getRegionIterArgs()[index],
+                             capturesInit || repeatsInit);
+    }
+    if (failed(checkBlock(body, bodyAnalysis)))
+      return failure();
+
+    auto yield = cast<scf::YieldOp>(body.getTerminator());
+    for (auto [index, init] : llvm::enumerate(forOp.getInitArgs())) {
+      Value result = forOp.getResult(index);
+      Value yielded = yield.getOperand(index);
+      std::optional<size_t> outerChain = findAccumulatorChain(analysis, init);
+      std::optional<size_t> bodyChain =
+          findAccumulatorChain(bodyAnalysis, yielded);
+
+      if (outerChain) {
+        if (!hasLaterAccumulatorUser(init, *forOp))
+          removeAccumulatorLeaf(analysis.accumulatorChains[*outerChain], init);
+        if (bodyChain)
+          addAccumulatorLeaf(analysis.accumulatorChains[*outerChain], result);
+        if (analysis.accumulatorChains[*outerChain].leaves.empty())
+          analysis.accumulatorChains.erase(analysis.accumulatorChains.begin() +
+                                           *outerChain);
+      } else if (bodyChain) {
+        // A load created in the loop body can still carry its accumulator out
+        // through the loop result.  Keep that chain live in the containing
+        // block until its store.
+        addAccumulatorChain(analysis, result);
+      }
+    }
+    return success();
+  }
+
+  LogicalResult checkAccumulatorDmaBoundary(Operation &op,
+                                            BlockAnalysis &analysis) {
+    if (!hasLiveAccumulator(analysis))
+      return success();
+    StringRef action = isa<DmaStartOp>(&op) ? "start" : "wait for";
+    return op.emitOpError()
+           << "cannot " << action
+           << " a DMA request while an AME accumulator is live between its "
+              "`bosc_ame.tile.load_acc` and `bosc_ame.tile.store_acc`; "
+              "complete the accumulator chain before DMA "
+           << (isa<DmaStartOp>(&op) ? "start" : "completion");
+  }
+
   LogicalResult checkOperation(Operation &op, BlockAnalysis &analysis) {
     if (failed(checkSpmStorage(op)))
       return failure();
-    // Regions are only entered with nothing in flight; the region body is
-    // analyzed with its own fresh state.
+    // Regions are only entered with nothing in flight.  Accumulator liveness
+    // is copied into ordinary regions and mapped through loop-carried values,
+    // so a DMA nested in a region cannot bypass the AME sequencing rule.
     if (op.getNumRegions() != 0) {
       for (std::optional<ActiveRequest> &slot : analysis.active) {
         if (!slot)
@@ -487,24 +682,73 @@ private:
                   "that completion does not have to be merged along "
                   "control-flow paths";
       }
+
+      if (auto forOp = dyn_cast<scf::ForOp>(&op))
+        return checkFor(forOp, analysis);
+
       for (Region &region : op.getRegions())
         for (Block &bodyBlock : region)
-          if (failed(checkBlock(bodyBlock)))
+          if (failed(checkBlockWithAccumulatorState(bodyBlock, analysis)))
             return failure();
       return success();
     }
 
-    if (auto start = dyn_cast<DmaStartOp>(&op))
+    if (auto start = dyn_cast<DmaStartOp>(&op)) {
+      if (failed(checkAccumulatorDmaBoundary(*start, analysis)))
+        return failure();
       return checkStart(start, analysis);
-    if (auto wait = dyn_cast<DmaWaitOp>(&op))
+    }
+    if (auto wait = dyn_cast<DmaWaitOp>(&op)) {
+      if (failed(checkAccumulatorDmaBoundary(*wait, analysis)))
+        return failure();
       return checkWait(wait, analysis);
+    }
 
-    return checkAccess(op, analysis);
+    // A callee can issue DMA or clobber matrix registers even when the caller
+    // has no request in flight. Matrix values have no call-preservation ABI,
+    // so a local memory-effect annotation cannot make such a call safe.
+    // CallOpInterface includes direct/indirect func.call and LLVM call/invoke;
+    // LLVM's generic intrinsic call does not implement that interface and can
+    // itself lower to an out-of-line runtime call.
+    if (hasLiveAccumulator(analysis) &&
+        isa<CallOpInterface, LLVM::CallIntrinsicOp>(&op))
+      return op.emitOpError(
+          "cannot call code while an AME accumulator is live; a callee may "
+          "execute DMA or clobber matrix registers, so complete the "
+          "accumulator chain before the call");
+
+    if (failed(checkAccess(op, analysis)))
+      return failure();
+    recordAccumulatorOperation(op, analysis);
+    return success();
   }
 
   /// SPM is a fixed workspace: it is addressed through `bosc_ame.spm.view`,
   /// never allocated, freed or declared as a global.
   LogicalResult checkSpmStorage(Operation &op) {
+    bool hasSpmValue = llvm::any_of(op.getOperandTypes(), [](Type type) {
+      return getSpmBank(type).has_value();
+    });
+    hasSpmValue |= llvm::any_of(op.getResultTypes(), [](Type type) {
+      return getSpmBank(type).has_value();
+    });
+
+    // Keep the SPM memory-user surface closed.  A newly introduced operation
+    // carrying an SPM memref must opt into this list explicitly; otherwise a
+    // memory effect that the checker does not understand could silently
+    // access the fixed workspace and invalidate DMA/AME ordering.
+    if (hasSpmValue &&
+        !isa<SpmViewOp, DmaStartOp, TileLoadAOp, TileLoadBOp, TileLoadAccOp,
+             TileStoreAccOp, vector::LoadOp, vector::StoreOp, memref::CastOp,
+             memref::CollapseShapeOp, memref::ExpandShapeOp,
+             memref::ExtractStridedMetadataOp, memref::MemorySpaceCastOp,
+             memref::ReinterpretCastOp, memref::SubViewOp, memref::ViewOp,
+             memref::DimOp, memref::LoadOp, memref::StoreOp, memref::CopyOp,
+             linalg::LinalgOp>(op))
+      return op.emitOpError(
+          "unknown operation uses SPM memory; only typed vector, AME tile, "
+          "DMA endpoint and explicit view operations may access SPM");
+
     if (isa<memref::LoadOp, memref::StoreOp, memref::CopyOp, linalg::LinalgOp>(
             op))
       for (Value operand : op.getOperands()) {
@@ -652,24 +896,19 @@ private:
 
     if (!hasInterface) {
       // An operation that does not describe its memory effects could touch the
-      // staged source or the destination through state the analysis cannot see.
+      // staged source or the destination through state the analysis cannot see,
+      // even when it has no memref operand (for example, a hidden global).
       if (isa<CallOpInterface>(&op))
         return op.emitOpError()
                << "calls code with unknown memory effects while a DMA request "
                   "is in flight; a call may touch the staged source or the "
                   "destination, so an in-flight request requires inlined, "
                   "effect-annotated code";
-      for (Value operand : op.getOperands()) {
-        if (!isa<MemRefType>(operand.getType()))
-          continue;
-        // Conservative: unknown effects are taken as a full read and write of
-        // every declared buffer.
-        if (failed(checkValueAccess(op, operand, /*isRead=*/true, analysis)))
-          return failure();
-        if (failed(checkValueAccess(op, operand, /*isRead=*/false, analysis)))
-          return failure();
-      }
-      return success();
+      return op.emitOpError()
+             << "has unknown memory effects while a DMA request is in flight; "
+                "the operation may access the staged source or the destination "
+                "through hidden state, so it must declare its effects before "
+                "the request can be waited";
     }
 
     for (const MemoryEffects::EffectInstance &effect : effects) {
@@ -764,6 +1003,24 @@ struct SpmDmaCheckPass
 } // namespace
 
 LogicalResult buddy::boscame::verifySpmDmaContract(ModuleOp module) {
+  // Operations created by a lowering pass are not automatically verified.
+  // Run the BOSCAME operation verifiers here before the cross-operation
+  // lifetime/alias analysis below.  In particular, DmaStartOp verifies the
+  // effective endpoint address (including dynamic descriptor offsets and
+  // memref.view shifts); skipping it would let an unprovable alignment reach
+  // LLVM export, where the typed DMA contract can no longer reject it.
+  LogicalResult operationStatus = success();
+  module.walk([&](Operation *op) {
+    if (failed(operationStatus))
+      return;
+    if (auto view = dyn_cast<SpmViewOp>(op))
+      operationStatus = view.verify();
+    else if (auto start = dyn_cast<DmaStartOp>(op))
+      operationStatus = start.verify();
+  });
+  if (failed(operationStatus))
+    return failure();
+
   bool abiDisjointDdrRoots = false;
   if (auto abi = module->getAttrOfType<StringAttr>(kDmaAbiAttrName))
     abiDisjointDdrRoots = abi.getValue() == kDmaAbiAlignedNonAliasing;

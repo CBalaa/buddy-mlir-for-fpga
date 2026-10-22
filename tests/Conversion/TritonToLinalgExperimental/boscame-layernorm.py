@@ -1,5 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
-"""Real exported TTIR, persistent SPM, guards, and an independent padded oracle."""
+"""Real exported TTIR, persistent SPM, guards, and a select-zero oracle."""
 
 import os
 import re
@@ -12,7 +12,7 @@ import numpy as np
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
 
 
 def lower(source, output, boscame):
@@ -20,8 +20,11 @@ def lower(source, output, boscame):
     command = [
         opt,
         str(source),
-        "--triton-to-linalg-experimental"
-        + ("=boscame=true dma-abi=args_aligned64_nonalias" if boscame else ""),
+        *(
+            experimental_pipeline("spm-dma")
+            if boscame
+            else ["--triton-to-linalg-experimental"]
+        ),
         "-o",
         str(output),
     ]
@@ -74,11 +77,27 @@ def main():
         assert re.search(
             rf"arith\.{operation}[^\n]*: vector<\d+xf32>", candidate_text
         ), "LayerNorm computation did not consume SPM vectors"
+    predicate_transfers = 0
     for line in candidate_text.splitlines():
         if "vector.load " in line or "vector.store " in line:
-            assert "#bosc_ame.spm<" in line, (
-                "LayerNorm must compute directly on its SPM buffers"
-            )
+            if re.search(r"vector<\d+xi1>", line):
+                predicate_transfers += 1
+                assert "#bosc_ame.spm<" not in line, (
+                    "predicate vectors must not become SPM data transfers"
+                )
+            else:
+                assert "#bosc_ame.spm<" in line, (
+                    "LayerNorm data vectors must use SPM buffers"
+                )
+    assert predicate_transfers == 0, (
+        "LayerNorm static prefix select should not materialize predicate vectors"
+    )
+    assert not re.search(r"bosc_ame\.dma\.start[^\n]*i1", candidate_text), (
+        "predicate-only i1 buffers must not become DMA payloads"
+    )
+    assert not re.search(
+        r"bosc_ame\.dma\.start[^\n]*memref<\d+xi32", candidate_text
+    ), "static index and bound auxiliaries must not become DMA payloads"
     assert "memref.memory_space_cast" not in candidate_text
     rng = np.random.default_rng(71)
     rows, width = 197, 768
@@ -114,13 +133,13 @@ def main():
         assert (
             buffers["%arg3"][start:end] == reference_buffers["%arg3"][start:end]
         ), "default experimental path differs"
-        # Original TTIR centers ALL 1024 lanes before the second reduction.
-        # The 256 padded X lanes therefore contribute mean**2 to variance.
+        # The second reduction keeps 1024 lanes after selecting padded lanes to zero.
         padded = np.pad(x[row].astype(np.float64), (0, 256))
         mean = padded.sum() / width
-        variance = np.square(padded - mean).sum() / width
+        centered = np.where(np.arange(1024) < width, padded - mean, 0.0)
+        variance = np.square(centered).sum() / width
         expected = (
-            (padded[:width] - mean) / np.sqrt(variance + np.float32(1.0e-12))
+            centered[:width] / np.sqrt(variance + np.float32(1.0e-12))
         ) * weight + bias
         max_error = max(max_error, float(np.max(np.abs(actual - expected))))
         # An independent f32 oracle spells out each TTIR operation and the
@@ -132,12 +151,15 @@ def main():
             np.cumsum(padded32, dtype=np.float32)[-1] / np.float32(width)
         )
         centered32 = np.subtract(padded32, mean32, dtype=np.float32)
+        centered32[width:] = np.float32(0)
         squares32 = np.multiply(centered32, centered32, dtype=np.float32)
         var32 = np.float32(
             np.cumsum(squares32, dtype=np.float32)[-1] / np.float32(width)
         )
         shifted32 = np.float32(var32 + np.float32(1.0e-12))
-        inverse32 = np.float32(1.0 / np.sqrt(np.float64(shifted32)))
+        # math.rsqrt lowers to sqrtf followed by a separate f32 reciprocal.
+        root32 = np.sqrt(shifted32, dtype=np.float32)
+        inverse32 = np.divide(np.float32(1.0), root32, dtype=np.float32)
         oracle32 = np.add(
             np.multiply(
                 np.multiply(centered32[:width], inverse32, dtype=np.float32),
@@ -162,9 +184,9 @@ def main():
     print(
         f"PASS LayerNorm: {len(order)} programs, three 3072 B loads and one 3072 B store per program"
     )
-    # CHECK: PASS numerics: bit-identical to default experimental buffer IR; independent padded TTIR oracle
+    # CHECK: PASS numerics: bit-identical to default experimental buffer IR; independent masked-lane TTIR oracle
     print(
-        f"PASS numerics: bit-identical to default experimental buffer IR; independent padded TTIR oracle (max absolute error {max_error:.3g})"
+        f"PASS numerics: bit-identical to default experimental buffer IR; independent masked-lane TTIR oracle (max absolute error {max_error:.3g})"
     )
     # CHECK: PASS guards: last row, Weight/Bias tails and persistent poisoned SPM
     print(

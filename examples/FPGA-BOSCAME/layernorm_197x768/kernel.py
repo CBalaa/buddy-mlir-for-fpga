@@ -40,7 +40,7 @@ def layernorm(
     weight = tl.load(Weight + channel, valid, other=1.0).to(tl.float32)
     bias = tl.load(Bias + channel, valid, other=0.0).to(tl.float32)
     mean = tl.sum(x, axis=0) / WIDTH
-    centered = x - mean
+    centered = tl.where(valid, x - mean, 0.0)
     variance = tl.sum(centered * centered, axis=0) / WIDTH
     out = centered * tl.rsqrt(variance + EPS) * weight + bias
     tl.store(Out + row * WIDTH + channel, out, valid)

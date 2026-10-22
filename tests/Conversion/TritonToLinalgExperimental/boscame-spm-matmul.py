@@ -10,7 +10,7 @@ import numpy as np
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
 
 
 def source_for(m, n, k, row_major_b, spm_c):
@@ -99,7 +99,7 @@ def floating_source(row_major_b):
 
 
 def check_floating(work, opt, rng):
-    mode = "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias"
+    mode = experimental_pipeline("spm-dma")
     for row_major_b in (True, False):
         name = "floating-row-b" if row_major_b else "floating-column-b"
         source = work / (name + ".ttir")
@@ -107,17 +107,15 @@ def check_floating(work, opt, rng):
         loops = work / (name + ".loops.mlir")
         source.write_text(floating_source(row_major_b))
         result = subprocess.run(
-            [opt, str(source), mode, "-o", str(lowered)],
+            [opt, str(source), *mode, "-o", str(lowered)],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, result.stderr
         text = lowered.read_text()
         assert "bosc_ame.tile.mma" not in text
-        matmul = next(
-            line for line in text.splitlines() if "linalg.matmul" in line
-        )
-        assert "#bosc_ame.spm" not in matmul, matmul
+        assert "linalg.matmul" not in text
+        assert "arith.mulf" in text and "memref.load" in text
         assert "vector.load" in text and "vector.store" in text
         assert all(
             "#bosc_ame.spm" not in line
@@ -208,7 +206,7 @@ def check_floating(work, opt, rng):
         path = work / (name + ".mlir")
         path.write_text(source)
         result = subprocess.run(
-            [opt, str(path), mode], capture_output=True, text=True
+            [opt, str(path), *mode], capture_output=True, text=True
         )
         assert result.returncode != 0, name + " silently succeeded"
         assert error in result.stderr, result.stderr
@@ -240,13 +238,18 @@ def main():
             [
                 opt,
                 str(original),
-                "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+                *experimental_pipeline("spm-dma"),
                 "-o",
                 str(lowered),
             ],
             text=True,
             capture_output=True,
         )
+        if row_b:
+            assert result.returncode != 0
+            assert "unsupported staged B layout" in result.stderr
+            print("PASS row-b: reject unsupported physical B layout")
+            continue
         assert result.returncode == 0, result.stderr
         text = lowered.read_text()
         assert text.count("bosc_ame.tile.mma") == (k + 63) // 64
@@ -259,7 +262,7 @@ def main():
         if name == "direct":
             # Only the producer's A/B windows and accumulator workspace remain.
             assert text.count("bosc_ame.spm.view") == 3
-            assert text.count("bosc_ame.dma.start") == 3
+            assert text.count("bosc_ame.dma.start") == 4
         subprocess.run(
             [
                 opt,
@@ -317,8 +320,8 @@ def main():
                 assert machine.spm[1][end : end + 256] == bytes([0x5A]) * 256
         print(f"PASS {name}: exact signed i8/i32 wrap, initial C and guards")
 
-    # The logical 4x80 span fits 480 bytes, but a complete final vector needs
-    # 512 bytes. Do not widen a view without evidence of that extra storage.
+    # Direct AME partial tiles need the exact 464-byte physical span, with no
+    # vector packing or widening to a rounded 512-byte backing allocation.
     source, _, _ = source_for(4, 16, 80, False, False)
     source = "\n".join(
         line
@@ -333,16 +336,25 @@ def main():
         [
             opt,
             str(negative),
-            "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+            *experimental_pipeline("spm-dma"),
         ],
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0
-    assert (
-        "complete 64 B vectors inside its spm.view allocation" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "vector.load" not in result.stdout
+    assert "memref<480xi8" in result.stdout
+    negative.write_text(source.replace("memref<480xi8", "memref<448xi8"))
+    result = subprocess.run(
+        [opt, str(negative), *experimental_pipeline("spm-dma")],
+        capture_output=True,
+        text=True,
     )
-    print("PASS bounded vector packing: reject a short physical SPM allocation")
+    assert result.returncode != 0
+    assert "SPM" in result.stderr
+    print(
+        "PASS bounded vector packing: exact partial tiles and short backing rejection"
+    )
 
     source, _, _ = source_for(16, 16, 64, False, False)
     source = "\n".join(
@@ -361,7 +373,7 @@ def main():
         [
             opt,
             str(negative),
-            "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+            *experimental_pipeline("spm-dma"),
         ],
         capture_output=True,
         text=True,

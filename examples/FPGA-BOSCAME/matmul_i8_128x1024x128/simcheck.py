@@ -10,8 +10,8 @@ oracle. SPM persists between programs, and guards/access logs check excluded DDR
 
     python3 simcheck.py [--module PATH] [--programs N]
 
-The oracle and launch use this example's fixed shapes and 2 x 16 x 1 grid;
-`build.py` supplies only the default module path and entry symbol. Requires numpy.
+The oracle and launch read the shape and grid from ``build.py``; this keeps
+the simulator aligned with ``kernels.py``. Requires numpy.
 """
 
 import argparse
@@ -34,9 +34,10 @@ from boscame_check import buddy_opt_path  # noqa: E402
 
 def operands():
     """The deterministic A, B and initial C the launcher fills (launch.c)."""
-    a = (np.arange(128)[:, None] * 13 + np.arange(128)[None, :] * 7) % 31 - 15
-    b = (np.arange(1024)[:, None] * 11 + np.arange(128)[None, :] * 5) % 29 - 14
-    c = (np.arange(128)[:, None] * 3 + np.arange(1024)[None, :]) % 7 - 3
+    m, n, k = (example.SHAPE[name] for name in ("M", "N", "K"))
+    a = (np.arange(m)[:, None] * 13 + np.arange(k)[None, :] * 7) % 31 - 15
+    b = (np.arange(n)[:, None] * 11 + np.arange(k)[None, :] * 5) % 29 - 14
+    c = (np.arange(m)[:, None] * 3 + np.arange(n)[None, :]) % 7 - 3
     return a.astype(np.int8), b.astype(np.int8), c.astype("<i4")
 
 
@@ -81,19 +82,21 @@ def main():
             check=True,
         )
         machine = Machine(loops, example.SYMBOL)
-    total = 32
+    grid_m = example.SHAPE["M"] // example.SHAPE["BM"]
+    grid_n = example.SHAPE["N"] // example.SHAPE["BN"]
+    total = grid_m * grid_n
     limit = args.programs or total
     launched = 0
-    for x in range(2):
-        for y in range(16):
+    for x in range(grid_m):
+        for y in range(grid_n):
             for z in range(1):
                 if launched >= limit:
                     break
                 machine.launch(
                     buffers,
                     {
-                        "%arg3": 2,
-                        "%arg4": 16,
+                        "%arg3": grid_m,
+                        "%arg4": grid_n,
                         "%arg5": 1,
                         "%arg6": x,
                         "%arg7": y,
@@ -104,8 +107,10 @@ def main():
 
     want = c0.astype(np.int64) + a.astype(np.int64) @ b.astype(np.int64).T
     got = np.frombuffer(
-        bytes(buffers["%arg2"]), dtype="<i4", count=128 * 1024
-    ).reshape(128, 1024)
+        bytes(buffers["%arg2"]),
+        dtype="<i4",
+        count=example.SHAPE["M"] * example.SHAPE["N"],
+    ).reshape(example.SHAPE["M"], example.SHAPE["N"])
     assert buffers["%arg0"] == a.tobytes() + guard
     assert buffers["%arg1"] == b.tobytes() + guard
     assert buffers["%arg2"][-len(guard) :] == guard
@@ -120,7 +125,8 @@ def main():
         print("SIM CHECK FAIL")
         return 1
     print(
-        "SIM CHECK PASS: 131072 outputs match the NumPy "
+        "SIM CHECK PASS: "
+        f"{example.SHAPE['M'] * example.SHAPE['N']} outputs match the NumPy "
         f"INT32 oracle after {total} programs"
     )
     return 0

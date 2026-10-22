@@ -8,8 +8,8 @@
 #include "Triton/IR/Types.h"
 
 #include "Analysis/OpFoldResultUtils.h"
-#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
+#include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
 #include "mlir/IR/AffineMap.h"
@@ -38,6 +38,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1677,12 +1678,247 @@ struct MakeGatherScatterTensorPtrConverter
   }
 };
 
+// Follow the view-like operations that can be introduced between a Triton
+// pointer and the eventual memref.copy destination.  This lets provenance
+// distinguish a function argument (external DDR) from a compiler-owned
+// temporary even after ensureRankedMemRef has inserted a memref.cast.
+static Value getMemRefRoot(Value value) {
+  while (Operation *def = value.getDefiningOp()) {
+    if (auto cast = dyn_cast<memref::CastOp>(def)) {
+      value = cast.getSource();
+      continue;
+    }
+    if (auto cast = dyn_cast<memref::ReinterpretCastOp>(def)) {
+      value = cast.getSource();
+      continue;
+    }
+    if (auto subview = dyn_cast<memref::SubViewOp>(def)) {
+      value = subview.getSource();
+      continue;
+    }
+    if (auto view = dyn_cast<memref::ViewOp>(def)) {
+      value = view.getSource();
+      continue;
+    }
+    if (auto cast = dyn_cast<memref::MemorySpaceCastOp>(def)) {
+      value = cast.getSource();
+      continue;
+    }
+    if (auto unrealized = dyn_cast<UnrealizedConversionCastOp>(def)) {
+      if (unrealized.getNumOperands() != 1)
+        break;
+      value = unrealized.getOperand(0);
+      continue;
+    }
+    // The pointer bridge can survive until this pass for scalar/unstructured
+    // forms.  It is a one-operand view whose source still identifies the DDR
+    // function argument or compiler-owned allocation.
+    if (def->getName().getStringRef() == "tptr.to_memref" &&
+        def->getNumOperands() == 1) {
+      value = def->getOperand(0);
+      continue;
+    }
+    if (def->getName().getStringRef() == "tptr.from_memref" &&
+        def->getNumOperands() == 1) {
+      value = def->getOperand(0);
+      continue;
+    }
+    // Pointer arithmetic preserves the allocation identity in operand zero;
+    // follow it so an address derived from a compiler temporary is not
+    // misclassified as an externally supplied DDR pointer.
+    StringRef name = def->getName().getStringRef();
+    if ((name == "tptr.ptradd" || name == "ptr.ptradd" ||
+         name == "tt.addptr") &&
+        def->getNumOperands() >= 1) {
+      value = def->getOperand(0);
+      continue;
+    }
+    break;
+  }
+  return value;
+}
+
+static StringRef classifyStoreDestination(Value value) {
+  // Storage-space attributes are authoritative.  In particular, do not infer
+  // SPM merely because the producer is a temporary tensor: an ordinary
+  // bufferization temporary remains DDR until the backend stages it.
+  if (buddy::boscame::spmdma::getSpmBank(value.getType()).has_value())
+    return "spm";
+
+  Value root = getMemRefRoot(value);
+  if (buddy::boscame::spmdma::getSpmBank(root.getType()).has_value())
+    return "spm";
+  if (Operation *def = root.getDefiningOp())
+    if (def->getName().getStringRef() == "bosc_ame.spm.view")
+      return "spm";
+  if (isa<BlockArgument>(root))
+    return "external_ddr";
+  if (Operation *def = root.getDefiningOp()) {
+    if (isa<memref::AllocOp, memref::AllocaOp, bufferization::ToBufferOp>(def))
+      return "internal_temp";
+  }
+  // A pointer whose root cannot be proven to be an allocation is conservatively
+  // treated as an externally supplied address, matching Triton function
+  // pointer semantics and preserving direct-DDR lowering.
+  return "external_ddr";
+}
+
+// Keep the memory event on an ordinary copy. Its operands retain the real DDR
+// root, descriptor offset/strides and dynamic mask bounds through
+// bufferization.  The store destination is recorded independently of the
+// source tensor's eventual staging location so the backend can select a
+// direct-DDR path without guessing from a memref type after bufferization.
+static DictionaryAttr memoryProvenance(OpBuilder &builder, StringRef kind,
+                                       RankedTensorType logicalType,
+                                       ArrayRef<OpFoldResult> mask,
+                                       Value destination = {},
+                                       Value other = {},
+                                       Operation *sourceEvent = nullptr) {
+  NamedAttrList attrs;
+  attrs.set("kind", builder.getStringAttr(kind));
+  if (sourceEvent) {
+    if (Attribute id = sourceEvent->getAttr("bosc_ame.origin_id"))
+      attrs.set("origin_id", id);
+    if (Attribute eventKind = sourceEvent->getAttr("bosc_ame.event_kind"))
+      attrs.set("event_kind", eventKind);
+  }
+  attrs.set("logical_shape",
+            builder.getDenseI64ArrayAttr(logicalType.getShape()));
+  SmallVector<int64_t> validShape(logicalType.getShape());
+  for (auto [i, extent] : llvm::enumerate(mask))
+    validShape[i] = getConstantIntValue(extent).value_or(ShapedType::kDynamic);
+  attrs.set("valid_shape", builder.getDenseI64ArrayAttr(validShape));
+  attrs.set("masked", builder.getBoolAttr(!mask.empty()));
+  if (kind == "store" && destination)
+    attrs.set("destination",
+              builder.getStringAttr(classifyStoreDestination(destination)));
+  if (other)
+    if (auto constant = other.getDefiningOp<arith::ConstantOp>())
+      attrs.set("other", constant.getValue());
+  return attrs.getDictionary(builder.getContext());
+}
+
 struct LoadConverter : public OpConversionPattern<tts::LoadOp> {
   bool enableBOSCAME;
-  buddy::boscame::lowering::Workspace *workspace;
 
 private:
   bool enableTensorFirstVectorCpu;
+
+  LogicalResult
+  rewriteBOSCAMELogicalLoad(tts::LoadOp op, Value ptr,
+                            ConversionPatternRewriter &rewriter) const {
+    auto tensorType = cast<RankedTensorType>(op.getType());
+    if (!tensorType.hasStaticShape() || getWraparoundCast(ptr))
+      return op.emitError(
+          "BOSCAME load requires a static rectangular DDR view; "
+          "split/wrapping pointers are unsupported");
+    auto ranked =
+        ensureRankedMemRef(ptr, tensorType.getRank(),
+                           tensorType.getElementType(), op.getLoc(), rewriter);
+    if (failed(ranked))
+      return op.emitError("BOSCAME load requires a ranked DDR view");
+    ptr = *ranked;
+    auto bufferType =
+        MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (succeeded(cast<MemRefType>(ptr.getType())
+                      .getStridesAndOffset(strides, offset)) &&
+        llvm::all_of(strides, [](int64_t stride) {
+          return !ShapedType::isDynamic(stride) && stride > 0;
+        }))
+      bufferType = MemRefType::get(
+          tensorType.getShape(), tensorType.getElementType(),
+          StridedLayoutAttr::get(rewriter.getContext(), 0, strides));
+    else
+      strides.clear();
+
+    // A dense, unmasked i8 load from an external rank-2 DDR view is already a
+    // legal AME A/B operand.  Keep it as a logical tensor view so placement
+    // can choose DDR -> TR at the consumer.  The old snapshot path remains
+    // the fallback for masks, `other`, compiler-owned allocations, dynamic
+    // layouts and all non-i8 values.  Restricting this fast path to i8 also
+    // keeps ordinary f32/i32 loads on the established bufferization path.
+    auto ptrMemref = dyn_cast<MemRefType>(ptr.getType());
+    bool directLogical =
+        !op.hasMask() && !op.getOther() && tensorType.getRank() == 2 &&
+        tensorType.getElementType().isInteger(8) && ptrMemref &&
+        ptrMemref.hasStaticShape() && !strides.empty() &&
+        classifyStoreDestination(ptr) == "external_ddr";
+    if (directLogical) {
+      auto logical = rewriter.create<bufferization::ToTensorOp>(
+          op.getLoc(), tensorType, ptr, true /*restrict*/, false /*writable*/);
+      logical->setAttr("bosc_ame.logical",
+                       memoryProvenance(rewriter, "load", tensorType,
+                                        /*mask=*/{}, /*destination=*/{},
+                                        op.getOther(), op));
+      if (Attribute id = op->getAttr("bosc_ame.origin_id"))
+        logical->setAttr("bosc_ame.origin_id", id);
+      if (Attribute eventKind = op->getAttr("bosc_ame.event_kind"))
+        logical->setAttr("bosc_ame.event_kind", eventKind);
+      rewriter.replaceOp(op, logical.getResult());
+      return success();
+    }
+
+    // LLVM allocation lowering requires an identity allocation layout. Keep
+    // non-row-major logical layouts in a view over ordinary flat storage.
+    int64_t rowStride = 1;
+    bool rowMajor = true;
+    for (int64_t axis = tensorType.getRank() - 1; axis >= 0; --axis) {
+      rowMajor &= strides.empty() || strides[axis] == rowStride;
+      if (llvm::MulOverflow(rowStride, tensorType.getDimSize(axis), rowStride))
+        return op.emitError("BOSCAME load snapshot size overflows");
+    }
+    Value snapshot;
+    memref::AllocOp alloc;
+    if (rowMajor) {
+      alloc = rewriter.create<memref::AllocOp>(
+          op.getLoc(),
+          MemRefType::get(tensorType.getShape(), tensorType.getElementType()),
+          rewriter.getI64IntegerAttr(64));
+      snapshot = alloc;
+    } else {
+      int64_t span = 1;
+      for (auto [dim, stride] : llvm::zip(tensorType.getShape(), strides)) {
+        int64_t extent;
+        if (dim <= 0 || llvm::MulOverflow(dim - 1, stride, extent) ||
+            llvm::AddOverflow(span, extent, span))
+          return op.emitError("BOSCAME load snapshot physical span overflows");
+      }
+      alloc = rewriter.create<memref::AllocOp>(
+          op.getLoc(), MemRefType::get({span}, tensorType.getElementType()),
+          rewriter.getI64IntegerAttr(64));
+      snapshot = rewriter.create<memref::ReinterpretCastOp>(
+          op.getLoc(), bufferType, alloc, 0, tensorType.getShape(), strides);
+    }
+    alloc->setAttr("bosc_ame.logical_shape",
+                   rewriter.getDenseI64ArrayAttr(tensorType.getShape()));
+    if (op.hasMask() && op.getOther()) {
+      auto fill = rewriter.create<linalg::FillOp>(
+          op.getLoc(), ValueRange{op.getOther()}, ValueRange{snapshot});
+      fill->setAttr("bosc_ame.padding", rewriter.getUnitAttr());
+    }
+    SmallVector<OpFoldResult> mask =
+        op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{};
+    Value source = ptr;
+    Value destination = snapshot;
+    if (op.hasMask()) {
+      source =
+          getSubview(tensorType.getRank(), mask, ptr, op.getLoc(), rewriter);
+      destination = getSubview(tensorType.getRank(), mask, snapshot,
+                               op.getLoc(), rewriter);
+    }
+    auto copy =
+        rewriter.create<memref::CopyOp>(op.getLoc(), source, destination);
+    copy->setAttr("bosc_ame.memory",
+                  memoryProvenance(rewriter, "load", tensorType, mask,
+                                   /*destination=*/{}, op.getOther(), op));
+    Value tensor = rewriter.create<bufferization::ToTensorOp>(
+        op.getLoc(), tensorType, snapshot, true /*restrict*/,
+        true /*writable*/);
+    rewriter.replaceOp(op, tensor);
+    return success();
+  }
 
   bool isTensorFirstFastPathCandidate(tts::LoadOp op, Value ptr) const {
     if (!enableTensorFirstVectorCpu) {
@@ -2444,10 +2680,9 @@ private:
 public:
   LoadConverter(const TypeConverter &typeConverter,
                 bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
-                buddy::boscame::lowering::Workspace *workspace,
                 MLIRContext *context)
       : OpConversionPattern<tts::LoadOp>(typeConverter, context),
-        enableBOSCAME(config.enableBOSCAME), workspace(workspace),
+        enableBOSCAME(config.enableBOSCAME),
         enableTensorFirstVectorCpu(enableTensorFirstVectorCpu) {}
 
   LogicalResult
@@ -2488,14 +2723,7 @@ public:
 
     LogicalResult result = failure();
     if (enableBOSCAME) {
-      auto tensor = buddy::boscame::lowering::lowerLoad(
-          rewriter, op, ptr, cast<RankedTensorType>(op.getType()),
-          op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{},
-          op.getOther(), *workspace);
-      if (failed(tensor))
-        return failure();
-      rewriter.replaceOp(op, *tensor);
-      result = success();
+      result = rewriteBOSCAMELogicalLoad(op, ptr, rewriter);
     } else if (isTensorFirstFastPathCandidate(op, ptr)) {
       result = op.hasMask() ? rewriteTensorFirstMaskedLoad(op, ptr, rewriter)
                             : rewriteTensorFirstUnmaskedLoad(op, ptr, rewriter);
@@ -2514,7 +2742,6 @@ public:
 
 struct StoreConverter : public OpConversionPattern<tts::StoreOp> {
   bool enableBOSCAME;
-  buddy::boscame::lowering::Workspace *workspace;
 
 private:
   bool enableTensorFirstVectorCpu;
@@ -2803,10 +3030,9 @@ private:
 public:
   StoreConverter(const TypeConverter &typeConverter,
                  bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
-                 buddy::boscame::lowering::Workspace *workspace,
                  MLIRContext *context)
       : OpConversionPattern<tts::StoreOp>(typeConverter, context),
-        enableBOSCAME(config.enableBOSCAME), workspace(workspace),
+        enableBOSCAME(config.enableBOSCAME),
         enableTensorFirstVectorCpu(enableTensorFirstVectorCpu) {}
 
   LogicalResult
@@ -2849,12 +3075,42 @@ public:
     }
 
     if (enableBOSCAME) {
-      if (failed(buddy::boscame::lowering::lowerStore(
-              rewriter, op, ptr, adaptor.getValue(),
-              op.hasMask() ? op.getMixedMaskDims()
-                           : SmallVector<OpFoldResult>{},
-              *workspace)))
-        return failure();
+      auto tensorType = cast<RankedTensorType>(adaptor.getValue().getType());
+      if (!tensorType.hasStaticShape() || getWraparoundCast(ptr))
+        return op.emitError("BOSCAME store requires a static rectangular DDR "
+                            "view; split/wrapping pointers are unsupported");
+      auto ranked =
+          ensureRankedMemRef(ptr, tensorType.getRank(),
+                             tensorType.getElementType(), loc, rewriter);
+      if (failed(ranked))
+        return op.emitError("BOSCAME store requires a ranked DDR view");
+      ptr = *ranked;
+      // The bridge exposes the ordinary logical producer. Bufferization
+      // resolves it before the backend chooses a DMA/SPM staging plan.
+      auto bufferType =
+          MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+      bufferization::BufferizationOptions options;
+      bufferization::BufferizationState state;
+      if (auto inferred =
+              bufferization::getBufferType(adaptor.getValue(), options, state);
+          succeeded(inferred))
+        if (auto existingType = dyn_cast<MemRefType>(*inferred))
+          if (existingType.getMemorySpace())
+            bufferType = existingType;
+      Value source = rewriter.create<bufferization::ToBufferOp>(
+          loc, bufferType, adaptor.getValue(), /*read_only=*/true);
+      Value destination = ptr;
+      SmallVector<OpFoldResult> mask =
+          op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{};
+      if (op.hasMask()) {
+        source = getSubview(tensorType.getRank(), mask, source, loc, rewriter);
+        destination =
+            getSubview(tensorType.getRank(), mask, ptr, loc, rewriter);
+      }
+      auto copy = rewriter.create<memref::CopyOp>(loc, source, destination);
+      copy->setAttr("bosc_ame.memory",
+                    memoryProvenance(rewriter, "store", tensorType, mask, ptr,
+                                     /*other=*/{}, op));
       rewriter.eraseOp(op);
       if (makeTPtr && makeTPtr->use_empty())
         rewriter.eraseOp(makeTPtr);
@@ -2975,11 +3231,9 @@ void mlir::triton::populateStructuredToMemrefPreConversionPatterns(
 
 void mlir::triton::populateStructuredToMemrefConversionPatterns(
     RewritePatternSet &patterns, TypeConverter &typeConverter,
-    bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
-    buddy::boscame::lowering::Workspace *workspace) {
+    bool enableTensorFirstVectorCpu, TritonLoweringConfig config) {
   patterns.add<MakeTensorPtrConverter, MakeGatherScatterTensorPtrConverter>(
       typeConverter, patterns.getContext());
   patterns.add<LoadConverter, StoreConverter>(
-      typeConverter, enableTensorFirstVectorCpu, config, workspace,
-      patterns.getContext());
+      typeConverter, enableTensorFirstVectorCpu, config, patterns.getContext());
 }

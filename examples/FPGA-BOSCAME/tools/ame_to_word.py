@@ -12,6 +12,9 @@ The default fixed mode retains the board-tested operand-preservation wrappers.
 Opt-in --gpr-mode=direct uses v0.5's full five-bit GPR fields for tile and memory
 instructions only. msettype retains its existing caller-saved preservation in
 both modes; this change makes no new claim about its hardware clobber behavior.
+--preserve-matrix-registers keeps the allocated matrix registers while retaining
+the selected GPR handling. Without it, fixed mode rejects schedules that cannot
+be represented by the historical tr0/tr1/acc0 mapping.
 """
 
 import argparse
@@ -179,12 +182,19 @@ def emit_fixed_reg_sequence(
     return "\n".join(lines)
 
 
-def encode_mma(mnemonic, accumulator, lhs, rhs, gpr_mode="fixed"):
+def encode_mma(
+    mnemonic,
+    accumulator,
+    lhs,
+    rhs,
+    gpr_mode="fixed",
+    preserve_matrix_registers=False,
+):
     if mnemonic != "mqma.b.mm":
         raise ValueError(
             f"NR only supports signed i8 mqma.b.mm, got {mnemonic}"
         )
-    if gpr_mode == "fixed":
+    if gpr_mode == "fixed" and not preserve_matrix_registers:
         # Validate the source banks even though the virtual RHS register is
         # remapped to tr1 below.  This catches malformed lowering while
         # accepting the historical tr4 spelling emitted for B.
@@ -204,7 +214,7 @@ def encode_mma(mnemonic, accumulator, lhs, rhs, gpr_mode="fixed"):
     return word
 
 
-def convert_line(line, gpr_mode="fixed"):
+def convert_line(line, gpr_mode="fixed", preserve_matrix_registers=False):
     """Return (converted assembly, changed), rejecting unverified AME forms."""
     if gpr_mode not in GPR_MODES:
         raise ValueError(f"unsupported AME GPR mode: {gpr_mode}")
@@ -217,7 +227,9 @@ def convert_line(line, gpr_mode="fixed"):
     if label:
         if not label[2]:
             return line, False
-        converted, changed = convert_line("\t" + label[2], gpr_mode)
+        converted, changed = convert_line(
+            "\t" + label[2], gpr_mode, preserve_matrix_registers
+        )
         return label[1] + "\n" + converted, changed
     if code.startswith("."):
         return line, False
@@ -286,7 +298,14 @@ def convert_line(line, gpr_mode="fixed"):
         # The patch6 contract uses tr0 for A, tr1 for B and acc0 for the
         # accumulator.  Matrix names in the generated LLVM are virtual and
         # may still say tr4/acc7; map them to the canonical physical banks.
-        canonical_matrix = 1 if mnemonic == "mlbe8.m" else 0
+        canonical_matrix = (
+            matrix
+            if preserve_matrix_registers
+            else 1
+            if mnemonic == "mlbe8.m"
+            else 0
+        )
+        word &= ~(15 << 7)
         return emit_fixed_reg_sequence(
             indent,
             [fixed_base, fixed_stride],
@@ -297,7 +316,12 @@ def convert_line(line, gpr_mode="fixed"):
     if mnemonic == "mqma.b.mm":
         if len(operands) != 3:
             raise ValueError("mqma.b.mm expects acc, tr, tr")
-        word = encode_mma(mnemonic, *operands, gpr_mode=gpr_mode)
+        word = encode_mma(
+            mnemonic,
+            *operands,
+            gpr_mode=gpr_mode,
+            preserve_matrix_registers=preserve_matrix_registers,
+        )
         return f"{indent}.word 0x{word:08x} # {code}", True
     if mnemonic.startswith(("mlbte", "mlbt")):
         raise ValueError(
@@ -312,14 +336,56 @@ def convert_line(line, gpr_mode="fixed"):
     return line, False
 
 
-def transform(source, gpr_mode="fixed"):
+def verify_fixed_matrix_schedule(source):
+    """Check that fixed physical registers still contain each allocated value.
+
+    The compiler's assembly register names already have physical lifetimes.
+    Collapsing them into one A, B and accumulator register is only valid when
+    no later load overwrites an operand before its use. Diagnose the scheduled
+    instruction at that use instead of silently computing a different product.
+    """
+    contents = {}
+    for number, line in enumerate(source.splitlines(), 1):
+        code = line.split("#", 1)[0].strip()
+        code = re.sub(r"^[\w.$]+:\s*", "", code)
+        fields = code.split(None, 1)
+        if len(fields) != 2:
+            continue
+        mnemonic, operand_text = fields
+        operands = [part.strip() for part in operand_text.split(",")]
+        uses = []
+        if mnemonic in ("mlae8.m", "mlbe8.m", "mlce32.m"):
+            bank = "acc" if mnemonic == "mlce32.m" else "tr"
+            matrix_register(operands[0], bank)
+            physical = "tr1" if mnemonic == "mlbe8.m" else bank + "0"
+            contents[physical] = operands[0]
+        elif mnemonic == "mqma.b.mm" and len(operands) == 3:
+            uses = list(zip(("acc0", "tr0", "tr1"), operands))
+        elif mnemonic == "msce32.m":
+            uses = [("acc0", operands[0])]
+        for physical, allocated in uses:
+            if contents.get(physical) != allocated:
+                raise ValueError(
+                    f"line {number}: fixed matrix mapping clobbers {allocated} "
+                    f"before {mnemonic}; {physical} contains "
+                    f"{contents.get(physical, 'no loaded value')}. "
+                    "Use a serialized schedule or --preserve-matrix-registers "
+                    "on hardware supporting the allocated matrix registers"
+                )
+
+
+def transform(source, gpr_mode="fixed", preserve_matrix_registers=False):
     validate_environment()
     if gpr_mode not in GPR_MODES:
         raise ValueError(f"unsupported AME GPR mode: {gpr_mode}")
+    if gpr_mode == "fixed" and not preserve_matrix_registers:
+        verify_fixed_matrix_schedule(source)
     converted_lines = []
     for number, line in enumerate(source.splitlines(), 1):
         try:
-            converted, _ = convert_line(line, gpr_mode)
+            converted, _ = convert_line(
+                line, gpr_mode, preserve_matrix_registers
+            )
         except ValueError as error:
             raise ValueError(f"line {number}: {error}") from error
         converted_lines.append(converted)
@@ -335,9 +401,17 @@ def main():
         help="tile/MLS GPR handling (default: fixed); "
         "msettype always retains its fixed wrapper",
     )
+    parser.add_argument(
+        "--preserve-matrix-registers",
+        action="store_true",
+        help="preserve allocated tr/acc fields with fixed GPR wrappers; "
+        "requires hardware support for those matrix registers",
+    )
     args = parser.parse_args()
     try:
-        output = transform(sys.stdin.read(), args.gpr_mode)
+        output = transform(
+            sys.stdin.read(), args.gpr_mode, args.preserve_matrix_registers
+        )
     except ValueError as error:
         print(f"ame_to_word: {error}", file=sys.stderr)
         return 1

@@ -80,9 +80,14 @@ The NH stack remains in its original window. Shared
 `runtime/boscame/runtime/bosc_ame_dma.c` supplies DMA and DDR cache policies.
 
 The kernel assembly enables RVV and AME, passes through the existing AME word
-encoder and NR instruction/fence checks, and is linked into the NH/E6 image.
-Runtime/adapter C compilation keeps RVV disabled so aggregate descriptor copies
-cannot introduce unaudited vector instructions. `make check` checks the entry
+encoder and instruction checks, and is linked into the NH/E6 image. This
+directory builds with `FENCES=0` by default: the assembly filter still checks
+every encoded AME/RVV instruction but leaves out the board `fence rw, rw`
+pairs, so `kernel.nr.s` shows the raw instruction stream and the ELF audit is
+relaxed accordingly. Build with `make FENCES=1` to restore the fenced image and
+the strict fence audit. Runtime/adapter C compilation keeps RVV disabled so
+aggregate descriptor copies cannot introduce unaudited vector instructions.
+`make check` checks the entry
 ABI, absence of heap calls, expected AME instructions, RVV memory instructions,
 DDR/PMP layout and the full ELF allowlist. These checks do not execute a board.
 

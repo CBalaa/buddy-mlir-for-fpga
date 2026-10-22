@@ -1,7 +1,6 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
 """Full example grid: signed i8, physical [N,K] B, nonzero C and i32 wrap."""
 
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -11,7 +10,11 @@ import numpy as np
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import (  # noqa: E402
+    buddy_opt_path,
+    experimental_pipeline,
+    specialize_full_gemm,
+)
 
 
 def main():
@@ -19,11 +22,19 @@ def main():
     output = sys.argv[1] + ".boscame.mlir"
     loops = sys.argv[1] + ".loops.mlir"
     opt = buddy_opt_path()
+    dynamic = subprocess.run(
+        [opt, str(source), *experimental_pipeline()],
+        capture_output=True,
+        text=True,
+    )
+    assert dynamic.returncode != 0
+    assert "dynamic provenance copies support rank one only" in dynamic.stderr
+    source = specialize_full_gemm(source, sys.argv[1] + ".static.ttir")
     subprocess.run(
         [
             opt,
             str(source),
-            "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+            *experimental_pipeline(),
             "-o",
             output,
         ],
@@ -33,10 +44,24 @@ def main():
     text = Path(output).read_text()
     assert "bosc_ame.tile.mma" in text and "linalg.matmul" not in text
     assert "bosc_ame.lower_to_ame" not in text
-    assert re.search(r"arith\.addi[^\n]*: vector<\d+xi32>", text), (
-        "integer accumulation must use SPM vectors"
+    # Logical placement keeps the complete AME chain in DDR.  The K loop
+    # carries one direct C accumulator across all 64-wide blocks, so each
+    # program performs one C read and one C write without compiler snapshots.
+    assert text.count("bosc_ame.tile.load_acc ") == 1
+    assert text.count("bosc_ame.tile.load_a ") == 1
+    assert text.count("bosc_ame.tile.load_b ") == 1
+    assert text.count("bosc_ame.tile.mma ") == 1
+    assert text.count("bosc_ame.tile.store_acc ") == 1
+    assert text.index("bosc_ame.tile.load_acc ") < text.index("scf.for ")
+    assert text.index("scf.for ") < text.index("bosc_ame.tile.store_acc ")
+    assert all(
+        "{bosc_ame.direct_ddr}" in line
+        for line in text.splitlines()
+        if "bosc_ame.tile.load_" in line or "bosc_ame.tile.store_acc" in line
     )
+    assert "bosc_ame.dma.start" not in text
     assert "memref.memory_space_cast" not in text
+    assert 'bosc_ame.store_policy = "direct-ddr"' in text
     assert "bufferization.to_tensor" not in text
     assert "bufferization.to_buffer" not in text
     subprocess.run(
@@ -106,6 +131,16 @@ def main():
         for name, _, _, kind in machine.accesses
         if kind == "write"
     )
+    c_accesses = [
+        (name, kind) for name, _, _, kind in machine.accesses if name == "%arg2"
+    ]
+    # The simulator records one access per contiguous C row.  These counts
+    # therefore distinguish one load/store operation around the K loop from
+    # a load/store pair in every K iteration.
+    expected_c_rows = (m // 16) * (n // 16) * 16
+    assert sum(kind == "read" for _, kind in c_accesses) == expected_c_rows
+    assert sum(kind == "write" for _, kind in c_accesses) == expected_c_rows
+    assert all(destination != "%arg2" for _, destination, *_ in machine.dma_log)
     # CHECK: PASS GEMM: 512 programs, 131072 exact i32 outputs (signed i8, nonzero C, wrap, physical B)
     print(
         "PASS GEMM: 512 programs, 131072 exact i32 outputs (signed i8, nonzero C, wrap, physical B)"

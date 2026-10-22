@@ -24,14 +24,14 @@ def oracle(x, weight, bias):
         np.cumsum(padded, dtype=np.float32)[-1] / np.float32(example.WIDTH)
     )
     centered = np.subtract(padded, mean, dtype=np.float32)
+    centered[example.WIDTH :] = np.float32(0)
     squared = np.multiply(centered, centered, dtype=np.float32)
     variance = np.float32(
         np.cumsum(squared, dtype=np.float32)[-1] / np.float32(example.WIDTH)
     )
-    inverse = np.float32(
-        1.0
-        / np.sqrt(np.float64(np.float32(variance + np.float32(example.EPS))))
-    )
+    shifted = np.float32(variance + np.float32(example.EPS))
+    root = np.sqrt(shifted, dtype=np.float32)
+    inverse = np.float32(np.float32(1.0) / root)
     return np.add(
         np.multiply(
             np.multiply(centered[: example.WIDTH], inverse, dtype=np.float32),
@@ -97,7 +97,7 @@ def main():
     )
     assert buffers["%arg3"][-len(guard) :] == guard
     print(
-        f"SIM CHECK PASS: {example.ROWS} programs, padded f32 oracle, four exact 3072 B DMA ranges per row, DDR guards intact"
+        f"SIM CHECK PASS: {example.ROWS} programs, masked-lane f32 oracle, four exact 3072 B DMA ranges per row, DDR guards intact"
     )
 
 

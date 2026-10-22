@@ -28,9 +28,11 @@
 //     For A and the accumulator that is the leading stride; for B, whose
 //     storage is an `N x K` buffer with K contiguous while the logical matrix
 //     is `K x N`, it is the trailing stride.
-//   * Every tile operand must be a ranked, statically shaped, 2-D memref in
-//     `#bosc_ame.spm<bank>`: a DDR buffer has no SPM address for the AME loads
-//     and a dynamic shape cannot be compiled into the tile configuration.
+//   * Every tile operand must be a ranked, statically shaped, 2-D memref.  The
+//     default storage space is `#bosc_ame.spm<bank>`; a placement pass may add
+//     `bosc_ame.direct_ddr` to use an externally supplied, proven-aligned DDR
+//     descriptor directly.  A dynamic shape cannot be compiled into the tile
+//     configuration.
 //
 //===----------------------------------------------------------------------===//
 
@@ -99,7 +101,7 @@ constexpr int tileRowStrideIndex(TileRole role) {
   return role == TileRole::B ? 1 : 0;
 }
 
-/// Physical layout of an SPM tile operand, or `std::nullopt` when the type is
+/// Physical layout of an AME tile operand, or `std::nullopt` when the type is
 /// not one the AME tile operations accept.  Pure function: the diagnostics for
 /// a rejected type live in `verifyTileStorageLayout`.
 std::optional<TileStorageLayout> computeTileStorageLayout(mlir::MemRefType type,

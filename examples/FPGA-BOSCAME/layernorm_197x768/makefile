@@ -34,7 +34,7 @@ RISCV_FLAGS := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -mcmodel=medany \
 C_FLAGS := $(RISCV_FLAGS) -fno-vectorize -fno-slp-vectorize -ffp-contract=off \
   '-DBOSC_AME_DMA_ASSERT(x)='
 
-.PHONY: all ttir boscame llvm asm adapter bin check simcheck clean
+.PHONY: all ttir frontend bufferized boscame llvm asm adapter bin check simcheck clean
 all: llvm
 $(sort $(OUT) $(SCRATCH) $(OBJ)):
 	mkdir -p $@
@@ -43,8 +43,16 @@ $(OUT)/kernel.ttir $(OUT)/kernel.linalg.mlir &: $(ROOT)/kernel.py $(ROOT)/build.
 	$(PYTHON) -B $(ROOT)/build.py --ttir-only
 ttir: $(OUT)/kernel.ttir
 
-$(OUT)/kernel.boscame.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(OUT)
+$(OUT)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(OUT)
 	$(BUDDY_OPT) $< $(BOSCAME_PASS) -o $@
+frontend: $(OUT)/kernel.frontend.mlir
+
+$(OUT)/kernel.bufferized.mlir: $(OUT)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" --canonicalize --cse -o $@
+bufferized: $(OUT)/kernel.bufferized.mlir
+
+$(OUT)/kernel.boscame.mlir: $(OUT)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --linalg-to-boscame="store-policy=spm-dma" --promote-buffers-to-stack -o $@
 boscame: $(OUT)/kernel.boscame.mlir
 
 $(OUT)/kernel.llvm.mlir: $(OUT)/kernel.boscame.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))

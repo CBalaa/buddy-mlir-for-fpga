@@ -18,27 +18,54 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Analysis/LinalgComputationFactsPrinter.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/MathExtras.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include "Analysis/BOSCAMELaunchFacts.h"
+#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEAmeEmitter.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEDmaEmitter.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanner.h"
+#include "Conversion/LowerLinalgToBOSCAME/LowerLinalgToBOSCAME.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
+#include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/SpmDma.h"
+#include "Dialect/BOSCAME/Transform.h"
 
 using namespace mlir;
-using namespace buddy::boscame;
+using namespace ::buddy::boscame;
 
 namespace {
+
+// Compatibility spelling for scripts that select the external DDR store
+// policy independently of the other backend options.  The regular pass
+// spelling remains `--linalg-to-boscame='store-policy=...'`.
+static llvm::cl::opt<std::string> linalgToBOSCAMEStoreOverride(
+    "linalg-to-boscame-store",
+    llvm::cl::desc("external DDR store policy: direct-ddr | spm-dma"),
+    llvm::cl::init(""));
 
 enum class ElementwiseKind {
   Add,
@@ -741,6 +768,32 @@ static LogicalResult lowerMatmulLike(Operation *anchor,
   return success();
 }
 
+/// Lower remaining ordinary buffer Linalg to scalar memory/arithmetic
+/// loops.  The independent backend deliberately keeps this path free of AME
+/// operations; a later RVV/vector pass can recognize the regular loops.  The
+/// legacy pass does not install this pattern and therefore retains its old
+/// matrix instruction behaviour byte for byte.
+static LogicalResult lowerOrdinaryLinalg(linalg::LinalgOp op,
+                                         PatternRewriter &rewriter) {
+  if (!op.hasPureBufferSemantics() ||
+      op->hasAttr(::buddy::boscame::lowering::kLowerToAme))
+    return failure();
+  if (failed(linalg::linalgOpToLoops(rewriter, op)))
+    return failure();
+  rewriter.eraseOp(op);
+  return success();
+}
+
+class OrdinaryLinalgToLoops
+    : public OpInterfaceRewritePattern<linalg::LinalgOp> {
+public:
+  using OpInterfaceRewritePattern<linalg::LinalgOp>::OpInterfaceRewritePattern;
+  LogicalResult matchAndRewrite(linalg::LinalgOp op,
+                                PatternRewriter &rewriter) const override {
+    return lowerOrdinaryLinalg(op, rewriter);
+  }
+};
+
 class MatmulToBOSCAMELowering : public OpRewritePattern<linalg::MatmulOp> {
 public:
   using OpRewritePattern<linalg::MatmulOp>::OpRewritePattern;
@@ -1136,18 +1189,1079 @@ public:
 //===----------------------------------------------------------------------===//
 
 namespace {
+static LogicalResult verifySpmDescriptor(Operation *anchor, Value value) {
+  using namespace ::buddy::boscame::spmdma;
+  if (!getSpmBank(value.getType()))
+    return success();
+  auto type = dyn_cast<MemRefType>(value.getType());
+  SmallVector<int64_t> strides;
+  int64_t ignored;
+  auto offset = getStaticDescriptorOffset(value);
+  if (!type || !type.hasStaticShape() || !offset || *offset < 0 ||
+      failed(type.getStridesAndOffset(strides, ignored)))
+    return anchor->emitError("BOSCAME SPM view requires static shape and "
+                             "a known nonnegative descriptor offset");
+  int64_t span = 1;
+  for (auto [dimension, stride] : llvm::zip(type.getShape(), strides)) {
+    int64_t extent;
+    if (dimension <= 0 || stride <= 0 ||
+        llvm::MulOverflow(dimension - 1, stride, extent) ||
+        llvm::AddOverflow(span, extent, span))
+      return anchor->emitError("BOSCAME SPM view has an invalid physical span");
+  }
+  int64_t end;
+  unsigned width = getSpmElementByteWidth(type.getElementType());
+  if (!width || llvm::AddOverflow(*offset, span, end) ||
+      llvm::MulOverflow(end, int64_t{width}, end))
+    return anchor->emitError("BOSCAME SPM view physical span overflows");
+  Value root = value;
+  while (Operation *definition = root.getDefiningOp()) {
+    if (auto op = dyn_cast<memref::ReinterpretCastOp>(definition))
+      root = op.getSource();
+    else if (auto op = dyn_cast<memref::SubViewOp>(definition))
+      root = op.getSource();
+    else if (auto op = dyn_cast<memref::TransposeOp>(definition))
+      root = op.getIn();
+    else if (auto op = dyn_cast<memref::CastOp>(definition))
+      root = op.getSource();
+    else if (auto op = dyn_cast<memref::MemorySpaceCastOp>(definition))
+      root = op.getSource();
+    else if (auto op = dyn_cast<memref::CollapseShapeOp>(definition))
+      root = op.getSrc();
+    else if (auto op = dyn_cast<memref::ExpandShapeOp>(definition))
+      root = op.getSrc();
+    else if (auto op = dyn_cast<memref::ViewOp>(definition)) {
+      auto shift = getConstantIntValue(op.getByteShift());
+      if (!shift || *shift < 0 || llvm::AddOverflow(end, *shift, end))
+        return anchor->emitError("BOSCAME SPM view needs a known nonnegative "
+                                 "byte shift");
+      root = op.getSource();
+    } else
+      break;
+  }
+  auto view = root.getDefiningOp<SpmViewOp>();
+  auto bytes =
+      view ? getContiguousZeroOffsetByteSize(cast<MemRefType>(view.getType()))
+           : std::nullopt;
+  if (!bytes || end > *bytes)
+    return anchor->emitError("BOSCAME SPM view leaves its spm.view allocation");
+  return success();
+}
+
+// Run before rewriting as well as at the exit: dead unsupported operations
+// must not disappear during canonicalization and silently satisfy the contract.
+static LogicalResult verifyStandaloneSurface(ModuleOp module,
+                                             bool verifyBounds = true) {
+  WalkResult result = module.walk([&](Operation *op) {
+    StringRef dialect = op->getName().getDialectNamespace();
+    if (dialect == "tt" || dialect == "tts" || dialect == "bufferization") {
+      op->emitError("incomplete BOSCAME lowering: residual Triton or "
+                    "bufferization bridge operation");
+      return WalkResult::interrupt();
+    }
+    if (isa<vector::GatherOp, vector::ScatterOp>(op)) {
+      op->emitError("unsupported BOSCAME gather/scatter memory access");
+      return WalkResult::interrupt();
+    }
+    if (auto global = dyn_cast<memref::GlobalOp>(op)) {
+      if (::buddy::boscame::spmdma::getSpmBank(global.getType())) {
+        op->emitError("BOSCAME SPM globals are unsupported; use explicit "
+                      "bosc_ame.spm.view windows");
+        return WalkResult::interrupt();
+      }
+    }
+    if (!verifyBounds)
+      return WalkResult::advance();
+    for (Value value : op->getOperands())
+      if (failed(verifySpmDescriptor(op, value)))
+        return WalkResult::interrupt();
+    for (Value value : op->getResults())
+      if (failed(verifySpmDescriptor(op, value)))
+        return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return failure(result.wasInterrupted());
+}
+
+static LogicalResult promoteStaticTemporaries(ModuleOp module) {
+  SmallVector<memref::AllocOp> allocations;
+  module.walk([&](memref::AllocOp alloc) {
+    if (alloc.getType().hasStaticShape() &&
+        !::buddy::boscame::spmdma::getSpmBank(alloc.getType()))
+      allocations.push_back(alloc);
+  });
+  for (memref::AllocOp alloc : allocations) {
+    MemRefType type = alloc.getType();
+    if (type.getLayout().isIdentity())
+      continue;
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (failed(type.getStridesAndOffset(strides, offset)) || offset < 0)
+      return alloc.emitError("BOSCAME temporary requires static positive "
+                             "physical strides and offset");
+    int64_t span = offset;
+    bool empty = false;
+    for (auto [dimension, stride] : llvm::zip(type.getShape(), strides)) {
+      int64_t extent;
+      if (stride <= 0 ||
+          llvm::MulOverflow(std::max<int64_t>(dimension - 1, 0), stride,
+                            extent) ||
+          llvm::AddOverflow(span, extent, span))
+        return alloc.emitError("BOSCAME temporary physical span overflows");
+      empty |= dimension == 0;
+    }
+    if (!empty && llvm::AddOverflow(span, int64_t{1}, span))
+      return alloc.emitError("BOSCAME temporary physical span overflows");
+    if (empty)
+      span = 0;
+    OpBuilder builder(alloc);
+    auto flatType = MemRefType::get({span}, type.getElementType());
+    auto flat =
+        memref::AllocOp::create(builder, alloc.getLoc(), flatType, ValueRange{},
+                                builder.getI64IntegerAttr(std::max<int64_t>(
+                                    64, alloc.getAlignment().value_or(0))));
+    SmallVector<OpFoldResult> sizes, physicalStrides;
+    for (int64_t size : type.getShape())
+      sizes.push_back(builder.getIndexAttr(size));
+    for (int64_t stride : strides)
+      physicalStrides.push_back(builder.getIndexAttr(stride));
+    Value view = memref::ReinterpretCastOp::create(
+        builder, alloc.getLoc(), type, flat, builder.getIndexAttr(offset),
+        sizes, physicalStrides);
+    SmallVector<memref::DeallocOp> deallocations;
+    for (Operation *user : alloc->getUsers())
+      if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
+        deallocations.push_back(dealloc);
+    alloc.replaceAllUsesWith(view);
+    for (memref::DeallocOp dealloc : deallocations)
+      dealloc.getMemrefMutable().assign(flat);
+    alloc.erase();
+  }
+  PassManager hoisting(module.getContext());
+  hoisting.addNestedPass<func::FuncOp>(
+      bufferization::createBufferLoopHoistingPass());
+  if (failed(hoisting.run(module)))
+    return failure();
+  // The generic promotion pass deliberately excludes allocations with an
+  // explicit dealloc. At function scope their lifetime can safely extend to
+  // the return; convert those temporaries and remove the matching deallocs.
+  allocations.clear();
+  module.walk([&](memref::AllocOp alloc) {
+    if (alloc.getType().hasStaticShape() &&
+        isa<func::FuncOp>(alloc->getParentOp()) &&
+        !::buddy::boscame::spmdma::getSpmBank(alloc.getType()))
+      allocations.push_back(alloc);
+  });
+  for (memref::AllocOp alloc : allocations) {
+    SmallVector<memref::DeallocOp> deallocations;
+    for (Operation *user : alloc->getUsers())
+      if (auto dealloc = dyn_cast<memref::DeallocOp>(user))
+        deallocations.push_back(dealloc);
+    if (deallocations.empty())
+      continue;
+    OpBuilder builder(alloc);
+    auto stack =
+        memref::AllocaOp::create(builder, alloc.getLoc(), alloc.getType(),
+                                 ValueRange{}, alloc.getAlignmentAttr());
+    for (memref::DeallocOp dealloc : deallocations)
+      dealloc.erase();
+    alloc.replaceAllUsesWith(stack.getResult());
+    alloc.erase();
+  }
+  PassManager manager(module.getContext());
+  manager.addNestedPass<func::FuncOp>(
+      bufferization::createPromoteBuffersToStackPass([](Value value) {
+        return cast<MemRefType>(value.getType()).hasStaticShape();
+      }));
+  return manager.run(module);
+}
+
+static StringRef getTransferRoleName(TransferRole role) {
+  switch (role) {
+  case TransferRole::InputA:
+    return "input-a";
+  case TransferRole::InputB:
+    return "input-b";
+  case TransferRole::OutputC:
+    return "output-c";
+  case TransferRole::Temporary:
+    return "temporary";
+  }
+  llvm_unreachable("unknown BOSCAME transfer role");
+}
+
+static void printPlanShape(llvm::raw_ostream &stream,
+                           ArrayRef<int64_t> values) {
+  stream << '[';
+  for (auto [index, value] : llvm::enumerate(values)) {
+    if (index)
+      stream << ',';
+    stream << value;
+  }
+  stream << ']';
+}
+
+static StringRef getComputeGraphStatusName(ComputeGraphStatus status) {
+  switch (status) {
+  case ComputeGraphStatus::Unavailable:
+    return "unavailable";
+  case ComputeGraphStatus::Incomplete:
+    return "incomplete";
+  case ComputeGraphStatus::Complete:
+    return "complete";
+  }
+  llvm_unreachable("unknown compute graph status");
+}
+
+static StringRef getBufferAccessEffectName(BufferAccessEffect effect) {
+  switch (effect) {
+  case BufferAccessEffect::Read:
+    return "read";
+  case BufferAccessEffect::Write:
+    return "write";
+  case BufferAccessEffect::Allocate:
+    return "allocate";
+  case BufferAccessEffect::Free:
+    return "free";
+  case BufferAccessEffect::Unknown:
+    return "unknown";
+  }
+  llvm_unreachable("unknown buffer access effect");
+}
+
+static StringRef getBufferAliasRelationName(BufferAliasRelation relation) {
+  switch (relation) {
+  case BufferAliasRelation::MayAlias:
+    return "may-alias";
+  case BufferAliasRelation::Disjoint:
+    return "disjoint";
+  }
+  llvm_unreachable("unknown buffer alias relation");
+}
+
+static StringRef getBufferAliasProofName(BufferAliasProof proof) {
+  switch (proof) {
+  case BufferAliasProof::SameRoot:
+    return "same-root";
+  case BufferAliasProof::SameRootByteIntervals:
+    return "same-root-byte-intervals";
+  case BufferAliasProof::SameRootSymbolicByteIntervals:
+    return "same-root-symbolic-byte-intervals";
+  case BufferAliasProof::SameRootPitchedRowIntervals:
+    return "same-root-pitched-row-intervals";
+  case BufferAliasProof::AbiNonAliasingEntryArguments:
+    return "abi-nonalias-entry-arguments";
+  case BufferAliasProof::DistinctGlobalSymbols:
+    return "distinct-global-symbols";
+  case BufferAliasProof::FreshAllocation:
+    return "fresh-allocation";
+  }
+  llvm_unreachable("unknown buffer alias proof");
+}
+
+static StringRef getMemoryDependencyKindName(MemoryDependencyKind kind) {
+  switch (kind) {
+  case MemoryDependencyKind::RAW:
+    return "RAW";
+  case MemoryDependencyKind::WAR:
+    return "WAR";
+  case MemoryDependencyKind::WAW:
+    return "WAW";
+  case MemoryDependencyKind::UnknownEffect:
+    return "unknown-effect";
+  case MemoryDependencyKind::Lifetime:
+    return "lifetime";
+  }
+  llvm_unreachable("unknown memory dependency kind");
+}
+
+struct LaunchGridAxisArg {
+  int64_t axis;
+  unsigned argument;
+};
+
+static void printLaunchGrid(llvm::ArrayRef<LaunchFunctionFact> launches,
+                            llvm::raw_ostream &stream) {
+  for (const LaunchFunctionFact &function : launches) {
+    const auto &knownGrid = function.knownGrid;
+    SmallVector<LaunchGridAxisArg, 3> axes;
+    SmallVector<unsigned, 2> missingAxisArguments;
+    for (const LaunchProgramArgumentFact &argument :
+         function.programArguments) {
+      if (argument.role != LaunchProgramRole::NumPrograms)
+        continue;
+      if (!argument.axis) {
+        missingAxisArguments.push_back(argument.argumentIndex);
+        continue;
+      }
+      axes.push_back({*argument.axis, argument.argumentIndex});
+    }
+    llvm::sort(axes,
+               [](const LaunchGridAxisArg &lhs, const LaunchGridAxisArg &rhs) {
+                 return lhs.axis != rhs.axis ? lhs.axis < rhs.axis
+                                             : lhs.argument < rhs.argument;
+               });
+
+    stream << "  launch-grid: function=@" << function.functionName;
+    if (axes.empty() && missingAxisArguments.empty() && !knownGrid) {
+      stream << " unavailable\n";
+      continue;
+    }
+    for (const LaunchGridAxisArg &entry : axes) {
+      stream << " axis[" << entry.axis << "]=runtime(arg#" << entry.argument
+             << ") extent=";
+      if (knownGrid && entry.axis >= 0 && entry.axis < 3)
+        stream << (*knownGrid)[entry.axis];
+      else
+        stream << "<unknown>";
+    }
+    for (unsigned argument : missingAxisArguments)
+      stream << " axis=<unknown>:runtime(arg#" << argument
+             << ") extent=<unknown>";
+    if (knownGrid && axes.empty()) {
+      stream << " known-grid=[";
+      for (auto [index, extent] : llvm::enumerate(*knownGrid)) {
+        if (index)
+          stream << ',';
+        stream << extent;
+      }
+      stream << ']';
+    }
+    stream << '\n';
+  }
+}
+
+static LogicalResult verifyKnownLaunchGrid(ModuleOp module) {
+  return failed(analyzeBOSCAMELaunchFacts(module)) ? failure() : success();
+}
+
+static const TransferPlan *findPlannedTransfer(const WorkspacePlan &workspace,
+                                               Value buffer) {
+  auto transfer =
+      llvm::find_if(workspace.transfers, [&](const TransferPlan &candidate) {
+        return candidate.buffer == buffer;
+      });
+  return transfer == workspace.transfers.end() ? nullptr : &*transfer;
+}
+
+static StringRef getDirectDecision(bool isDirect,
+                                   const TransferPlan *transfer) {
+  if (isDirect)
+    return "direct-ddr (proven)";
+  if (transfer)
+    return "spm-dma (planned)";
+  return "not inferred";
+}
+
+static StringRef getResidencyDecisionReason(ResidencyDecisionReason reason) {
+  switch (reason) {
+  case ResidencyDecisionReason::Selected:
+    return "traffic-benefit-and-capacity";
+  case ResidencyDecisionReason::Capacity:
+    return "spm-capacity";
+  case ResidencyDecisionReason::NoTrafficBenefit:
+    return "no-traffic-benefit";
+  }
+  llvm_unreachable("unknown residency decision reason");
+}
+
+static void printBOSCAMEPlanReport(ModuleOp module,
+                                   const LinalgToBOSCAMEConfig &config,
+                                   const DataflowPlan &workspace) {
+  llvm::raw_ostream &stream = llvm::errs();
+  stream << "BOSCAME plan report:\n"
+         << "  target="
+         << (config.target.empty() ? "<unspecified>" : config.target)
+         << " tile=[" << config.bm << ',' << config.bn << ',' << config.bk
+         << "] store-policy=" << config.storePolicy
+         << " bank-capacity=" << workspace.bankCapacity << " bytes\n";
+
+  const TargetInfo &target = workspace.target;
+  auto printAmeRole = [&](StringRef name, const AmeRoleCapability &role) {
+    stream << name << "={bits=" << role.elementBits
+           << ",layout=" << stringifyAmeTileLayout(role.layout)
+           << ",spm=" << (role.supportsSpm ? "true" : "false")
+           << ",direct-ddr=" << (role.supportsDirectDdr ? "true" : "false")
+           << '}';
+  };
+  stream << "  target-capabilities: name=" << target.name << " dma={ddr-to-spm="
+         << (target.dma.supports(StorageKind::DDR, StorageKind::SPM) ? "true"
+                                                                     : "false")
+         << ",spm-to-ddr="
+         << (target.dma.supports(StorageKind::SPM, StorageKind::DDR) ? "true"
+                                                                     : "false")
+         << ",spm-to-spm="
+         << (target.dma.supports(StorageKind::SPM, StorageKind::SPM) ? "true"
+                                                                     : "false")
+         << ",endpoint-alignment=" << target.dma.endpointAlignmentBytes
+         << ",packet-bytes=" << target.dma.packetGranularityBytes
+         << ",max-rank=" << target.dma.maxStaticRank << ",pitched-rows="
+         << (target.dma.packetizesPitchedRows ? "packetized" : "unsupported")
+         << "} banks=" << target.spmBankCount
+         << " channels=" << target.dmaChannelCount << " ame={signed-multiply="
+         << (target.ame.signedIntegerMultiply ? "true" : "false")
+         << ",tile-mnk=" << target.ame.maxTileM << 'x' << target.ame.maxTileN
+         << 'x' << target.ame.maxTileK << ',';
+  printAmeRole("a", target.ame.a);
+  stream << ',';
+  printAmeRole("b", target.ame.b);
+  stream << ',';
+  printAmeRole("accumulator", target.ame.accumulator);
+  stream << "} rvv-vector-bytes=";
+  if (target.rvvVectorBytes)
+    stream << *target.rvvVectorBytes;
+  else
+    stream << "<unknown>";
+  stream << '\n';
+
+  printLaunchGrid(workspace.launches, stream);
+
+  stream << "  linalg-facts: scope=post-planning\n";
+  printLinalgComputationFacts(workspace.linalg, stream, "    ");
+
+  for (auto [index, transfer] : llvm::enumerate(workspace.transfers)) {
+    stream << "  transfer[" << index << "]: consumer=";
+    if (transfer.firstConsumer)
+      stream << transfer.firstConsumer->getName().getStringRef();
+    else
+      stream << "<unknown>";
+    stream << " residency="
+           << (transfer.crossTaskResident ? "cross-task" : "operation-local")
+           << " consumers=[";
+    llvm::interleaveComma(transfer.consumerOperations, stream,
+                          [&](Operation *consumer) {
+                            stream << consumer->getName().getStringRef();
+                          });
+    stream << "]";
+    if (transfer.sourceOriginId)
+      stream << " source-origin-id=" << *transfer.sourceOriginId;
+    stream << " role=" << getTransferRoleName(transfer.role) << " shape=";
+    printPlanShape(stream, transfer.shape);
+    stream << " strides=";
+    printPlanShape(stream, transfer.strides);
+    stream << " validShape=";
+    printPlanShape(stream, transfer.validShape);
+    stream << " bank=" << transfer.spmBank << " offset=" << transfer.spmOffset
+           << " capacity=" << transfer.spmCapacity
+           << " effective-byte-offset-bytes=";
+    if (transfer.effectiveByteOffsetBytes)
+      stream << *transfer.effectiveByteOffsetBytes;
+    else
+      stream << "<unknown>";
+    stream << " endpoint-alignment-proven="
+           << (transfer.endpointAlignmentProven ? "true" : "false")
+           << " packets=" << transfer.packets.size();
+    if (transfer.guardedPrefix)
+      stream << " guarded-prefix=true packet-count=upper-bound extent="
+             << transfer.validElements;
+    stream << " read=" << (transfer.read ? "true" : "false")
+           << " write=" << (transfer.write ? "true" : "false") << '\n';
+  }
+
+  stream << "  compute-graph: status="
+         << getComputeGraphStatusName(workspace.computeGraphStatus)
+         << " tasks=" << workspace.tasks.size()
+         << " dependencies=" << workspace.dependencies.size()
+         << " logical-values=" << workspace.logicalValues.size() << '\n';
+  for (const PlannedTask &task : workspace.tasks) {
+    stream << "  task[" << task.id << "]: op=";
+    if (task.operation)
+      stream << task.operation->getName().getStringRef();
+    else
+      stream << "<unknown>";
+    stream << " kind=";
+    if (task.kind)
+      stream << task.kind.getValue();
+    else
+      stream << "<unknown>";
+    stream << " stage=" << task.stage << " predecessors=";
+    printPlanShape(stream, task.predecessors);
+    stream << " inputs=";
+    printPlanShape(stream, task.inputValues);
+    stream << " outputs=";
+    printPlanShape(stream, task.outputValues);
+    stream << " varying-axes=";
+    printPlanShape(stream, task.varyingProgramAxes);
+    stream << " barrier-after=" << (task.barrierAfter ? "true" : "false")
+           << " rematerializable=" << (task.rematerializable ? "true" : "false")
+           << '\n';
+  }
+  for (const TaskDependency &dependency : workspace.dependencies)
+    stream << "  dependency: " << dependency.predecessor << " -> "
+           << dependency.consumer
+           << " resolved=" << (dependency.resolved ? "true" : "false") << '\n';
+  for (const LogicalValuePlan &value : workspace.logicalValues) {
+    stream << "  logical-value[" << value.id << "]: producer=";
+    if (value.producerTask)
+      stream << *value.producerTask;
+    else if (value.producerIsFunctionArgument)
+      stream << "function-argument";
+    else
+      stream << "<unknown>";
+    stream << " consumers=";
+    printPlanShape(stream, value.consumerTasks);
+    stream << " lifetime=" << (value.lifetimeComplete ? "known" : "unknown")
+           << '\n';
+  }
+  for (const BufferRequirement &buffer : workspace.buffers) {
+    stream << "  buffer[" << buffer.transferIndex
+           << "]: root=known root-id=" << buffer.storageRootId << " views=[";
+    llvm::interleaveComma(buffer.viewChain, stream, [&](Operation *view) {
+      stream << view->getName().getStringRef();
+    });
+    stream << "] shape=";
+    printPlanShape(stream, buffer.shape);
+    stream << " strides=";
+    printPlanShape(stream, buffer.strides);
+    stream << " effective-byte-offset-bytes=";
+    if (buffer.effectiveByteOffsetBytes)
+      stream << *buffer.effectiveByteOffsetBytes;
+    else
+      stream << "<unknown>";
+    stream << " capacity=" << buffer.capacityBytes << " spm-lifetime=";
+    if (buffer.spmFirstTask && buffer.spmLastTask)
+      stream << (buffer.crossTaskResident ? "cross-task task="
+                                          : "operation-local task=")
+             << *buffer.spmFirstTask << ".." << *buffer.spmLastTask;
+    else if (buffer.operationLocalLifetime)
+      stream << "operation-local task=<unannotated>";
+    else
+      stream << "unknown";
+    stream << " physical-users=";
+    printPlanShape(stream, buffer.physicalUseTasks);
+    stream << " physical-lifetime="
+           << (buffer.physicalLifetimeKnown ? "known" : "unknown");
+    if (buffer.physicalFirstTask && buffer.physicalLastTask)
+      stream << " tasks=" << *buffer.physicalFirstTask << ".."
+             << *buffer.physicalLastTask;
+    stream << '\n';
+  }
+  stream << "  buffer-alias-pairs: count=" << workspace.bufferAliasPairs.size()
+         << " scope=known-roots-within-function unproven-pairs=unknown status="
+         << (workspace.bufferAliasPairsComplete ? "complete" : "bounded")
+         << '\n';
+  for (auto [index, pair] : llvm::enumerate(workspace.bufferAliasPairs)) {
+    stream << "  buffer-alias-pair[" << index << "]: function=@"
+           << (pair.functionName ? pair.functionName.getValue() : "<unknown>")
+           << " accesses=[" << pair.firstAccessIndex << ','
+           << pair.secondAccessIndex
+           << "] relation=" << getBufferAliasRelationName(pair.relation)
+           << " proof=" << getBufferAliasProofName(pair.proof) << '\n';
+  }
+  stream << "  buffer-source-events: count="
+         << workspace.bufferSourceEvents.size()
+         << " scope=pre-accumulator-fusion\n";
+  for (auto [index, event] : llvm::enumerate(workspace.bufferSourceEvents)) {
+    stream << "  buffer-source-event[" << index << "]: function=@"
+           << (event.functionName ? event.functionName.getValue()
+                                  : StringRef("<unknown>"))
+           << " source-origin-id=" << event.sourceOriginId
+           << " op=" << event.operationName
+           << " effect=" << getBufferAccessEffectName(event.effect)
+           << " effect-index=" << event.effectIndex << " operand=";
+    if (event.operandNumber >= 0)
+      stream << event.operandNumber;
+    else
+      stream << "<unknown>";
+    stream << " type=";
+    if (event.accessedType)
+      stream << event.accessedType;
+    else
+      stream << "<unknown>";
+    stream << " memory-space=";
+    if (!event.accessedType)
+      stream << "<unknown>";
+    else if (event.memorySpace)
+      stream << event.memorySpace;
+    else
+      stream << "default";
+    stream << " views=[";
+    llvm::interleaveComma(event.viewChain, stream,
+                          [&](StringRef view) { stream << view; });
+    stream << "] shape=";
+    printPlanShape(stream, event.shape);
+    stream << " logical-shape=";
+    printPlanShape(stream, event.logicalShape);
+    stream << " strides=";
+    printPlanShape(stream, event.strides);
+    stream << " valid-shape=";
+    printPlanShape(stream, event.validShape);
+    stream << " effective-byte-offset-bytes=";
+    if (event.effectiveByteOffsetBytes)
+      stream << *event.effectiveByteOffsetBytes;
+    else
+      stream << "<unknown>";
+    stream << " valid-footprint-bytes=";
+    if (event.logicalFootprintBytes)
+      stream << *event.logicalFootprintBytes;
+    else
+      stream << "<unknown>";
+    stream << " physical-span-bytes=";
+    if (event.physicalSpanBytes)
+      stream << *event.physicalSpanBytes;
+    else
+      stream << "<unknown>";
+    stream << '\n';
+  }
+  stream << "  buffer-accesses: count=" << workspace.bufferAccesses.size()
+         << " scope=post-planning\n";
+  for (auto [index, access] : llvm::enumerate(workspace.bufferAccesses)) {
+    stream << "  buffer-access[" << index << "]: op=";
+    if (access.operation)
+      stream << access.operation->getName().getStringRef();
+    else
+      stream << "<unknown>";
+    stream << " effect=" << getBufferAccessEffectName(access.effect)
+           << " effect-index=" << access.effectIndex << " operand=";
+    if (access.operandNumber >= 0)
+      stream << access.operandNumber;
+    else
+      stream << "<unknown>";
+    if (access.sourceOriginId)
+      stream << " source-origin-id=" << *access.sourceOriginId;
+    stream << " type=";
+    if (access.accessedType)
+      stream << access.accessedType;
+    else
+      stream << "<unknown>";
+    stream << " memory-space=";
+    if (!access.accessedType)
+      stream << "<unknown>";
+    else if (access.memorySpace)
+      stream << access.memorySpace;
+    else
+      stream << "default";
+    stream << " root=" << (access.storageRootKnown ? "known" : "unknown");
+    if (access.storageRootKnown)
+      stream << " root-id=" << access.storageRootId;
+    stream << " views=[";
+    llvm::interleaveComma(access.viewChain, stream, [&](Operation *view) {
+      stream << view->getName().getStringRef();
+    });
+    stream << "] shape=";
+    printPlanShape(stream, access.shape);
+    stream << " logical-shape=";
+    printPlanShape(stream, access.logicalShape);
+    stream << " strides=";
+    printPlanShape(stream, access.strides);
+    stream << " valid-shape=";
+    printPlanShape(stream, access.validShape);
+    stream << " effective-byte-offset-bytes=";
+    if (access.effectiveByteOffsetBytes)
+      stream << *access.effectiveByteOffsetBytes;
+    else
+      stream << "<unknown>";
+    stream << " valid-footprint-bytes=";
+    if (access.logicalFootprintBytes)
+      stream << *access.logicalFootprintBytes;
+    else
+      stream << "<unknown>";
+    stream << " physical-span-bytes=";
+    if (access.physicalSpanBytes)
+      stream << *access.physicalSpanBytes;
+    else
+      stream << "<unknown>";
+    stream << " task=";
+    if (access.computeTaskId)
+      stream << *access.computeTaskId;
+    else
+      stream << "<unannotated>";
+    stream << " transfer=";
+    if (access.transferIndex)
+      stream << *access.transferIndex;
+    else
+      stream << "<none>";
+    stream << " alias=unknown dma="
+           << (access.transferIndex ? "planned-legal" : "unassessed");
+    if (access.logicalValueId)
+      stream << " logical-value=" << *access.logicalValueId;
+    stream << '\n';
+  }
+  stream << "  buffer-inventory: count=" << workspace.bufferInventory.size()
+         << " scope=post-planning-observed-memref-values\n";
+  for (auto [index, buffer] : llvm::enumerate(workspace.bufferInventory)) {
+    stream << "  buffer-inventory[" << index << "]: function=@";
+    if (buffer.functionName)
+      stream << buffer.functionName.getValue();
+    else
+      stream << "<unknown>";
+    stream << " value=";
+    buffer.descriptor.print(stream);
+    stream << " type=";
+    if (buffer.descriptorType)
+      stream << buffer.descriptorType;
+    else
+      stream << "<unknown>";
+    stream << " memory-space=";
+    if (buffer.memorySpace)
+      stream << buffer.memorySpace;
+    else
+      stream << "default";
+    stream << " root=" << (buffer.storageRootKnown ? "known" : "unknown");
+    if (buffer.storageRootKnown)
+      stream << " root-id=" << buffer.storageRootId;
+    stream << " root-capacity-bytes=";
+    if (buffer.rootCapacityBytes)
+      stream << *buffer.rootCapacityBytes;
+    else
+      stream << "<unknown>";
+    stream << " views=[";
+    llvm::interleaveComma(buffer.viewChain, stream, [&](Operation *view) {
+      stream << view->getName().getStringRef();
+    });
+    stream << "] shape=";
+    printPlanShape(stream, buffer.shape);
+    stream << " strides=";
+    printPlanShape(stream, buffer.strides);
+    stream << " effective-byte-offset-bytes=";
+    if (buffer.effectiveByteOffsetBytes)
+      stream << *buffer.effectiveByteOffsetBytes;
+    else
+      stream << "<unknown>";
+    stream << " accesses=[";
+    llvm::interleaveComma(buffer.accessIndices, stream,
+                          [&](size_t accessIndex) { stream << accessIndex; });
+    stream << "] logical-values=";
+    printPlanShape(stream, buffer.logicalValueIds);
+    stream << " tasks=";
+    printPlanShape(stream, buffer.taskIds);
+    stream << " transfers=[";
+    llvm::interleaveComma(
+        buffer.transferIndices, stream,
+        [&](size_t transferIndex) { stream << transferIndex; });
+    stream << "] physical-lifetime="
+           << (buffer.physicalLifetimeKnown ? "known" : "unknown") << '\n';
+  }
+  stream << "  memory-dependencies: count="
+         << workspace.memoryDependencies.size() << " scope=lexical status="
+         << (workspace.memoryDependenciesBounded    ? "bounded"
+             : workspace.memoryDependenciesComplete ? "complete"
+                                                    : "incomplete")
+         << '\n';
+  for (auto [index, dependency] : llvm::enumerate(workspace.memoryDependencies))
+    stream << "  memory-dependency[" << index << "]: function=@"
+           << dependency.functionName.getValue() << " accesses=["
+           << dependency.predecessorAccessIndex << ','
+           << dependency.successorAccessIndex
+           << "] kind=" << getMemoryDependencyKindName(dependency.kind) << '\n';
+  stream << "  resources: transfers=" << workspace.resources.plannedTransfers
+         << " dma-packets=" << workspace.resources.plannedDmaPackets
+         << " read-bytes=" << workspace.resources.plannedReadBytes
+         << " write-bytes=" << workspace.resources.plannedWriteBytes
+         << " totals-exact="
+         << (workspace.resources.transferTotalsExact ? "true" : "false")
+         << " latency=";
+  if (workspace.cost.latencyCalibrated && workspace.cost.latencyCycles)
+    stream << *workspace.cost.latencyCycles << "-cycles";
+  else
+    stream << "uncalibrated";
+  stream << '\n';
+  stream << "  bank-allocation-search: scope=operation-local groups="
+         << workspace.resources.bankAllocationGroups << " exact-assignments="
+         << workspace.resources.bankAllocationCandidates
+         << " exact-rejected-assignments="
+         << workspace.resources.bankAllocationRejectedCapacity
+         << " bounded-groups="
+         << workspace.resources.bankAllocationBoundedGroups
+         << " repair-groups=" << workspace.resources.bankAllocationRepairGroups
+         << " repair-search-nodes="
+         << workspace.resources.bankAllocationRepairSearchNodes
+         << " repair-rejected-placements="
+         << workspace.resources.bankAllocationRepairRejectedPlacements
+         << " objective=minimize-bank-high-water status="
+         << (workspace.resources.bankAllocationBoundedGroups == 0 ? "exact"
+                                                                  : "bounded")
+         << " latency=uncalibrated\n";
+
+  uint64_t selectedArgumentResidencies = llvm::count_if(
+      workspace.functionArgumentResidency,
+      [](const FunctionArgumentResidencyDecision &decision) {
+        return decision.reason == ResidencyDecisionReason::Selected;
+      });
+  uint64_t capacityRejectedArgumentResidencies = llvm::count_if(
+      workspace.functionArgumentResidency,
+      [](const FunctionArgumentResidencyDecision &decision) {
+        return decision.reason == ResidencyDecisionReason::Capacity;
+      });
+  stream << "  function-argument-residency-search: candidates="
+         << workspace.functionArgumentResidency.size()
+         << " selected=" << selectedArgumentResidencies
+         << " rejected-capacity=" << capacityRejectedArgumentResidencies
+         << " objective=minimize-read-bytes-then-packets status="
+         << (workspace.functionArgumentResidencySearchBounded ? "bounded"
+                                                              : "exact")
+         << " latency=uncalibrated\n";
+  for (auto [index, decision] :
+       llvm::enumerate(workspace.functionArgumentResidency)) {
+    auto argument = dyn_cast<BlockArgument>(decision.argument);
+    auto function =
+        argument ? dyn_cast<func::FuncOp>(argument.getOwner()->getParentOp())
+                 : func::FuncOp();
+    stream << "  argument-residency[" << index << "]: function=@";
+    if (function)
+      stream << function.getSymName();
+    else
+      stream << "<unknown>";
+    stream << " arg#" << (argument ? argument.getArgNumber() : 0)
+           << " consumers=" << decision.consumerCount
+           << " capacity=" << decision.capacityBytes
+           << " resident-read-bytes=" << decision.residentReadBytes
+           << " resident-packets=" << decision.residentPackets
+           << " reload-read-bytes=" << decision.reloadReadBytes
+           << " reload-packets=" << decision.reloadPackets << " decision="
+           << (decision.reason == ResidencyDecisionReason::Selected ? "resident"
+                                                                    : "reload")
+           << " reason=" << getResidencyDecisionReason(decision.reason) << '\n';
+  }
+
+  uint64_t selectedProducerResidencies =
+      llvm::count_if(workspace.producerOutputResidency,
+                     [](const ProducerOutputResidencyDecision &decision) {
+                       return decision.selected;
+                     });
+  uint64_t eligibleArgumentResidencies = llvm::count_if(
+      workspace.functionArgumentResidency,
+      [](const FunctionArgumentResidencyDecision &decision) {
+        return decision.reason != ResidencyDecisionReason::NoTrafficBenefit;
+      });
+  uint64_t jointResidencyCandidates =
+      eligibleArgumentResidencies + workspace.producerOutputResidency.size();
+  uint64_t jointResidencySelected =
+      selectedArgumentResidencies + selectedProducerResidencies;
+  uint64_t jointResidencyCapacityRejected =
+      capacityRejectedArgumentResidencies +
+      (workspace.producerOutputResidency.size() - selectedProducerResidencies);
+  stream << "  cross-task-residency-search: candidates="
+         << jointResidencyCandidates << " selected=" << jointResidencySelected
+         << " rejected-capacity=" << jointResidencyCapacityRejected
+         << " objective=minimize-total-read-bytes-then-packets status="
+         << (workspace.functionArgumentResidencySearchBounded ||
+                     workspace.producerOutputResidencySearchBounded
+                 ? "bounded"
+                 : "exact")
+         << " latency=uncalibrated\n";
+  stream << "  producer-output-residency-search: candidates="
+         << workspace.producerOutputResidency.size()
+         << " selected=" << selectedProducerResidencies << " rejected-capacity="
+         << (workspace.producerOutputResidency.size() -
+             selectedProducerResidencies)
+         << " objective=maximize-read-bytes-then-packets-saved status="
+         << (workspace.producerOutputResidencySearchBounded ? "bounded"
+                                                            : "exact")
+         << " latency=uncalibrated\n";
+  for (auto [index, decision] :
+       llvm::enumerate(workspace.producerOutputResidency)) {
+    Operation *producer = decision.producer;
+    auto function =
+        producer ? producer->getParentOfType<func::FuncOp>() : func::FuncOp();
+    stream << "  producer-output-residency[" << index << "]: function=@";
+    if (function)
+      stream << function.getSymName();
+    else
+      stream << "<unknown>";
+    stream << " consumers=" << decision.consumerCount
+           << " capacity=" << decision.capacityBytes
+           << " saved-read-bytes=" << decision.savedReadBytes
+           << " saved-packets=" << decision.savedPackets << " decision="
+           << (decision.selected ? "resident" : "writeback-and-reload")
+           << " reason="
+           << (decision.selected ? "traffic-benefit-and-capacity"
+                                 : "spm-capacity")
+           << '\n';
+  }
+
+  int64_t bankUsage[2] = {workspace.usedBytes[0], workspace.usedBytes[1]};
+  module.walk([&](SpmViewOp view) {
+    int64_t bank = view.getBank();
+    auto type = dyn_cast<MemRefType>(view.getView().getType());
+    auto capacity = type ? spmdma::getContiguousZeroOffsetByteSize(type)
+                         : std::optional<int64_t>();
+    if (bank >= 0 && bank < 2 && capacity) {
+      int64_t offset = static_cast<int64_t>(view.getOffset());
+      bankUsage[bank] = std::max(bankUsage[bank], offset + *capacity);
+    }
+  });
+  for (int64_t bank = 0; bank < 2; ++bank)
+    stream << "  bank[" << bank << "]: high-water=" << bankUsage[bank] << '/'
+           << workspace.bankCapacity << " bytes\n";
+
+  unsigned markedMatmuls = 0;
+  module.walk([&](linalg::MatmulOp matmul) {
+    if (!matmul->hasAttr(::buddy::boscame::lowering::kLowerToAme))
+      return;
+    ++markedMatmuls;
+    auto aType = dyn_cast<MemRefType>(matmul.getInputs()[0].getType());
+    auto bType = dyn_cast<MemRefType>(matmul.getInputs()[1].getType());
+    stream << "  marked-matmul: execution=AME m=" << aType.getDimSize(0)
+           << " n=" << bType.getDimSize(1) << " k=" << aType.getDimSize(1)
+           << " a_origin_id=";
+    if (auto origin =
+            matmul->getAttrOfType<IntegerAttr>("bosc_ame.a_origin_id"))
+      stream << origin.getInt();
+    else
+      stream << "<unknown>";
+    stream << " b_origin_id=";
+    if (auto origin =
+            matmul->getAttrOfType<IntegerAttr>("bosc_ame.b_origin_id"))
+      stream << origin.getInt();
+    else
+      stream << "<unknown>";
+    stream << " accumulator_origin_id=";
+    if (auto origin = matmul->getAttrOfType<IntegerAttr>(
+            "bosc_ame.accumulator_origin_id"))
+      stream << origin.getInt();
+    else
+      stream << "<unknown>";
+    stream << " direct-A="
+           << getDirectDecision(
+                  matmul->hasAttr("bosc_ame.direct_ddr_a"),
+                  findPlannedTransfer(workspace, matmul.getInputs()[0]))
+           << " direct-B="
+           << getDirectDecision(
+                  matmul->hasAttr("bosc_ame.direct_ddr_b"),
+                  findPlannedTransfer(workspace, matmul.getInputs()[1]))
+           << " direct-C="
+           << getDirectDecision(
+                  matmul->hasAttr("bosc_ame.direct_ddr_c"),
+                  findPlannedTransfer(workspace, matmul.getOutputs()[0]))
+           << '\n';
+    if (const AmeMatmulTilePlan *tilePlan =
+            findAmeMatmulTilePlan(workspace, matmul.getOperation())) {
+      if (tilePlan->mTileCount > 0 && tilePlan->nTileCount > 0 &&
+          tilePlan->kTileCount > 0) {
+        stream << "  ame-tile-plan: m=" << tilePlan->m << " n=" << tilePlan->n
+               << " k=" << tilePlan->k << " tile=[" << tilePlan->tileM << ','
+               << tilePlan->tileN << ',' << tilePlan->tileK << "] tile-counts=["
+               << tilePlan->mTileCount << ',' << tilePlan->nTileCount << ','
+               << tilePlan->kTileCount << "] tail=[" << tilePlan->tailM << ','
+               << tilePlan->tailN << ',' << tilePlan->tailK << "]\n";
+        auto route = [&](bool direct, bool eligible, bool byCapacity,
+                         bool bySpmDisabled, uint64_t directBytes,
+                         uint64_t stagedBytes, Value input) {
+          if (direct) {
+            if (byCapacity)
+              return StringRef("direct-capacity-fallback");
+            if (bySpmDisabled)
+              return StringRef("direct-spm-disabled");
+            return directBytes == stagedBytes
+                       ? StringRef("direct-byte-tie")
+                       : StringRef("direct-lower-read-bytes");
+          }
+          if (findPlannedTransfer(workspace, input))
+            return eligible ? StringRef("staged-lower-read-bytes")
+                            : StringRef("staged-direct-unavailable");
+          return StringRef("not-inferred");
+        };
+        stream << "  ame-input-routes: A="
+               << route(matmul->hasAttr("bosc_ame.direct_ddr_a"),
+                        tilePlan->directAEligible, tilePlan->directAByCapacity,
+                        tilePlan->directABySpmDisabled,
+                        tilePlan->directAReadBytes, tilePlan->stagedAReadBytes,
+                        matmul.getInputs()[0])
+               << " direct-bytes=" << tilePlan->directAReadBytes
+               << " staged-bytes=" << tilePlan->stagedAReadBytes << " B="
+               << route(matmul->hasAttr("bosc_ame.direct_ddr_b"),
+                        tilePlan->directBEligible, tilePlan->directBByCapacity,
+                        tilePlan->directBBySpmDisabled,
+                        tilePlan->directBReadBytes, tilePlan->stagedBReadBytes,
+                        matmul.getInputs()[1])
+               << " direct-bytes=" << tilePlan->directBReadBytes
+               << " staged-bytes=" << tilePlan->stagedBReadBytes << '\n';
+      } else {
+        stream << "  ame-tile-plan: unavailable\n";
+      }
+    }
+  });
+  if (!markedMatmuls)
+    stream << "  marked-matmuls: none\n";
+
+  bool reportedStoreDecision = false;
+  module.walk([&](Operation *operation) {
+    auto memory = operation->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
+    auto kind = memory ? memory.getAs<StringAttr>("kind") : StringAttr();
+    auto destination =
+        memory ? memory.getAs<StringAttr>("destination") : StringAttr();
+    if (!kind || kind.getValue() != "store" || !destination ||
+        destination.getValue() != "external_ddr")
+      return;
+
+    StringRef decision;
+    if (config.storePolicy == "direct-ddr") {
+      decision = "direct-ddr (provenance)";
+    } else if (auto linalg = dyn_cast<linalg::LinalgOp>(operation)) {
+      for (Value output : linalg.getDpsInits())
+        if (findPlannedTransfer(workspace, output)) {
+          decision = "spm-dma (planned)";
+          break;
+        }
+    }
+    if (decision.empty())
+      return;
+    if (!reportedStoreDecision)
+      stream << "  provenance-marked stores/direct decisions:\n";
+    reportedStoreDecision = true;
+    stream << "    op=" << operation->getName().getStringRef()
+           << " destination=external_ddr decision=" << decision << '\n';
+  });
+  if (!reportedStoreDecision)
+    stream << "  provenance-marked stores/direct decisions: none proven\n";
+
+  stream << "  limits: calibrated cost search, general cross-op residency, and "
+            "cross-program reuse are not modeled.\n";
+}
+
+template <bool Independent>
 class LowerLinalgToBOSCAMEPass
-    : public PassWrapper<LowerLinalgToBOSCAMEPass, OperationPass<ModuleOp>> {
+    : public PassWrapper<LowerLinalgToBOSCAMEPass<Independent>,
+                         OperationPass<ModuleOp>> {
 public:
+  using Base = PassWrapper<LowerLinalgToBOSCAMEPass<Independent>,
+                           OperationPass<ModuleOp>>;
+  using Base::getContext;
+  using Base::getOperation;
+  using Base::signalPassFailure;
+  template <typename T> using Option = typename Base::template Option<T>;
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerLinalgToBOSCAMEPass)
 
-  StringRef getArgument() const final { return "lower-linalg-to-boscame"; }
+  StringRef getArgument() const final {
+    return Independent ? "linalg-to-boscame" : "lower-linalg-to-boscame";
+  }
   StringRef getDescription() const final {
-    return "Lower linalg dialect operations to BOSCAME dialect operations.";
+    return Independent
+               ? "Lower buffer-form Linalg through a typed SPM/DMA planner."
+               : "Lower linalg dialect operations to BOSCAME dialect "
+                 "operations.";
   }
 
   LowerLinalgToBOSCAMEPass() = default;
   LowerLinalgToBOSCAMEPass(const LowerLinalgToBOSCAMEPass &) {}
+
+  Option<bool> enableSpmDma{*this, "enable-spm-dma",
+                            llvm::cl::desc("plan typed SPM/DMA transfers"),
+                            llvm::cl::init(false)};
+  Option<bool> enableAME{*this, "enable-ame",
+                         llvm::cl::desc("lower marked i8 matmuls to AME"),
+                         llvm::cl::init(false)};
+  Option<std::string> storePolicy{
+      *this, "store-policy",
+      llvm::cl::desc("external DDR store policy: direct-ddr | spm-dma"),
+      llvm::cl::init("direct-ddr")};
+  Option<std::string> dmaAbi{*this, "dma-abi",
+                             llvm::cl::desc("DMA caller contract"),
+                             llvm::cl::init("")};
+  Option<std::string> target{*this, "target",
+                             llvm::cl::desc("BOSCAME target profile"),
+                             llvm::cl::init("")};
+  Option<int64_t> bm{*this, "bm", llvm::cl::desc("M tile size"),
+                     llvm::cl::init(64)};
+  Option<int64_t> bn{*this, "bn", llvm::cl::desc("N tile size"),
+                     llvm::cl::init(64)};
+  Option<int64_t> bk{*this, "bk", llvm::cl::desc("K tile size"),
+                     llvm::cl::init(128)};
+  Option<bool> planReport{
+      *this, "plan-report",
+      llvm::cl::desc("print the planned BOSCAME workspace to stderr"),
+      llvm::cl::init(false)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<BOSCAMEDialect>();
@@ -1155,15 +2269,219 @@ public:
     registry.insert<arith::ArithDialect>();
     registry.insert<memref::MemRefDialect>();
     registry.insert<scf::SCFDialect>();
+    registry.insert<vector::VectorDialect>();
+    registry.insert<math::MathDialect>();
   }
 
   void runOnOperation() override;
 };
 } // namespace
 
-void LowerLinalgToBOSCAMEPass::runOnOperation() {
+template <bool Independent>
+void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
   MLIRContext *context = &getContext();
   ModuleOp module = getOperation();
+
+  if (failed(verifyKnownLaunchGrid(module))) {
+    signalPassFailure();
+    return;
+  }
+
+  if (planReport && !Independent) {
+    module.emitError("plan-report is only supported by --linalg-to-boscame");
+    signalPassFailure();
+    return;
+  }
+
+  bool storePolicyOverride = !linalgToBOSCAMEStoreOverride.empty();
+  if (storePolicyOverride) {
+    if (storePolicy.getNumOccurrences() &&
+        storePolicy != linalgToBOSCAMEStoreOverride) {
+      module.emitError("conflicting BOSCAME store policy command-line "
+                       "options");
+      signalPassFailure();
+      return;
+    }
+    storePolicy = linalgToBOSCAMEStoreOverride;
+  }
+
+  // The planner is opt-in.  Keeping this boundary explicit preserves the
+  // historical --lower-linalg-to-boscame output for existing users while
+  // making the new buffer-form contract fail early and diagnostically.
+  if (Independent || enableSpmDma || enableAME ||
+      storePolicy.getNumOccurrences() || storePolicyOverride ||
+      !target.empty() || module->hasAttr("bosc_ame.enable_spm_dma") ||
+      module->hasAttr("bosc_ame.enable_ame") ||
+      module->hasAttr("bosc_ame.store_policy")) {
+    using namespace ::buddy::boscame::spmdma;
+    auto inheritBool = [&](StringRef name, auto &option) -> LogicalResult {
+      if (Attribute attr = module->getAttr(name)) {
+        auto value = dyn_cast<BoolAttr>(attr);
+        if (!value ||
+            (option.getNumOccurrences() && value.getValue() != option))
+          return module.emitError()
+                 << "invalid or conflicting BOSCAME module configuration: "
+                 << name;
+        option = value.getValue();
+      }
+      return success();
+    };
+    auto inheritTile = [&](StringRef name, auto &option) -> LogicalResult {
+      if (Attribute attr = module->getAttr(name)) {
+        auto value = dyn_cast<IntegerAttr>(attr);
+        if (!value || value.getInt() <= 0 ||
+            (option.getNumOccurrences() && value.getInt() != option))
+          return module.emitError()
+                 << "invalid or conflicting BOSCAME module configuration: "
+                 << name;
+        option = value.getInt();
+      }
+      return success();
+    };
+    auto inheritStorePolicy = [&]() -> LogicalResult {
+      Attribute attr = module->getAttr("bosc_ame.store_policy");
+      if (!attr)
+        return success();
+      auto value = dyn_cast<StringAttr>(attr);
+      if (!value ||
+          (value.getValue() != "direct-ddr" && value.getValue() != "spm-dma"))
+        return module.emitError()
+               << "invalid or conflicting BOSCAME module configuration: "
+               << "bosc_ame.store_policy (expected direct-ddr or spm-dma)";
+      // The command line is an explicit override.  Frontends record their
+      // default in the module so a standalone backend invocation can inherit
+      // it, while a compatibility/debug invocation can deliberately select
+      // spm-dma without being rejected as a conflict.
+      if (!storePolicy.getNumOccurrences() && !storePolicyOverride)
+        storePolicy = value.getValue().str();
+      return success();
+    };
+    if (failed(inheritBool("bosc_ame.enable_spm_dma", enableSpmDma)) ||
+        failed(inheritBool("bosc_ame.enable_ame", enableAME)) ||
+        failed(inheritStorePolicy()) ||
+        failed(inheritTile("bosc_ame.bm", bm)) ||
+        failed(inheritTile("bosc_ame.bn", bn)) ||
+        failed(inheritTile("bosc_ame.bk", bk))) {
+      signalPassFailure();
+      return;
+    }
+    if (module->hasAttr(kDmaAbiAttrName) &&
+        !module->getAttrOfType<StringAttr>(kDmaAbiAttrName)) {
+      module.emitError(
+          "invalid BOSCAME module DMA ABI contract: expected string");
+      signalPassFailure();
+      return;
+    }
+    StringRef existingAbi =
+        module->getAttrOfType<StringAttr>(kDmaAbiAttrName)
+            ? module->getAttrOfType<StringAttr>(kDmaAbiAttrName).getValue()
+            : StringRef();
+    if (module->hasAttr(kDmaAbiAttrName) && !dmaAbi.empty() &&
+        existingAbi != dmaAbi) {
+      module.emitError(
+          "command-line DMA ABI conflicts with the module contract");
+      signalPassFailure();
+      return;
+    }
+    if (module->hasAttr(kDmaAbiAttrName) &&
+        existingAbi != kDmaAbiAlignedNonAliasing) {
+      module.emitError("invalid BOSCAME module DMA ABI contract");
+      signalPassFailure();
+      return;
+    }
+    if (!dmaAbi.empty() && dmaAbi != kDmaAbiAlignedNonAliasing) {
+      module.emitError() << "invalid dma-abi: " << dmaAbi;
+      signalPassFailure();
+      return;
+    }
+    if (dmaAbi.empty() && !existingAbi.empty())
+      dmaAbi = existingAbi.str();
+    if (enableSpmDma && dmaAbi.empty()) {
+      module.emitError(
+          "enable-spm-dma requires dma-abi=args_aligned64_nonalias");
+      signalPassFailure();
+      return;
+    }
+    if (storePolicy != "direct-ddr" && storePolicy != "spm-dma") {
+      module.emitError() << "invalid store-policy: " << storePolicy
+                         << "; expected direct-ddr or spm-dma";
+      signalPassFailure();
+      return;
+    }
+    if (storePolicy == "spm-dma" && !enableSpmDma) {
+      module.emitError("store-policy=spm-dma requires enable-spm-dma=true");
+      signalPassFailure();
+      return;
+    }
+    if (Attribute attr = module->getAttr("bosc_ame.target")) {
+      auto contract = dyn_cast<StringAttr>(attr);
+      if (!contract || contract.getValue() != "nr-fpga" ||
+          (target.getNumOccurrences() && contract.getValue() != target)) {
+        module.emitError(
+            "invalid or conflicting BOSCAME module target contract");
+        signalPassFailure();
+        return;
+      }
+      target = contract.getValue().str();
+    }
+    ::buddy::boscame::LinalgToBOSCAMEConfig config;
+    config.enableSpmDma = enableSpmDma;
+    config.enableAME = enableAME;
+    config.storePolicy = storePolicy;
+    config.dmaAbi = dmaAbi;
+    config.target = target;
+    config.bm = bm;
+    config.bn = bn;
+    config.bk = bk;
+    if (Attribute attr = module->getAttr("bosc_ame.expected_ame_matmuls")) {
+      auto expected = dyn_cast<IntegerAttr>(attr);
+      int64_t actual = 0;
+      module.walk([&](Operation *op) {
+        actual += op->hasAttr(::buddy::boscame::lowering::kLowerToAme);
+      });
+      if (!expected || expected.getInt() < 0 || expected.getInt() != actual) {
+        module.emitError("BOSCAME AME marker count changed across explicit "
+                         "bufferization");
+        signalPassFailure();
+        return;
+      }
+    }
+    if (failed(verifyStandaloneSurface(module, false)) ||
+        ((config.enableSpmDma || config.storePolicy == "direct-ddr") &&
+         failed(::buddy::boscame::normalizeBOSCAMEMemoryCopies(
+             module, config.storePolicy == "direct-ddr")))) {
+      signalPassFailure();
+      return;
+    }
+    auto workspace = ::buddy::boscame::BOSCAMEPlanner(config).plan(module);
+    if (failed(workspace)) {
+      signalPassFailure();
+      return;
+    }
+    if (planReport)
+      printBOSCAMEPlanReport(module, config, *workspace);
+    if (failed(verifyStandaloneSurface(module)) ||
+        failed(
+            ::buddy::boscame::verifyBOSCAMEAmeConsumers(module, *workspace)) ||
+        failed(::buddy::boscame::emitBOSCAMEDmaTransfers(module, *workspace)) ||
+        failed(::buddy::boscame::lowerBOSCAMEAmeConsumers(module, config,
+                                                          *workspace)) ||
+        failed(::buddy::boscame::emitBOSCAMEDmaCopies(module,
+                                                      workspace->target)) ||
+        failed(::buddy::boscame::lowering::lowerSpmComputations(module))) {
+      signalPassFailure();
+      return;
+    }
+    RewritePatternSet ordinary(context);
+    ordinary.add<OrdinaryLinalgToLoops>(context);
+    if (failed(applyPatternsGreedily(module, std::move(ordinary))) ||
+        failed(promoteStaticTemporaries(module)) ||
+        failed(verifyStandaloneSurface(module)) ||
+        failed(::buddy::boscame::lowering::verifyExit(module)) ||
+        failed(::buddy::boscame::verifySpmDmaContract(module)))
+      signalPassFailure();
+    return;
+  }
 
   RewritePatternSet patterns(context);
   patterns.add<
@@ -1172,14 +2490,16 @@ void LowerLinalgToBOSCAMEPass::runOnOperation() {
       GenericTransposeToBOSCAMELowering, GenericBroadcastToBOSCAMELowering>(
       context);
 
-  ConversionTarget target(*context);
-  target.addLegalDialect<BOSCAMEDialect, arith::ArithDialect,
-                         memref::MemRefDialect, scf::SCFDialect>();
-  target.addIllegalOp<linalg::MatmulOp>();
-  target.addDynamicallyLegalOp<linalg::GenericOp>(
+  ConversionTarget conversionTarget(*context);
+  conversionTarget
+      .addLegalDialect<::buddy::boscame::BOSCAMEDialect, arith::ArithDialect,
+                       memref::MemRefDialect, scf::SCFDialect>();
+  conversionTarget.addIllegalOp<linalg::MatmulOp>();
+  conversionTarget.addDynamicallyLegalOp<linalg::GenericOp>(
       [](linalg::GenericOp op) { return !isLowerableGeneric(op); });
 
-  if (failed(applyPartialConversion(module, target, std::move(patterns)))) {
+  if (failed(applyPartialConversion(module, conversionTarget,
+                                    std::move(patterns)))) {
     signalPassFailure();
   }
 }
@@ -1190,8 +2510,17 @@ void LowerLinalgToBOSCAMEPass::runOnOperation() {
 
 namespace mlir {
 namespace buddy {
+std::unique_ptr<Pass> createLowerLinalgToBOSCAMEPass() {
+  return std::make_unique<LowerLinalgToBOSCAMEPass<false>>();
+}
+
+std::unique_ptr<Pass> createLinalgToBOSCAMEPass() {
+  return std::make_unique<LowerLinalgToBOSCAMEPass<true>>();
+}
+
 void registerLowerLinalgToBOSCAMEPass() {
-  PassRegistration<LowerLinalgToBOSCAMEPass>();
+  PassRegistration<LowerLinalgToBOSCAMEPass<false>>();
+  PassRegistration<LowerLinalgToBOSCAMEPass<true>>();
 }
 } // namespace buddy
 } // namespace mlir

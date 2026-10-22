@@ -11,7 +11,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "examples/FPGA-BOSCAME/tools"))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
 
 SOURCE = """
 #id = affine_map<(i) -> (i)>
@@ -100,7 +100,7 @@ def main():
     opt = Path(buddy_opt_path())
     command = [
         opt,
-        "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+        *experimental_pipeline(),
     ]
     result = run(command, SOURCE)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -56,6 +56,47 @@ def run_pass(buddy_opt, fixture, output, dma_abi=True, extra=None):
     return result.returncode, result.stderr
 
 
+def experimental_pipeline(store_policy=None):
+    """The public frontend, explicit bufferization and standalone backend.
+
+    ``store_policy`` is optional so callers can exercise the explicit
+    compatibility path without changing the frontend's direct-DDR default.
+    """
+    backend = "--linalg-to-boscame"
+    if store_policy is not None:
+        backend += f"=store-policy={store_policy}"
+    return [
+        "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+        "--empty-tensor-to-alloc-tensor",
+        "--one-shot-bufferize=bufferize-function-boundaries=true buffer-alignment=64",
+        "--canonicalize",
+        "--cse",
+        backend,
+        "--promote-buffers-to-stack",
+    ]
+
+
+def specialize_full_gemm(source, output):
+    """Remove redundant exported bounds masks for the exact 128x1024x128 grid.
+
+    Dynamic mask extents are outside the standalone backend's static footprint
+    contract. The original source is checked separately for a failing status.
+    """
+    from pathlib import Path
+
+    text = Path(source).read_text()
+    for original, replacement in (
+        ("tt.load %48, %42, %cst_0", "tt.load %48"),
+        ("tt.load %51, %46, %cst", "tt.load %51"),
+        ("tt.load %33, %27, %cst_7", "tt.load %33"),
+        ("tt.store %33, %35, %27", "tt.store %33, %35"),
+    ):
+        assert original in text, original
+        text = text.replace(original, replacement)
+    Path(output).write_text(text)
+    return Path(output)
+
+
 def run_lower(buddy_opt, module, output):
     result = subprocess.run(
         [buddy_opt, module, "--lower-bosc-ame", "-o", output],

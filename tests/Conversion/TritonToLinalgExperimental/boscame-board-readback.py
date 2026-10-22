@@ -58,7 +58,7 @@ def layernorm_fixture():
         mean = f(total / f(768))
         squares = f(0)
         for column in range(1024):
-            centered = f((x[row, column] if column < 768 else f(0)) - mean)
+            centered = f(x[row, column] - mean) if column < 768 else f(0)
             squares = f(squares + f(centered * centered))
         shifted = f(f(squares / f(768)) + f(1.0e-12))
         inverse = f(f(1) / f(math.sqrt(float(shifted))))

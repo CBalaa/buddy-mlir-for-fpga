@@ -10,7 +10,7 @@ import numpy as np
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
 
 
 def main():
@@ -37,7 +37,7 @@ def main():
             [
                 opt,
                 str(input_path),
-                "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+                *experimental_pipeline(store_policy="spm-dma"),
                 "-o",
                 str(output),
             ],
@@ -128,13 +128,30 @@ def main():
       %maskC = tt.broadcast %maskC0 : tensor<1x64xi1> -> tensor<64x64xi1>
       tt.store %pc3, %dot, %maskC :""",
     )
-    machine = lower("masked", masked)
+    dynamic = work / "dynamic-mask.ttir"
+    dynamic.write_text(masked)
+    rejected = subprocess.run(
+        [opt, str(dynamic), *experimental_pipeline(store_policy="spm-dma")],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "dynamic provenance copies support rank one only" in rejected.stderr
     sentinel = np.full((64, 64), 0x3B6A8D0F, dtype=np.int32)
     for chunks in (2, 0, 3, 4):
+        # Specialize a supported static rectangular extent while retaining the
+        # same original other values and the excluded output columns.
+        static_masked = masked.replace(
+            "%C: !tt.ptr<i32>, %chunks: i32)", "%C: !tt.ptr<i32>)"
+        ).replace(
+            "%c64scalar = arith.constant 64 : i32",
+            f"%chunks = arith.constant {chunks} : i32\n%c64scalar = arith.constant 64 : i32",
+        )
+        machine = lower(f"masked-{chunks}", static_masked)
         valid = chunks * 64
         c[:] = sentinel.tobytes() + guard
         first = len(machine.accesses)
-        machine.launch(buffers, {"%arg3": chunks})
+        machine.launch(buffers)
         lhs, rhs = a.astype(np.int64), b.astype(np.int64)
         lhs[:, valid:], rhs[:, valid:] = 3, -2
         expected = (lhs @ rhs.T + initial).astype(np.int32)
@@ -143,10 +160,12 @@ def main():
         np.testing.assert_array_equal(actual[:, 16:], sentinel[:, 16:])
         for name, start, end, kind in machine.accesses[first:]:
             if name in ("%arg0", "%arg1"):
-                assert (
-                    kind == "read"
-                    and start // 256 == (end - 1) // 256
-                    and end - (start // 256) * 256 <= valid
+                assert kind == "read" and (
+                    valid == 256
+                    or (
+                        start // 256 == (end - 1) // 256
+                        and end - (start // 256) * 256 <= valid
+                    )
                 )
             else:
                 assert (
@@ -159,9 +178,9 @@ def main():
             buffers["%arg0"] == a.tobytes() + guard
             and buffers["%arg1"] == b.tobytes() + guard
         )
-    # CHECK: PASS masks: dynamic 64-byte packets, nonzero other, column-major B, excluded DDR bytes and persistent SPM
+    # CHECK: PASS masks: static 64-byte packets and dynamic-extent rejection, nonzero other, column-major B, excluded DDR bytes and persistent SPM
     print(
-        "PASS masks: dynamic 64-byte packets, nonzero other, column-major B, excluded DDR bytes and persistent SPM"
+        "PASS masks: static 64-byte packets and dynamic-extent rejection, nonzero other, column-major B, excluded DDR bytes and persistent SPM"
     )
 
 

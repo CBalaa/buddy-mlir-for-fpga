@@ -2,7 +2,9 @@
 #
 #     kernels.py (Triton)                      [make ttir]
 #       -> kernel.ttir  + kernel.linalg.mlir
-#     kernel.ttir --triton-to-linalg-experimental=boscame=true          [make boscame]
+#     kernel.ttir --triton-to-linalg-experimental=boscame=true
+#       -> kernel.frontend.mlir -> explicit one-shot bufferization
+#       -> kernel.bufferized.mlir --linalg-to-boscame       [make boscame]
 #       -> kernel.boscame.mlir                 (DDR -> SPM -> AME registers)
 #     --lower-bosc-ame + --buddy-to-llvmir     [make llvm]
 #       -> kernel.llvm.mlir + kernel.ll
@@ -64,6 +66,7 @@ PYTHON ?= python3
 NAME := matmul_i8_128x1024x128
 OUT := $(ROOT)/build/$(NAME)
 SCRATCH := $(ROOT)/build/.scratch
+CONFIG := $(SCRATCH)/matmul_i8_config.h
 RUNTIME := $(REPO)/runtime/boscame/runtime
 UART := $(REPO)/runtime/boscame/uart
 PLATFORM := $(REPO)/runtime/boscame/nh_e6
@@ -78,6 +81,18 @@ AME ?= 1
 ifeq ($(filter 0 1,$(AME)),)
 $(error AME must be 0 or 1, got '$(AME)')
 endif
+
+# --- fence policy: board fences around AME/RVV memory instructions -------
+# The assembly filter normally inserts a `fence rw, rw` pair around every AME
+# and vector memory instruction. This directory defaults to the raw instruction
+# stream so the generated kernel.nr.s can be inspected without them; the ELF
+# audit is relaxed accordingly. Build with `make FENCES=1` for the fenced image.
+FENCES ?= 0
+ifeq ($(filter 0 1,$(FENCES)),)
+$(error FENCES must be 0 or 1, got '$(FENCES)')
+endif
+FENCE_FLAGS := $(if $(filter 1,$(FENCES)),,--no-fences)
+AUDIT_FENCE_FLAGS := $(if $(filter 1,$(FENCES)),,--allow-unfenced)
 
 # --- build variant (empty for the default production image) -------------
 # `VAR` (debug/bisection) and the datapath both select a directory and a file
@@ -107,7 +122,8 @@ BIN := $(V_DIR)/$(V_NAME).bin
 RISCV_FLAGS := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -mcmodel=medany \
   -mno-relax -O2 -nostdlib -ffreestanding -fno-builtin -fno-pie \
   -ffunction-sections -fdata-sections \
-  -I$(ROOT) -I$(RUNTIME) -I$(UART) -I$(PLATFORM) -I$(NR)
+  -I$(ROOT) -I$(RUNTIME) -I$(UART) -I$(PLATFORM) -I$(NR) \
+  -I$(SCRATCH)
 # Freestanding image: the DMA runtime's programming assertions compile out,
 # exactly as in the other FPGA examples; `bosc_ame_dma_wait` keeps its fatal
 # hardware checks. Explicit one-dimensional RVV transfers move data between
@@ -116,8 +132,10 @@ C_FLAGS := $(RISCV_FLAGS) -fno-vectorize -fno-slp-vectorize '-DBOSC_AME_DMA_ASSE
 LLC_FLAGS := -O2 -filetype=asm -mtriple=riscv64 -target-abi=lp64d \
   -mattr=+m,+a,+f,+d,+c,$(if $(filter 1,$(AME)),+v,-v),+xboscame -code-model=medium
 
-.PHONY: all ttir boscame llvm asm bin debug boardcheck host check audit simcheck clean
+.PHONY: all config ttir boscame llvm asm bin debug boardcheck host check audit simcheck clean FORCE
 all: bin
+
+config: $(CONFIG)
 
 $(sort $(OUT) $(V_DIR) $(OBJ) $(SCRATCH)):
 	mkdir -p $@
@@ -133,10 +151,16 @@ ttir: $(OUT)/kernel.ttir
 # --- 2. TTIR -> BOSCAME (AME=1) -----------------------------------------
 ifeq ($(AME),1)
 # Loads/stores independently use DMA. RVV computations consume SPM directly;
-# marked, bufferized integer matmuls reuse compatible SPM A/B inputs for AME.
+# marked, explicitly bufferized integer matmuls use typed SPM A/B inputs for AME.
 # The explicit ABI promises aligned, nonalias caller buffers.
-$(V_DIR)/kernel.boscame.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(V_DIR)
+$(V_DIR)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(V_DIR)
 	$(BUDDY_OPT) $< $(V_AME) -o $@
+
+$(V_DIR)/kernel.bufferized.mlir: $(V_DIR)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" --canonicalize --cse -o $@
+
+$(V_DIR)/kernel.boscame.mlir: $(V_DIR)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --linalg-to-boscame -o $@
 
 boscame: $(V_DIR)/kernel.boscame.mlir
 
@@ -173,10 +197,18 @@ $(V_DIR)/kernel.s: $(V_DIR)/kernel.ll $(BUILD_MAKEFILE) $(wildcard $(LLC))
 
 # --- 5. NR post-processing: fixed-register words + fences ---------------
 $(V_DIR)/kernel.encoded.s: $(V_DIR)/kernel.s $(TOOLS)/ame_to_word.py
-	$(PYTHON) $(TOOLS)/ame_to_word.py --gpr-mode=fixed < $< > $@
+	$(PYTHON) $(TOOLS)/ame_to_word.py --gpr-mode=fixed --preserve-matrix-registers < $< > $@
 
-$(V_DIR)/kernel.nr.s: $(V_DIR)/kernel.encoded.s $(TOOLS)/restrict_fpga_assembly.py
-	$(PYTHON) $(TOOLS)/restrict_fpga_assembly.py < $< > $@
+# FORCE keeps the fence policy switch effective without relinking when the
+# filtered output is byte-identical (the recipe only replaces the file then).
+$(V_DIR)/kernel.nr.s: $(V_DIR)/kernel.encoded.s $(TOOLS)/restrict_fpga_assembly.py FORCE
+	@set -eu; \
+	tmp="$@.tmp"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	$(PYTHON) $(TOOLS)/restrict_fpga_assembly.py $(FENCE_FLAGS) --order-vector-copies < $< > "$$tmp"; \
+	test -s "$$tmp" || { echo "error: assembly filter produced no output" >&2; exit 1; }; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
+	trap - EXIT INT TERM
 
 $(V_DIR)/kernel.o: $(V_DIR)/kernel.nr.s $(BUILD_MAKEFILE)
 	$(RISCV_CC) $(RISCV_FLAGS) -march=rv64imafdc$(if $(filter 1,$(AME)),v)_zicsr_zifencei -c $< -o $@
@@ -187,13 +219,30 @@ asm: $(V_DIR)/kernel.nr.s
 # The MLIR wrapper takes three typed unranked descriptor pointers plus grid
 # scalars. The launcher adapter validates the DMA ABI and uses element counts.
 # Boot, platform, UART and DMA runtime are linked once in either variant.
-$(ADAPTER_C): $(ROOT)/build.py $(BUILD_MAKEFILE) | $(SCRATCH)
-	$(PYTHON) -B $(ROOT)/build.py --adapter $(ADAPTER) > $@
+$(ADAPTER_C): FORCE $(ROOT)/build.py $(BUILD_MAKEFILE) | $(SCRATCH)
+	@set -eu; \
+	tmp="$@.tmp"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	$(PYTHON) -B $(ROOT)/build.py --adapter $(ADAPTER) > "$$tmp"; \
+	test -s "$$tmp" || { echo "error: adapter generator produced no C source" >&2; exit 1; }; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
+	trap - EXIT INT TERM
 
-$(OBJ)/adapter.o: $(ADAPTER_C) $(BUILD_MAKEFILE) | $(OBJ)
+FORCE:
+
+$(CONFIG): FORCE $(ROOT)/build.py $(BUILD_MAKEFILE) | $(SCRATCH)
+	@set -eu; \
+	tmp="$@.tmp"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	$(PYTHON) -B $(ROOT)/build.py --config > "$$tmp"; \
+	test -s "$$tmp" || { echo "error: shape config generator produced no header" >&2; exit 1; }; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
+	trap - EXIT INT TERM
+
+$(OBJ)/adapter.o: $(ADAPTER_C) $(CONFIG) $(BUILD_MAKEFILE) | $(OBJ)
 	$(RISCV_CC) $(C_FLAGS) $(V_CFLAGS) -c $< -o $@
 
-$(OBJ)/launch.o: $(ROOT)/launch.c $(BUILD_MAKEFILE) | $(OBJ)
+$(OBJ)/launch.o: $(ROOT)/launch.c $(CONFIG) $(BUILD_MAKEFILE) | $(OBJ)
 	$(RISCV_CC) $(C_FLAGS) $(V_CFLAGS) -c $< -o $@
 
 $(OBJ)/bosc_ame_dma.o: $(RUNTIME)/bosc_ame_dma.c $(RUNTIME)/bosc_ame_dma.h $(BUILD_MAKEFILE) | $(OBJ)
@@ -236,7 +285,7 @@ audit: $(ELF)
 	@echo "ok: DDR window exported and the PMP/satp setup sequence is in the image"
 
 $(BIN): $(ELF) $(TOOLS)/check_nr_elf.py
-	$(PYTHON) $(TOOLS)/check_nr_elf.py $< --objdump $(OBJDUMP) --output $(V_DIR)/elf-audit.json
+	$(PYTHON) $(TOOLS)/check_nr_elf.py $< --objdump $(OBJDUMP) $(AUDIT_FENCE_FLAGS) --output $(V_DIR)/elf-audit.json
 	$(OBJCOPY) -O binary $< $@
 	@echo "built $@"
 
@@ -262,9 +311,10 @@ host:
 
 check: bin
 ifeq ($(AME),1)
-# BK=128 produces two internal 64-wide blocks, with five AME operations each.
+# BK=128 produces two internal 64-wide blocks. C is loaded and stored once
+# around the two A/B loads and MMA operations.
 	@test "$$(grep -cE '# (mlae8|mlbe8|mlce32|msce32|mqma)' $(V_DIR)/kernel.nr.s)" \
-	  = "10" || { echo "FAIL: expected ten AME instructions for two K blocks in the NR asm"; exit 1; }
+	  = "8" || { echo "FAIL: expected eight AME instructions for two K blocks in the NR asm"; exit 1; }
 	@grep -q '# mqma.b.mm' $(V_DIR)/kernel.nr.s || { echo "FAIL: no mqma"; exit 1; }
 	$(PYTHON) -B $(ROOT)/build.py --check-abi $(V_DIR)/kernel.ll
 else
@@ -273,7 +323,8 @@ else
 endif
 	@python3 -c "import json,sys; a=json.load(open('$(V_DIR)/elf-audit.json')); \
 	  ok = a['status'] == 'PASS' and not a['errors'] and \
-	       ($(AME) == 0 or (a['ame_instructions'] > 0 and a['vector_memory_instructions'] > 0)); \
+	       ($(AME) == 0 or (a['ame_instructions'] > 0 and \
+	        (a['ame_store_instructions'] > 0 or a['vector_memory_instructions'] > 0))); \
 	  sys.exit(0 if ok else 1)" \
 	  || { echo "FAIL: the NR ELF audit did not pass"; exit 1; }
 	@echo "ok: $(V_NAME) passed the $(if $(filter 0,$(AME)),scalar,AME) checks and the NR ELF audit"

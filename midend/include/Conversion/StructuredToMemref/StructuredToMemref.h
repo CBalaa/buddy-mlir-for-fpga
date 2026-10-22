@@ -7,10 +7,6 @@
 
 #include "Triton/IR/Dialect.h"
 
-namespace buddy::boscame::lowering {
-class Workspace;
-}
-
 namespace mlir {
 class TypeConverter;
 namespace triton {
@@ -20,8 +16,7 @@ namespace triton {
 
 void populateStructuredToMemrefConversionPatterns(
     RewritePatternSet &patterns, TypeConverter &typeConverter,
-    bool enableTensorFirstVectorCpu = false, TritonLoweringConfig config = {},
-    ::buddy::boscame::lowering::Workspace *workspace = nullptr);
+    bool enableTensorFirstVectorCpu = false, TritonLoweringConfig config = {});
 
 void populateStructuredToMemrefPreConversionPatterns(
     RewritePatternSet &patterns, bool enableTensorFirstVectorCpu = false);

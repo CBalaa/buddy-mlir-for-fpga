@@ -69,6 +69,68 @@ namespace spmdma {
 inline bool isDescriptorOffsetAligned(mlir::Value value, int64_t factor);
 inline bool isProvablyMultipleOf(mlir::Value value, int64_t factor);
 
+struct StaticPointerOrigin {
+  mlir::Value root;
+  int64_t byteShift = 0;
+};
+
+/// Separate the aligned-pointer origin from the descriptor offset. Only
+/// memref.view shifts the pointer; reinterpret_cast replaces its descriptor
+/// offset and subview computes that offset using source strides. Those offsets
+/// are queried separately on the final value, never accumulated here.
+inline std::optional<StaticPointerOrigin>
+getStaticPointerOrigin(mlir::Value value) {
+  if (!value)
+    return std::nullopt;
+  StaticPointerOrigin origin{value, 0};
+  llvm::SmallPtrSet<mlir::Operation *, 8> visited;
+  while (mlir::Operation *defining = origin.root.getDefiningOp()) {
+    if (!visited.insert(defining).second)
+      return std::nullopt;
+    if (auto view = llvm::dyn_cast<mlir::memref::ViewOp>(defining)) {
+      auto shift = mlir::getConstantIntValue(view.getByteShift());
+      if (!shift ||
+          llvm::AddOverflow(origin.byteShift, *shift, origin.byteShift))
+        return std::nullopt;
+      origin.root = view.getSource();
+    } else if (auto sub = llvm::dyn_cast<mlir::memref::SubViewOp>(defining)) {
+      origin.root = sub.getSource();
+    } else if (auto transpose =
+                   llvm::dyn_cast<mlir::memref::TransposeOp>(defining)) {
+      // A transpose only changes the descriptor's shape/strides; it does not
+      // shift the aligned base pointer.
+      origin.root = transpose.getIn();
+    } else if (auto cast =
+                   llvm::dyn_cast<mlir::memref::ReinterpretCastOp>(defining)) {
+      origin.root = cast.getSource();
+    } else if (auto cast = llvm::dyn_cast<mlir::memref::CastOp>(defining)) {
+      origin.root = cast.getSource();
+    } else if (auto cast =
+                   llvm::dyn_cast<mlir::memref::MemorySpaceCastOp>(defining)) {
+      origin.root = cast.getSource();
+    } else if (auto collapse =
+                   llvm::dyn_cast<mlir::memref::CollapseShapeOp>(defining)) {
+      origin.root = collapse.getSrc();
+    } else if (auto expand =
+                   llvm::dyn_cast<mlir::memref::ExpandShapeOp>(defining)) {
+      origin.root = expand.getSrc();
+    } else if (auto reshape =
+                   llvm::dyn_cast<mlir::memref::ReshapeOp>(defining)) {
+      // memref.reshape requires identity layouts and preserves the base.
+      origin.root = reshape.getSource();
+    } else if (auto metadata =
+                   llvm::dyn_cast<mlir::memref::ExtractStridedMetadataOp>(
+                       defining)) {
+      if (origin.root != metadata.getBaseBuffer())
+        return std::nullopt;
+      origin.root = metadata.getSource();
+    } else {
+      break;
+    }
+  }
+  return origin;
+}
+
 inline bool isAffineMultipleOf(mlir::AffineExpr expr,
                                mlir::affine::AffineApplyOp apply,
                                int64_t factor) {
@@ -149,6 +211,17 @@ inline bool isProvablyMultipleOf(mlir::Value value, int64_t factor) {
       return integer.getInt() % factor == 0;
     return false;
   }
+  if (auto bitAnd = llvm::dyn_cast<mlir::arith::AndIOp>(defining)) {
+    // Clearing the low bits proves divisibility when the requested factor is
+    // a power of two.  For other factors, this bit-mask shape is insufficient.
+    if ((factor & (factor - 1)) != 0)
+      return false;
+    auto clearsLowBits = [&](mlir::Value mask) {
+      auto constant = getConstantIntValue(mask);
+      return constant && *constant % factor == 0;
+    };
+    return clearsLowBits(bitAnd.getLhs()) || clearsLowBits(bitAnd.getRhs());
+  }
   if (auto add = llvm::dyn_cast<mlir::arith::AddIOp>(defining))
     return isProvablyMultipleOf(add.getLhs(), factor) &&
            isProvablyMultipleOf(add.getRhs(), factor);
@@ -163,11 +236,19 @@ inline bool isProvablyMultipleOf(mlir::Value value, int64_t factor) {
     // and the other operand carries the remaining divisibility: a row offset
     // that is a 16-element multiple of i32 is a 64-byte multiple.
     if (std::optional<int64_t> constant = getConstantIntValue(mul.getRhs()))
-      if (*constant != 0 && factor % *constant == 0)
-        return isProvablyMultipleOf(mul.getLhs(), factor / *constant);
+      if (*constant != 0) {
+        if (*constant % factor == 0)
+          return true;
+        if (factor % *constant == 0)
+          return isProvablyMultipleOf(mul.getLhs(), factor / *constant);
+      }
     if (std::optional<int64_t> constant = getConstantIntValue(mul.getLhs()))
-      if (*constant != 0 && factor % *constant == 0)
-        return isProvablyMultipleOf(mul.getRhs(), factor / *constant);
+      if (*constant != 0) {
+        if (*constant % factor == 0)
+          return true;
+        if (factor % *constant == 0)
+          return isProvablyMultipleOf(mul.getRhs(), factor / *constant);
+      }
     return false;
   }
   if (auto indexCast = llvm::dyn_cast<mlir::arith::IndexCastOp>(defining))
@@ -237,6 +318,8 @@ inline std::optional<int64_t> getStaticDescriptorOffset(mlir::Value value) {
   }
   if (auto cast = value.getDefiningOp<mlir::memref::CastOp>())
     return getStaticDescriptorOffset(cast.getSource());
+  if (auto transpose = value.getDefiningOp<mlir::memref::TransposeOp>())
+    return getStaticDescriptorOffset(transpose.getIn());
   if (auto cast = value.getDefiningOp<mlir::memref::MemorySpaceCastOp>())
     return getStaticDescriptorOffset(cast.getSource());
   if (auto collapse = value.getDefiningOp<mlir::memref::CollapseShapeOp>())
@@ -249,6 +332,11 @@ inline std::optional<int64_t> getStaticDescriptorOffset(mlir::Value value) {
 inline bool isDescriptorOffsetAligned(mlir::Value value, int64_t factor) {
   if (factor == 1)
     return true;
+  // `memref.view` changes the base pointer in bytes while leaving the
+  // descriptor offset of its source unchanged.  The byte-shift alignment is
+  // checked separately by the endpoint proof below.
+  if (auto view = value.getDefiningOp<mlir::memref::ViewOp>())
+    return isDescriptorOffsetAligned(view.getSource(), factor);
   if (auto offset = getStaticDescriptorOffset(value))
     return *offset % factor == 0;
   if (auto cast = value.getDefiningOp<mlir::memref::ReinterpretCastOp>())
@@ -270,6 +358,8 @@ inline bool isDescriptorOffsetAligned(mlir::Value value, int64_t factor) {
   }
   if (auto cast = value.getDefiningOp<mlir::memref::CastOp>())
     return isDescriptorOffsetAligned(cast.getSource(), factor);
+  if (auto transpose = value.getDefiningOp<mlir::memref::TransposeOp>())
+    return isDescriptorOffsetAligned(transpose.getIn(), factor);
   if (auto cast = value.getDefiningOp<mlir::memref::MemorySpaceCastOp>())
     return isDescriptorOffsetAligned(cast.getSource(), factor);
   if (auto collapse = value.getDefiningOp<mlir::memref::CollapseShapeOp>())
@@ -277,6 +367,92 @@ inline bool isDescriptorOffsetAligned(mlir::Value value, int64_t factor) {
   if (auto expand = value.getDefiningOp<mlir::memref::ExpandShapeOp>())
     return isDescriptorOffsetAligned(expand.getSrc(), factor);
   return false;
+}
+
+/// Return whether an endpoint's effective address can be proven aligned,
+/// without emitting a diagnostic.  The planner uses this predicate while it
+/// is choosing between direct DDR and staged placement; an unproven view
+/// shift should simply keep the operand on the fallback path.  Diagnostics
+/// remain the responsibility of verifyEndpointPointerAlignment once a direct
+/// endpoint has actually been selected.
+inline bool isEndpointPointerAlignmentProven(mlir::Value endpoint,
+                                             int64_t alignmentBytes) {
+  if (alignmentBytes <= 0)
+    return false;
+  auto type = llvm::dyn_cast<mlir::MemRefType>(endpoint.getType());
+  unsigned width = type ? getSpmElementByteWidth(type.getElementType()) : 0;
+  if (!width ||
+      !isDescriptorOffsetAligned(
+          endpoint, alignmentBytes / std::gcd(alignmentBytes, int64_t(width))))
+    return false;
+
+  mlir::Value current = endpoint;
+  llvm::SmallPtrSet<mlir::Operation *, 8> visited;
+  while (mlir::Operation *defining = current.getDefiningOp()) {
+    if (!visited.insert(defining).second)
+      return false;
+    if (auto view = llvm::dyn_cast<mlir::memref::ViewOp>(defining)) {
+      if (!isProvablyMultipleOf(view.getByteShift(), alignmentBytes))
+        return false;
+      current = view.getSource();
+      continue;
+    }
+    if (auto cast = llvm::dyn_cast<mlir::memref::CastOp>(defining)) {
+      current = cast.getSource();
+      continue;
+    }
+    if (auto transpose = llvm::dyn_cast<mlir::memref::TransposeOp>(defining)) {
+      current = transpose.getIn();
+      continue;
+    }
+    if (auto cast = llvm::dyn_cast<mlir::memref::MemorySpaceCastOp>(defining)) {
+      current = cast.getSource();
+      continue;
+    }
+    if (auto subview = llvm::dyn_cast<mlir::memref::SubViewOp>(defining)) {
+      current = subview.getSource();
+      continue;
+    }
+    if (auto reinterpret =
+            llvm::dyn_cast<mlir::memref::ReinterpretCastOp>(defining)) {
+      current = reinterpret.getSource();
+      continue;
+    }
+    if (auto collapse =
+            llvm::dyn_cast<mlir::memref::CollapseShapeOp>(defining)) {
+      current = collapse.getSrc();
+      continue;
+    }
+    if (auto expand = llvm::dyn_cast<mlir::memref::ExpandShapeOp>(defining)) {
+      current = expand.getSrc();
+      continue;
+    }
+    if (auto metadata =
+            llvm::dyn_cast<mlir::memref::ExtractStridedMetadataOp>(defining)) {
+      current = metadata.getSource();
+      continue;
+    }
+    if (auto alloc = llvm::dyn_cast<mlir::memref::AllocOp>(defining))
+      return alloc.getAlignment() &&
+             *alloc.getAlignment() >= uint64_t(alignmentBytes) &&
+             *alloc.getAlignment() % alignmentBytes == 0;
+    if (auto alloc = llvm::dyn_cast<mlir::memref::AllocaOp>(defining))
+      return alloc.getAlignment() &&
+             *alloc.getAlignment() >= uint64_t(alignmentBytes) &&
+             *alloc.getAlignment() % alignmentBytes == 0;
+    if (auto global = llvm::dyn_cast<mlir::memref::GetGlobalOp>(defining)) {
+      auto storage =
+          mlir::SymbolTable::lookupNearestSymbolFrom<mlir::memref::GlobalOp>(
+              global, global.getNameAttr());
+      return storage && storage.getAlignment() &&
+             *storage.getAlignment() >= uint64_t(alignmentBytes) &&
+             *storage.getAlignment() % alignmentBytes == 0;
+    }
+    // Function arguments and explicit SPM roots carry their alignment through
+    // the ABI or the SPM view contract.  No further proof is available here.
+    break;
+  }
+  return true;
 }
 
 /// Walk the view chain of a DMA endpoint and check that the base pointer it
@@ -333,6 +509,10 @@ verifyEndpointPointerAlignment(mlir::Operation *op, mlir::Value endpoint,
       current = cast.getSource();
       continue;
     }
+    if (auto transpose = llvm::dyn_cast<mlir::memref::TransposeOp>(defining)) {
+      current = transpose.getIn();
+      continue;
+    }
     if (auto cast = llvm::dyn_cast<mlir::memref::MemorySpaceCastOp>(defining)) {
       current = cast.getSource();
       continue;
@@ -379,7 +559,8 @@ verifyEndpointPointerAlignment(mlir::Operation *op, mlir::Value endpoint,
           mlir::SymbolTable::lookupNearestSymbolFrom<mlir::memref::GlobalOp>(
               global, global.getNameAttr());
       if (!storage || !storage.getAlignment() ||
-          *storage.getAlignment() < uint64_t(alignmentBytes))
+          *storage.getAlignment() < uint64_t(alignmentBytes) ||
+          *storage.getAlignment() % alignmentBytes != 0)
         return op->emitOpError()
                << what << " endpoint global must prove 64 B alignment";
     }

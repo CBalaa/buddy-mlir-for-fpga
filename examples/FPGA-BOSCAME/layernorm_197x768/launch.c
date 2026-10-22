@@ -121,9 +121,8 @@ static uint32_t validate(unsigned round) {
       sum += input(row, column, round);
     float mean = sum / (float)WIDTH;
     float squares = 0.0f;
-    /* The centered 256 padded lanes also enter the original TTIR variance. */
-    for (unsigned column = 0; column < BLOCK; ++column) {
-      float x = column < WIDTH ? input(row, column, round) : 0.0f;
+    for (unsigned column = 0; column < WIDTH; ++column) {
+      float x = input(row, column, round);
       float centered = x - mean;
       squares += centered * centered;
     }

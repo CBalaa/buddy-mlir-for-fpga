@@ -35,6 +35,7 @@
 #include <stdint.h>
 
 #include "bosc_ame_dma.h"
+#include "matmul_i8_config.h"
 #include "nh_e6_platform.h"
 #include "uart.h"
 
@@ -70,9 +71,21 @@ void *memcpy(void *destination, const void *source, size_t bytes) {
 /* Problem size (the same numbers the TTIR and build.py use)           */
 /* ------------------------------------------------------------------ */
 
-#define M 128u
-#define N 1024u
-#define K 128u
+#define M MATMUL_I8_M
+#define N MATMUL_I8_N
+#define K MATMUL_I8_K
+#define BM MATMUL_I8_BM
+#define BN MATMUL_I8_BN
+#define BK MATMUL_I8_BK
+#if BM > 64u || BN > 64u
+#error "AME output tiles BM/BN must be at most 64"
+#endif
+#if BK != K
+#error "this Triton kernel has no outer K loop; BK must equal K"
+#endif
+#if M % BM != 0 || N % BN != 0 || K % BK != 0
+#error "launcher shape must divide evenly into the generated tile grid"
+#endif
 #define A_BYTES ((size_t)M * K)
 #define B_BYTES ((size_t)N * K)
 #define C_BYTES ((size_t)M * N * 4u)
@@ -114,12 +127,9 @@ typedef struct {
 } MemRef2;
 
 #if MATMUL_I8_USE_AME
-extern void _mlir_ciface_kernel_matmul_i8_128x1024x128(MemRef2 *a, MemRef2 *b,
-                                                       MemRef2 *c,
-                                                       void *scratch);
+extern void MATMUL_I8_KERNEL(MemRef2 *a, MemRef2 *b, MemRef2 *c, void *scratch);
 #else
-extern void _mlir_ciface_kernel_matmul_i8_128x1024x128(MemRef2 *a, MemRef2 *b,
-                                                       MemRef2 *c);
+extern void MATMUL_I8_KERNEL(MemRef2 *a, MemRef2 *b, MemRef2 *c);
 #endif
 
 static inline MemRef2 make_2(void *pointer, int64_t rows, int64_t columns) {
@@ -373,9 +383,9 @@ int e6_main(void) {
     e6_stage(0x30u + round * 2u);
     uint64_t begin = cycles();
 #if MATMUL_I8_USE_AME
-    _mlir_ciface_kernel_matmul_i8_128x1024x128(&a, &b, &c, scratch);
+    MATMUL_I8_KERNEL(&a, &b, &c, scratch);
 #else
-    _mlir_ciface_kernel_matmul_i8_128x1024x128(&a, &b, &c);
+    MATMUL_I8_KERNEL(&a, &b, &c);
 #endif
     e6_diag_cycles += cycles() - begin;
     __asm__ volatile("fence rw, rw" ::: "memory");
@@ -403,9 +413,9 @@ int e6_main(void) {
   e6_stage(0x30u);
   uint64_t begin = cycles();
 #if MATMUL_I8_USE_AME
-  _mlir_ciface_kernel_matmul_i8_128x1024x128(&a, &b, &c, scratch);
+  MATMUL_I8_KERNEL(&a, &b, &c, scratch);
 #else
-  _mlir_ciface_kernel_matmul_i8_128x1024x128(&a, &b, &c);
+  MATMUL_I8_KERNEL(&a, &b, &c);
 #endif
   e6_diag_cycles = cycles() - begin;
   __asm__ volatile("fence rw, rw" ::: "memory");

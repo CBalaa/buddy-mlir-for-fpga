@@ -6,6 +6,22 @@
 # triton-shared/Utils/Utils.{h,cpp} (triton-riscv commit fe554ff), which provide
 # pointer/mask/use analysis, OpFoldResult utilities and `isPtrTypeLike`.
 
+add_mlir_library(BuddyBOSCAMEAnalysis
+  BOSCAMELaunchFacts.cpp
+  LinalgComputationFacts.cpp
+  LinalgComputationFactsPrinter.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  MLIRAnalysis
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRIR
+  MLIRLinalgDialect
+  MLIRSideEffectInterfaces
+)
+
 add_mlir_library(BuddyTritonAnalysis
   MaskAnalysis.cpp
   OpFoldResultUtils.cpp

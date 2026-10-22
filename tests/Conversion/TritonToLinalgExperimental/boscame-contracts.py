@@ -7,7 +7,7 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
 
 OPT = buddy_opt_path()
 MODE = "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias"
@@ -44,7 +44,12 @@ def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
 
-    def invoke(name, source, args=(MODE,), expect=None):
+    def invoke(name, source, args=None, expect=None):
+        args = (
+            experimental_pipeline(store_policy="spm-dma")
+            if args is None
+            else args
+        )
         file = work / (name + ".mlir")
         file.write_text(source)
         result = subprocess.run(
@@ -77,7 +82,7 @@ def main():
     invoke(
         "short-store",
         copy_kernel(mask=True),
-        expect="64 B multiple of authorized DDR bytes",
+        expect="positive 64-byte range",
     )
     unaligned = copy_kernel(
         prefix="%one = arith.constant dense<1> : tensor<16xi32>\n%shift = arith.addi %r, %one : tensor<16xi32>"
@@ -87,15 +92,18 @@ def main():
         unaligned,
         expect="effective address cannot be proven 64 B aligned",
     )
-    invoke("capacity", copy_kernel(size=131072), expect="SPM capacity exceeded")
+    invoke(
+        "capacity",
+        copy_kernel(size=131072),
+        expect="SPM workspace capacity exceeded",
+    )
     for name, options in (
         ("gather", {"gather": True}),
         ("scatter", {"scatter": True}),
     ):
         invoke(name, copy_kernel(**options), expect="unsupported")
-    # A supported integer target supplied without the dot marker must fail at
-    # the exit checker, instead of escaping as a CPU integer matmul.
-    invoke(
+    # An unmarked integer matmul deliberately retains ordinary loop semantics.
+    ordinary = invoke(
         "unmarked",
         """module {
       func.func @target(%a: memref<16x64xi8>, %b: memref<64x16xi8>, %c: memref<16x16xi32>) {
@@ -103,8 +111,8 @@ def main():
         return
       }
     }""",
-        expect="integer target matmul was not lowered to AME",
     )
+    assert "linalg.matmul" not in ordinary and "arith.muli" in ordinary
     invoke(
         "dynamic-target",
         """module {
@@ -113,7 +121,7 @@ def main():
         return
       }
     }""",
-        expect="AME target requires static i8/i8/i32 rank-2 buffers",
+        expect="transfer shape must be static",
     )
     attrs = invoke(
         "attrs",
@@ -134,12 +142,8 @@ def main():
         'test.arg = "private_arg"' in attrs
         and 'test.result = "private_result"' in attrs
     )
-    assert (
-        attrs.split("func.func @attrs", 1)[1]
-        .split("attributes", 1)[0]
-        .count(": i32")
-        == 7
-    )
+    signature = attrs.split("func.func @attrs", 1)[1].split(") ->", 1)[0]
+    assert signature.count("%arg") == 7
     floating = invoke(
         "floating",
         """module {
@@ -149,11 +153,12 @@ def main():
         tt.return %r : tensor<16x16xf32>
       }
     }""",
+        args=(MODE,),
     )
     assert "linalg.matmul" in floating and "bosc_ame.tile.mma" not in floating
-    # CHECK: PASS failures: ABI, alignment, short store, gather/scatter, SPM capacity, incomplete integer target
+    # CHECK: PASS failures: ABI, alignment, short store, gather/scatter, SPM capacity, marked integer target
     print(
-        "PASS failures: ABI, alignment, short store, gather/scatter, SPM capacity, incomplete integer target"
+        "PASS failures: ABI, alignment, short store, gather/scatter, SPM capacity, marked integer target"
     )
     # CHECK: PASS defaults: inherited contract, function/argument/result attributes, single program-ID conversion, floating dot
     print(

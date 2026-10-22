@@ -88,6 +88,8 @@ FailureOr<SpmVectorInterval> getSpmVectorInterval(Operation *anchor,
       root = op.getSource();
     else if (auto op = root.getDefiningOp<memref::SubViewOp>())
       root = op.getSource();
+    else if (auto op = root.getDefiningOp<memref::TransposeOp>())
+      root = op.getIn();
     else if (auto op = root.getDefiningOp<memref::CastOp>())
       root = op.getSource();
     else if (auto op = root.getDefiningOp<memref::CollapseShapeOp>())

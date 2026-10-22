@@ -1,9 +1,9 @@
+#include "matmul_i8_config.h"
 #include "support.h"
-#define M 128
-#define N 1024
-#define K 128
-extern void _mlir_ciface_kernel_matmul_i8_128x1024x128(MemRef2 *, MemRef2 *,
-                                                       MemRef2 *);
+#define M MATMUL_I8_M
+#define N MATMUL_I8_N
+#define K MATMUL_I8_K
+extern void MATMUL_I8_KERNEL(MemRef2 *, MemRef2 *, MemRef2 *);
 int launch(void) {
   int8_t *a = workspace(0), *b = workspace((size_t)M * K + 64);
   int32_t *c = workspace((size_t)M * K + (size_t)N * K + 128);
@@ -23,7 +23,7 @@ int launch(void) {
   ame_fence();
 #endif
   uint64_t start = nr_cycles();
-  _mlir_ciface_kernel_matmul_i8_128x1024x128(&A, &B, &C);
+  MATMUL_I8_KERNEL(&A, &B, &C);
   nr_puts("cycles matmul_i8_128x1024x128: ");
   nr_hex64(nr_cycles() - start);
   nr_puts("\r\n");

@@ -22,8 +22,10 @@ from nr_isa import (
     FENCE_RW_RW,
     RVV_ALLOWED,
     is_ame,
+    is_ame_store,
     is_vector,
     is_vector_memory,
+    is_vector_store,
     parse_disassembly,
     validate_ame_word,
 )
@@ -66,11 +68,12 @@ def executable_sections(data):
     return result
 
 
-def audit(data, dump):
+def audit(data, dump, require_fences=True):
     decoded = {(r["section"], r["address"]): r for r in parse_disassembly(dump)}
     errors, sections = [], []
     vectors = Counter()
     instruction_count = ame_count = vector_memory_count = 0
+    ame_store_count = vector_store_count = 0
     for name, address, code in executable_sections(data):
         sections.append(
             {"name": name, "address": hex(address), "bytes": len(code)}
@@ -106,6 +109,8 @@ def audit(data, dump):
                 if is_ame(word):
                     ame_count += 1
                     fenced = True
+                    if is_ame_store(word):
+                        ame_store_count += 1
                     try:
                         validate_ame_word(word)
                     except ValueError as error:
@@ -117,8 +122,10 @@ def audit(data, dump):
                         errors.append(f"{where}: unsupported RVV: {detail}")
                     if is_vector_memory(word):
                         vector_memory_count += 1
+                        if is_vector_store(word):
+                            vector_store_count += 1
                         fenced = True
-                if fenced:
+                if fenced and require_fences:
                     after = int.from_bytes(
                         code[offset + 4 : offset + 8], "little"
                     )
@@ -142,6 +149,8 @@ def audit(data, dump):
         "instructions": instruction_count,
         "ame_instructions": ame_count,
         "vector_memory_instructions": vector_memory_count,
+        "ame_store_instructions": ame_store_count,
+        "vector_store_instructions": vector_store_count,
         "rvv_instructions": {
             name: count for name, count in sorted(vectors.items())
         },
@@ -160,6 +169,17 @@ def main():
     parser.add_argument(
         "--output", type=Path, help="write machine-readable audit report"
     )
+    parser.add_argument(
+        "--allow-unfenced",
+        action="store_true",
+        help="do not require fence rw,rw around AME/RVV memory instructions "
+        "when the assembly filter intentionally ran with --no-fences",
+    )
+    parser.add_argument(
+        "--require-direct-store",
+        action="store_true",
+        help="fail unless the ELF contains an AME or RVV direct store",
+    )
     args = parser.parse_args()
     try:
         dump = subprocess.check_output(
@@ -171,7 +191,19 @@ def main():
             ],
             text=True,
         )
-        report = audit(args.elf.read_bytes(), dump)
+        report = audit(
+            args.elf.read_bytes(),
+            dump,
+            require_fences=not args.allow_unfenced,
+        )
+        if args.require_direct_store and not (
+            report["ame_store_instructions"]
+            or report["vector_store_instructions"]
+        ):
+            report["errors"].append(
+                "direct-store audit requested but no msce32.m or vse*.v was found"
+            )
+            report["status"] = "FAIL"
         if args.output:
             args.output.write_text(json.dumps(report, indent=2) + "\n")
         print(

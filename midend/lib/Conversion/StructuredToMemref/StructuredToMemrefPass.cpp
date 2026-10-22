@@ -7,9 +7,7 @@
 
 #include "Triton/IR/Dialect.h"
 
-#include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
-#include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/TPtr/IR/TPtrDialect.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
@@ -87,20 +85,12 @@ public:
                 scf::SCFDialect, tensor::TensorDialect,
                 bufferization::BufferizationDialect, triton::TritonDialect,
                 memref::MemRefDialect, vector::VectorDialect>();
-    registry.insert<buddy::boscame::BOSCAMEDialect>();
   }
 
   TritonLoweringConfig config;
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
-    buddy::boscame::lowering::Workspace workspace;
-    if (config.enableBOSCAME &&
-        failed(buddy::boscame::lowering::declareDdrPolicies(moduleOp))) {
-      signalPassFailure();
-      return;
-    }
-
     RewritePatternSet prePatterns(&getContext());
     triton::populateStructuredToMemrefPreConversionPatterns(
         prePatterns, enableTensorFirstVectorCpu && !config.enableBOSCAME);
@@ -118,34 +108,18 @@ public:
                            cf::ControlFlowDialect, tensor::TensorDialect,
                            bufferization::BufferizationDialect,
                            memref::MemRefDialect, vector::VectorDialect>();
-    target.addLegalDialect<buddy::boscame::BOSCAMEDialect>();
-
     target.addIllegalOp<tts::LoadOp, tts::StoreOp, tts::MakeTensorPtrOp>();
-    // Resolve every load's backing buffer before choosing the store's source
-    // memory space. Stores may consume computations whose DPS init is a load.
-    if (config.enableBOSCAME)
-      target.addLegalOp<tts::StoreOp, tts::MakeTensorPtrOp>();
 
     target.addLegalOp<UnrealizedConversionCastOp>();
 
     PtrToUnrankedMemrefConverter typeConverter;
 
     triton::populateStructuredToMemrefConversionPatterns(
-        patterns, typeConverter, enableTensorFirstVectorCpu, config,
-        &workspace);
+        patterns, typeConverter, enableTensorFirstVectorCpu, config);
 
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
       signalPassFailure();
       return;
-    }
-    if (config.enableBOSCAME) {
-      target.addIllegalOp<tts::StoreOp, tts::MakeTensorPtrOp>();
-      RewritePatternSet stores(&getContext());
-      triton::populateStructuredToMemrefConversionPatterns(
-          stores, typeConverter, enableTensorFirstVectorCpu, config,
-          &workspace);
-      if (failed(applyPartialConversion(moduleOp, target, std::move(stores))))
-        signalPassFailure();
     }
   }
 };

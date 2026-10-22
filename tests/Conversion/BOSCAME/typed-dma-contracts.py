@@ -25,11 +25,11 @@ def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
 
-    def check(name, text, expect=None):
+    def check(name, text, expect=None, opt_flags=()):
         source = work / (name + ".mlir")
         source.write_text(text)
         result = subprocess.run(
-            [OPT, str(source), "--bosc-ame-spm-dma-check"],
+            [OPT, *opt_flags, str(source), "--bosc-ame-spm-dma-check"],
             capture_output=True,
             text=True,
         )
@@ -194,6 +194,17 @@ def main():
         "unaligned-global",
         global_text,
         "endpoint global must prove 64 B alignment",
+    )
+    # memref.global itself rejects non-power-of-two alignments. Disable only
+    # parsing verification here so the DMA checker can exercise its own
+    # multiple-of-64 proof on this malformed contract.
+    check(
+        "misaligned-global",
+        global_text.replace(
+            "= uninitialized", "= uninitialized alignment = 65"
+        ),
+        "endpoint global must prove 64 B alignment",
+        ("--mlir-very-unsafe-disable-verifier-on-parsing",),
     )
     check(
         "aligned-global",

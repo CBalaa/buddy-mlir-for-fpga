@@ -28,23 +28,24 @@ module {
     %15 = arith.divf %14, %cst_0 : f32
     %16 = tt.splat %15 : f32 -> tensor<1024xf32>
     %17 = arith.subf %7, %16 : tensor<1024xf32>
-    %18 = arith.mulf %17, %17 : tensor<1024xf32>
-    %19 = "tt.reduce"(%18) <{axis = 0 : i32}> ({
+    %18 = arith.select %2, %17, %cst_2 : tensor<1024xi1>, tensor<1024xf32>
+    %19 = arith.mulf %18, %18 : tensor<1024xf32>
+    %20 = "tt.reduce"(%19) <{axis = 0 : i32}> ({
     ^bb0(%arg4: f32, %arg5: f32):
       %30 = arith.addf %arg4, %arg5 : f32
       tt.reduce.return %30 : f32
     }) : (tensor<1024xf32>) -> f32
-    %20 = arith.divf %19, %cst_0 : f32
-    %21 = arith.addf %20, %cst : f32
-    %22 = math.rsqrt %21 : f32
-    %23 = tt.splat %22 : f32 -> tensor<1024xf32>
-    %24 = arith.mulf %17, %23 : tensor<1024xf32>
-    %25 = arith.mulf %24, %10 : tensor<1024xf32>
-    %26 = arith.addf %25, %13 : tensor<1024xf32>
-    %27 = tt.addptr %arg3, %3 : !tt.ptr<f32>, i32
-    %28 = tt.splat %27 : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>>
-    %29 = tt.addptr %28, %1 : tensor<1024x!tt.ptr<f32>>, tensor<1024xi32>
-    tt.store %29, %26, %2 : tensor<1024x!tt.ptr<f32>>
+    %21 = arith.divf %20, %cst_0 : f32
+    %22 = arith.addf %21, %cst : f32
+    %23 = math.rsqrt %22 : f32
+    %24 = tt.splat %23 : f32 -> tensor<1024xf32>
+    %25 = arith.mulf %18, %24 : tensor<1024xf32>
+    %26 = arith.mulf %25, %10 : tensor<1024xf32>
+    %27 = arith.addf %26, %13 : tensor<1024xf32>
+    %28 = tt.addptr %arg3, %3 : !tt.ptr<f32>, i32
+    %29 = tt.splat %28 : !tt.ptr<f32> -> tensor<1024x!tt.ptr<f32>>
+    %30 = tt.addptr %29, %1 : tensor<1024x!tt.ptr<f32>>, tensor<1024xi32>
+    tt.store %30, %27, %2 : tensor<1024x!tt.ptr<f32>>
     tt.return
   }
 }

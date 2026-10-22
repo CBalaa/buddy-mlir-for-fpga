@@ -9,7 +9,11 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
-from boscame_check import buddy_opt_path  # noqa: E402
+from boscame_check import (  # noqa: E402
+    buddy_opt_path,
+    experimental_pipeline,
+    specialize_full_gemm,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 
@@ -55,11 +59,16 @@ def main():
         module, lowered, llvm = (
             work / (name + suffix) for suffix in (".mlir", ".llvm.mlir", ".ll")
         )
+        input_path = Path(__file__).parent / "Inputs" / fixture
+        if name == "gemm":
+            input_path = specialize_full_gemm(
+                input_path, work / "gemm.static.ttir"
+            )
         run(
             [
                 opt,
-                Path(__file__).parent / "Inputs" / fixture,
-                "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
+                input_path,
+                *experimental_pipeline(store_policy="spm-dma"),
                 "-o",
                 module,
             ]

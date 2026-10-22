@@ -21,16 +21,35 @@ from boscame_sim import (
     split_op_and_types,
 )
 
-WIDTHS = {"i8": 1, "i16": 2, "i32": 4, "i64": 8, "index": 8, "f32": 4, "f64": 8}
+WIDTHS = {
+    "i1": 1,
+    "i8": 1,
+    "i16": 2,
+    "i32": 4,
+    "i64": 8,
+    "index": 8,
+    "f32": 4,
+    "f64": 8,
+}
 SSA = r"%[\w.\-]+(?:#\d+)?"
 
 
 def type_shape(text):
-    head = text[text.index("<") + 1 :].split(",")[0].split(">")[0]
-    fields = head.split("x")
-    return [None if d in ("?", "*") else int(d) for d in fields[:-1]], fields[
-        -1
-    ]
+    if "<" not in text:
+        raise SimError("expected a shaped type: " + text)
+    head = text[text.index("<") + 1 :].split(",", 1)[0].split(">", 1)[0]
+    match = re.fullmatch(
+        r"(?P<shape>(?:[0-9?*]+x)*)(?P<element>[A-Za-z][A-Za-z0-9]*)", head
+    )
+    if match is None:
+        raise SimError("unsupported shaped type: " + text)
+    dimensions = match.group("shape").removesuffix("x").split("x")
+    shape = (
+        [None if dim in ("?", "*") else int(dim) for dim in dimensions]
+        if dimensions != [""]
+        else []
+    )
+    return shape, match.group("element")
 
 
 def strides_for(shape):
@@ -108,6 +127,20 @@ class Buffer:
 
     def store(self, indices, value):
         address = self.address(indices)
+        self.store_address(address, value)
+
+    def store_address(self, address, value):
+        """Store one element at an already decoded byte address.
+
+        Most operations use ``store(indices, ...)`` so the descriptor strides
+        are applied by the simulator.  AME ``msce32.m`` is different: its
+        stride operand is a byte stride, and the destination descriptor may be
+        a flat pointer view.  Keeping this helper separate lets that operation
+        model the hardware address calculation without silently replacing the
+        descriptor's physical layout.
+        """
+        if address < 0 or address + self.width > len(self.data):
+            raise SimError("address outside backing storage")
         if self.element.startswith("f"):
             struct.pack_into(
                 "<f" if self.width == 4 else "<d", self.data, address, value
@@ -132,6 +165,10 @@ class Machine:
             bytearray([0x5A]) * (128 * 1024),
         ]
         self.accesses = []
+        # Keep endpoint names for structural checks.  A direct-DDR store must
+        # never appear as a DMA destination; its destination is the user C
+        # buffer and the operation is represented by a vector/AME store.
+        self.dma_log = []
         self.values = {}
         self.pending = {}
         self.live_matrix = False
@@ -277,7 +314,11 @@ class Machine:
                 elif code == "negf":
                     value = -values[0]
                 elif code == "rsqrt":
-                    value = 1.0 / math.sqrt(values[0])
+                    # This pipeline lowers scalar rsqrt to the freestanding
+                    # rsqrtf entry: round sqrtf, then round the f32 division.
+                    # One final round of 1/sqrt(double) is a different result.
+                    root = rounded(math.sqrt(values[0]), result_element)
+                    value = 1.0 / root
                 elif code == "sqrt":
                     value = math.sqrt(values[0])
                 else:
@@ -311,6 +352,13 @@ class Machine:
                     "only scalar-to-1D vector broadcast is supported"
                 )
             self.result(op, [[rounded(get(operands[0]), element)] * shape[0]])
+        elif name == "vector.step":
+            shape, _ = type_shape(types)
+            if len(shape) != 1 or shape[0] is None:
+                raise SimError(
+                    "only a static one-dimensional vector.step is supported"
+                )
+            self.result(op, [list(range(shape[0]))])
         elif name == "vector.reduction":
             if not re.match(r"vector.reduction\s+<add>,", body):
                 raise SimError("only ordered ADD vector reduction is supported")
@@ -351,13 +399,43 @@ class Machine:
                 raise SimError(
                     "dynamic allocation is unsupported by this simulator"
                 )
+            strides = strides_for(shape)
+            offset = 0
+            layout = re.search(
+                r"strided<\[([^]]*)\](?:, offset: ([^>]+))?>", types
+            )
+            if layout:
+                try:
+                    strides = [
+                        int(value.strip())
+                        for value in layout[1].split(",")
+                        if value.strip()
+                    ]
+                    offset = int(layout[2] or 0)
+                except ValueError as error:
+                    raise SimError(
+                        "dynamic allocation layout is unsupported"
+                    ) from error
+                if (
+                    len(strides) != len(shape)
+                    or offset < 0
+                    or any(s <= 0 for s in strides)
+                ):
+                    raise SimError("invalid static allocation layout")
+            elements = offset
+            if all(shape):
+                elements += 1 + sum(
+                    (size - 1) * stride for size, stride in zip(shape, strides)
+                )
             self.result(
                 op,
                 [
                     Buffer(
-                        bytearray(math.prod(shape) * WIDTHS[element]),
+                        bytearray(elements * WIDTHS[element]),
                         element,
                         shape,
+                        strides,
+                        offset=offset,
                     )
                 ],
             )
@@ -375,6 +453,34 @@ class Machine:
             )
         elif name in ("memref.cast", "memref.memory_space_cast"):
             self.result(op, [get(operands[0])])
+        elif name == "memref.view":
+            source = get(operands[0])
+            if source.element != "i8" or len(source.shape) != 1:
+                raise SimError(
+                    "memref.view requires a one-dimensional i8 source"
+                )
+            byte_shift, sizes = re.findall(r"\[(.*?)\]", body)[:2]
+            shape, element = type_shape(full.rsplit(" to ", 1)[-1])
+            dynamic_sizes = [get(x) for x in _split_top_level(sizes)]
+            if shape.count(None) != len(dynamic_sizes):
+                raise SimError("memref.view dynamic size count mismatch")
+            dynamic_sizes = iter(dynamic_sizes)
+            shape = [next(dynamic_sizes) if n is None else n for n in shape]
+            self.result(
+                op,
+                [
+                    Buffer(
+                        source.data,
+                        element,
+                        shape,
+                        # memref.view shifts the aligned byte pointer and resets
+                        # the descriptor offset; the source offset is ignored.
+                        base=source.base + get(byte_shift),
+                        bank=source.bank,
+                        name=source.name,
+                    )
+                ],
+            )
         elif name == "memref.reinterpret_cast":
             source = get(operands[0])
             offset, sizes, strides = re.findall(r"\[(.*?)\]", full)[:3]
@@ -456,6 +562,72 @@ class Machine:
                 op, [base, source.offset, *source.shape, *source.strides]
             )
         elif name in (
+            "bosc_ame.msce32.m",
+            "bosc_ame.intr.msce32.m",
+            "ame.msce32.m",
+        ):
+            # The upstream AME store takes the accumulator value, a pointer
+            # descriptor and a *byte* row stride.  Unlike tile.store_acc, the
+            # destination is external DDR and no SPM staging or DMA is
+            # involved.  Keep this check deliberately strict so an invalid
+            # direct store cannot look like a successful DMA fallback.
+            if len(operands) < 3:
+                raise SimError(
+                    "msce32.m expects accumulator, destination, stride"
+                )
+            matrix, destination, stride = (
+                get(operands[0]),
+                get(operands[1]),
+                get(operands[2]),
+            )
+            if self.pending:
+                raise SimError("direct msce32.m before DMA wait")
+            if destination.bank is not None:
+                raise SimError(
+                    "direct msce32.m destination must be external DDR"
+                )
+            if (
+                not isinstance(matrix, list)
+                or not matrix
+                or not isinstance(matrix[0], list)
+                or not matrix[0]
+                or any(
+                    not isinstance(row, list) or len(row) != len(matrix[0])
+                    for row in matrix
+                )
+            ):
+                raise SimError("msce32.m requires a rectangular accumulator")
+            rows, columns = len(matrix), len(matrix[0])
+            stride = int(stride)
+            row_bytes = columns * destination.width
+            if stride < row_bytes or stride % destination.width:
+                raise SimError("invalid msce32.m byte stride")
+            if len(destination.shape) == 2 and (
+                rows > destination.shape[0] or columns > destination.shape[1]
+            ):
+                raise SimError("msce32.m tile exceeds destination shape")
+            base = destination.address([0] * len(destination.shape))
+            for row, values in enumerate(matrix):
+                row_start = base + row * stride
+                if row_start < 0 or row_start + row_bytes > len(
+                    destination.data
+                ):
+                    raise SimError("msce32.m writes outside backing storage")
+                for column, value in enumerate(values):
+                    destination.store_address(
+                        row_start + column * destination.width, value
+                    )
+                if destination.name is not None:
+                    self.accesses.append(
+                        (
+                            destination.name,
+                            row_start,
+                            row_start + row_bytes,
+                            "write",
+                        )
+                    )
+            self.live_matrix = False
+        elif name in (
             "memref.load",
             "memref.store",
             "vector.load",
@@ -503,6 +675,74 @@ class Machine:
                         "write" if store else "read",
                     )
                 )
+        elif name == "vector.transfer_write":
+            # Direct vector results may remain as transfer_write until the
+            # target vector lowering.  Execute the identity-map form here so
+            # the functional model checks the same DDR addresses and mask
+            # behavior as the eventual RVV stores.
+            if self.pending:
+                raise SimError("memory access before DMA wait")
+            type_parts = _split_top_level(types)
+            if len(type_parts) < 2:
+                raise SimError("transfer_write needs vector and destination")
+            vector_shape, vector_element = type_shape(type_parts[0].strip())
+            if not vector_shape:
+                raise SimError("transfer_write requires a nonzero-rank vector")
+            vector = get(operands[0])
+            buffer = get(operands[1])
+            if buffer.bank is not None:
+                raise SimError("direct transfer_write cannot target SPM")
+            if len(vector_shape) != len(buffer.shape):
+                raise SimError("transfer_write rank does not match destination")
+            indices = [
+                get(value)
+                for value in _split_top_level(re.search(r"\[(.*?)\]", body)[1])
+            ]
+            if len(indices) != len(buffer.shape):
+                raise SimError("transfer_write index rank mismatch")
+            # The direct path emits identity transfers. A non-identity map
+            # would require a transpose-aware address walk and is rejected by
+            # the backend before this simulator is invoked.
+            if "permutation_map" in body and "affine_map" in body:
+                map_text = re.search(r"permutation_map\s*=\s*([^,}]+)", body)
+                if map_text and map_text.group(1).strip() not in (
+                    "#vector.identity",
+                    "affine_map<(d0) -> (d0)>",
+                ):
+                    raise SimError(
+                        "unsupported non-identity transfer_write map"
+                    )
+            mask = None
+            if len(operands) > 2 + len(buffer.shape):
+                mask = get(operands[2 + len(buffer.shape)])
+
+            def write_values(values, axis, position, mask_values=None):
+                if axis == len(vector_shape):
+                    if mask_values is not None and not mask_values:
+                        return
+                    buffer.store(position, values)
+                    address = buffer.address(position)
+                    if buffer.name is not None:
+                        self.accesses.append(
+                            (
+                                buffer.name,
+                                address,
+                                address + buffer.width,
+                                "write",
+                            )
+                        )
+                    return
+                for lane in range(vector_shape[axis]):
+                    write_values(
+                        values[lane],
+                        axis + 1,
+                        position + [indices[axis] + lane],
+                        None if mask_values is None else mask_values[lane],
+                    )
+
+            if vector_element != buffer.element:
+                raise SimError("transfer_write element type mismatch")
+            write_values(vector, 0, [], mask)
         elif name == "memref.copy":
             source, destination = (get(v) for v in operands[:2])
             if (
@@ -571,6 +811,16 @@ class Machine:
             ):
                 raise SimError("DMA exceeds backing storage")
             self.pending[channel] = (source, destination, src, dst, length)
+            self.dma_log.append(
+                (
+                    source.name,
+                    destination.name,
+                    src,
+                    dst,
+                    length,
+                    channel,
+                )
+            )
             for buffer, address, kind in (
                 (source, src, "read"),
                 (destination, dst, "write"),
@@ -592,6 +842,20 @@ class Machine:
                 raise SimError("tile read before DMA wait")
             source = get(operands[0])
             shape, _ = type_shape(types.split(" -> ")[-1])
+            direct = "bosc_ame.direct_ddr" in op.text
+            if (
+                direct
+                and name == "bosc_ame.tile.load_acc"
+                and source.name is not None
+            ):
+                for i in range(shape[0]):
+                    row_start = source.address([i, 0])
+                    row_bytes = shape[1] * source.width
+                    if row_start + row_bytes > len(source.data):
+                        raise SimError("direct tile load exceeds source")
+                    self.accesses.append(
+                        (source.name, row_start, row_start + row_bytes, "read")
+                    )
             self.result(
                 op,
                 [
@@ -622,9 +886,41 @@ class Machine:
             )
         elif name == "bosc_ame.tile.store_acc":
             matrix, destination = get(operands[0]), get(operands[1])
+            if self.pending:
+                raise SimError("tile store before DMA wait")
+            direct = "bosc_ame.direct_ddr" in op.text
+            if direct and destination.bank is not None:
+                raise SimError("direct tile store must target external DDR")
+            if direct and (
+                len(destination.shape) != 2
+                or len(matrix) > destination.shape[0]
+                or any(len(row) > destination.shape[1] for row in matrix)
+            ):
+                raise SimError("direct tile store exceeds destination shape")
             for i, row in enumerate(matrix):
-                for j, value in enumerate(row):
-                    destination.store([i, j], value)
+                if direct:
+                    if not row:
+                        continue
+                    row_start = destination.address([i, 0])
+                    row_bytes = len(row) * destination.width
+                    if row_start + row_bytes > len(destination.data):
+                        raise SimError("direct tile store exceeds destination")
+                    for j, value in enumerate(row):
+                        destination.store_address(
+                            row_start + j * destination.width, value
+                        )
+                    if destination.name is not None:
+                        self.accesses.append(
+                            (
+                                destination.name,
+                                row_start,
+                                row_start + row_bytes,
+                                "write",
+                            )
+                        )
+                else:
+                    for j, value in enumerate(row):
+                        destination.store([i, j], value)
             self.live_matrix = False
         elif name in ("func.call", "call"):
             if self.live_matrix:
