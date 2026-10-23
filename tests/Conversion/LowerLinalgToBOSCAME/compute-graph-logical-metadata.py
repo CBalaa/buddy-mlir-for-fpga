@@ -7,7 +7,7 @@ from pathlib import Path
 
 OPTIONS = (
     "--linalg-to-boscame=buffer-placement=true enable-spm-dma=true "
-    "enable-ame=true dma-abi=args_aligned64_nonalias store-policy=spm-dma"
+    "enable-ame=true dma-abi=args_aligned64_nonalias "
 )
 ARGUMENT = (
     "bosc_ame.logical_value_id = 10 : i64,\n"

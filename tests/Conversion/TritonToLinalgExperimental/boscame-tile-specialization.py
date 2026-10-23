@@ -33,7 +33,7 @@ def walk(ops):
 
 def check_graph(text, functions=1):
     ids = list(map(int, re.findall(r"bosc_ame.compute_id = (\d+)", text)))
-    assert len(ids) == len(set(ids)) == 16 * functions
+    assert len(ids) == len(set(ids)) == 12 * functions
     values = [
         int(value)
         for array in re.findall(
@@ -44,8 +44,8 @@ def check_graph(text, functions=1):
     assert len(values) == len(set(values))
 
     def branch_ids(function, tail):
-        begin, end = (7, 16) if tail else (0, 7)
-        return set(range(16 * function + begin, 16 * function + end))
+        begin, end = (5, 12) if tail else (0, 5)
+        return set(range(12 * function + begin, 12 * function + end))
 
     for line in text.splitlines():
         if match := re.search(r"bosc_ame.compute_id = (\d+)", line):
@@ -56,7 +56,7 @@ def check_graph(text, functions=1):
             )[1]
             if predecessors:
                 assert set(map(int, predecessors.split(","))) <= branch_ids(
-                    node // 16, node % 16 >= 7
+                    node // 12, node % 12 >= 5
                 )
     assert text.count("bosc_ame.compute_graph_complete = false") == functions
     assert text.count("bosc_ame.loop_carried_slots") == 2 * functions
@@ -137,9 +137,8 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     opt = sys.argv[2]
     resident = len(sys.argv) > 3 and sys.argv[3] == "true"
-    backend_pass = (
-        "--linalg-to-boscame=store-policy=spm-dma buffer-placement="
-        + ("true" if resident else "false")
+    backend_pass = "--linalg-to-boscame=buffer-placement=" + (
+        "true" if resident else "false"
     )
 
     def run(name, source, grid=None, passes=()):
@@ -170,7 +169,7 @@ def main():
     _, text = run("specialized", source, grid)
     assert text.count("scf.if") == 1 and "arith.minsi" not in text
     assert "bosc_ame.expected_ame_matmuls = 2" in text
-    assert "bosc_ame.compute_graph_node_count = 16" in text
+    assert "bosc_ame.compute_graph_node_count = 12" in text
     assert "arith.cmpi slt, %arg6, %c6_i32" in text
     full, tail = text.split("} else {")
     assert "bosc_ame.padding" not in full
@@ -180,8 +179,8 @@ def main():
     assert tail.count("valid_shape = array<i64: 4, 128>") == 3
     assert text.count("bosc_ame.lower_to_ame") == 2
     assert (
-        text.count('bosc_ame.compute_kind = "fill"') == 4
-    )  # 2 padding + 2 product initializations.
+        text.count('bosc_ame.compute_kind = "fill"') == 2
+    )  # Only tail A/C padding remains; there is no product initialization.
     check_graph(text)
 
     path, buffer = run("buffer", source, grid, BUFFERIZE)
@@ -190,8 +189,7 @@ def main():
             r"memref.alloc\(\).*?: (memref<[^>]+>)", branch
         )
         assert sorted(allocations) == sorted(
-            ["memref<32x128xi32>"] * 2
-            + ["memref<32x128xi8>", "memref<16384xi8>"]
+            ["memref<32x128xi32>"] + ["memref<32x128xi8>", "memref<16384xi8>"]
         ), allocations
         assert "strided<[1, 128]>" in branch
     assert "memref<23936x" not in buffer and "memref<97664x" not in buffer
@@ -215,7 +213,7 @@ def main():
     assert "memref.alloc(" not in text and "bufferization." not in text
     ids = re.findall(r"bosc_ame.compute_id = (\d+)", text)
     if resident:
-        assert len(ids) == len(set(ids)) == 16, ids
+        assert len(ids) == len(set(ids)) == 12, ids
         assert "bosc_ame.compute_graph_complete = false" in text
         assert "memref.alloca" not in text
     ops = list(walk(read_module(backend)))
@@ -227,17 +225,17 @@ def main():
                 for op in walk(branch)
                 if op_name(op.text) == "bosc_ame.spm.view"
             ]
-            assert len(windows) == 4, windows
+            assert len(windows) == 3, windows
             assert sorted(
                 (int(bank), int(offset))
                 for line in windows
                 for bank, offset in re.findall(
                     r"bank = (\d+) : i32.*offset = (\d+) : i64", line
                 )
-            ) == [(0, 0), (0, 16384), (1, 0), (1, 4096)]
+            ) == [(0, 0), (1, 0), (1, 4096)]
         else:
             assert (
-                sum(op_name(op.text) == "memref.alloca" for op in branch) == 4
+                sum(op_name(op.text) == "memref.alloca" for op in branch) == 3
             )
         for loop in (
             op for op in walk(branch) if op_name(op.text) == "scf.for"

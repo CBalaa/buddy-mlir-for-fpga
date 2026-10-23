@@ -1,7 +1,7 @@
 // RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
 
-// A static descriptor offset of one i32 is four bytes, so the direct AME
-// accumulator path must reject it before emitting an msce32.m instruction.
+// A static descriptor offset of one i32 is four bytes. Both direct AME
+// access and DMA staging reject this unaligned external endpoint.
 module {
   func.func @gemm(%a: memref<64x64xi8>,
                   %b: memref<64x64xi8, strided<[1, 64]>>,
@@ -14,4 +14,4 @@ module {
   }
 }
 
-// CHECK: BOSCAME direct-DDR operand requires a 64-byte-aligned descriptor offset
+// CHECK: BOSCAME DDR endpoint effective address cannot be proven 64 B aligned (descriptor offset in elements)

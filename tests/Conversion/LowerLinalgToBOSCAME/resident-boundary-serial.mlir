@@ -1,4 +1,4 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias store-policy=spm-dma' 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias ' 2>&1 | FileCheck %s
 
 // A preexisting explicit SPM endpoint must retain the original execution
 // scope check when its identity copy becomes a planned boundary transfer.

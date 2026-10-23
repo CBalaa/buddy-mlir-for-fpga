@@ -1,7 +1,7 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s
 
-// Direct stores are rectangular and unmasked.  A masked frontend event must
-// be diagnosed rather than silently converted into a full-tile overwrite.
+// A masked provenance event is ineligible for direct forwarding. The
+// existing full-copy IR remains available for ordinary DMA staging.
 module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   func.func @masked(%src: memref<16xf32>, %dst: memref<16xf32>) {
     memref.copy %src, %dst {
@@ -13,4 +13,5 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   }
 }
 
-// CHECK: direct-ddr store does not support masked stores
+// CHECK: bosc_ame.dma.start
+// CHECK-NOT: bosc_ame.direct_ddr

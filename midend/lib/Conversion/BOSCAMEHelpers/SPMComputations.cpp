@@ -154,17 +154,7 @@ bool touchesSpm(Operation *op) {
 }
 
 static bool isDirectExternalStore(linalg::GenericOp op) {
-  auto module = op->getParentOfType<ModuleOp>();
-  if (!module || !module->getAttrOfType<StringAttr>("bosc_ame.store_policy") ||
-      module->getAttrOfType<StringAttr>("bosc_ame.store_policy").getValue() !=
-          "direct-ddr")
-    return false;
-  auto provenance = op->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
-  auto kind = provenance ? provenance.getAs<StringAttr>("kind") : StringAttr();
-  auto destination =
-      provenance ? provenance.getAs<StringAttr>("destination") : StringAttr();
-  return kind && destination && kind.getValue() == "store" &&
-         destination.getValue() == "external_ddr";
+  return op->hasAttr("bosc_ame.direct_ddr_store");
 }
 
 /// A vector always follows the last physical axis. Outer dimensions are

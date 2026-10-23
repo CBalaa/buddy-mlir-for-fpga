@@ -68,6 +68,11 @@ the fact and plan reports, the DMA ABI and the supported accesses.
 
 ## AME datapath
 
+The signed integer `dot(A,B,C)` becomes a tensor `linalg.matmul` with C as
+its initial accumulator before bufferization. The storage planner proves that
+the complete private C snapshot and terminal writeback can forward to the
+external C window. No separate product buffer or RVV product addition remains.
+
 For this shape and layout the planner proves that A, B and previous C are
 valid direct-DDR AME operands: their physical strides and the aligned/nonalias
 DMA ABI match the required tile layouts. The generated image consumes them
@@ -118,6 +123,16 @@ NumPy INT32 oracle. The compiler regression suite additionally uses signed
 extrema, random nonzero C and i32 overflow; a separate K=256 test checks
 internal blocking, a nonzero dot initializer and rectangular masks. All integer
 comparisons are exact.
+
+The accumulator-fusion build passes `make`, `make check` and `make simcheck`:
+all 32 programs produce 131072 exact i32 outputs, with zero DMA transfers and
+zero SPM occupancy. The final graph has one matmul task. The 524288 output
+bytes have SHA256
+`38114b2648726d06482fc92bf727d2376ae93b763c1951c7df6cd16876e45cb2`.
+A final-ELF call-chain audit, including the encoder's temporary register save,
+finds a 656-byte peak within the unchanged 65536-byte E6 stack.
+See [the accumulator-fusion validation record](../../../docs/validation/boscame-accumulator-routing/README.md)
+for the recorded compiler and resource checks.
 
 ```bash
 make debug            # progress markers and the launcher's 16-row board oracle

@@ -135,6 +135,8 @@ struct BufferRequirement {
 
 enum class BufferAccessEffect { Read, Write, Allocate, Free, Unknown };
 
+enum class BufferAccessRoute { Unassessed, DirectDdr, ExistingSpm, Staging };
+
 struct RootStorageAccess {
   mlir::Operation *operation = nullptr;
   unsigned position = 0;
@@ -230,6 +232,14 @@ struct BufferAccessFact {
   std::optional<int64_t> logicalFootprintBytes;
   std::optional<int64_t> physicalSpanBytes;
   std::optional<size_t> transferIndex;
+  /// The selected route belongs to this access, independently of the buffer's
+  /// logical contents and the physical placement of other operands.
+  BufferAccessRoute route = BufferAccessRoute::Unassessed;
+  std::string routeReason;
+  std::optional<uint64_t> routeBytes;
+  int64_t routeBank = -1;
+  int64_t routeOffset = 0;
+  int64_t routeCapacityBytes = 0;
 };
 
 /// A deduplicated descriptor observed by a post-planning memory effect. A

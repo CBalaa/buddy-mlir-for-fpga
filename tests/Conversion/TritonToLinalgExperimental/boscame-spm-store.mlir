@@ -1,9 +1,9 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='store-policy=spm-dma' --promote-buffers-to-stack | FileCheck %s
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='store-policy=spm-dma' --promote-buffers-to-stack --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack | FileCheck %s
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
 // CHECK-LABEL: func.func @spm_store
 // CHECK-NOT: memref.alloc
 // CHECK: vector.store {{.*}} : memref<16xf32, #bosc_ame.spm<0>>, vector<16xf32>
-// CHECK: bosc_ame.dma.start {{.*}} : (memref<16xf32, strided<[1], offset: ?>, #bosc_ame.spm<1>>, memref<16xf32
+// CHECK: bosc_ame.dma.start {{.*}} : (memref<16xf32, strided<[1], offset: ?>, #bosc_ame.spm<0>>, memref<16xf32
 // CHECK: bosc_ame.dma.wait
 // CHECK-NOT: memref.copy
 // CHECK-NOT: bufferization.

@@ -119,6 +119,167 @@ static bool hasIdentityParallelMaps(linalg::GenericOp op) {
          llvm::all_of(maps, [](AffineMap map) { return map.isIdentity(); });
 }
 
+static bool hasIdentityParallelMaps(linalg::GenericOp op, unsigned rank) {
+  auto maps = op.getIndexingMapsArray();
+  auto iterators = op.getIteratorTypesArray();
+  return iterators.size() == rank && maps.size() == op->getNumOperands() &&
+         llvm::all_of(iterators,
+                      [](utils::IteratorType iterator) {
+                        return iterator == utils::IteratorType::parallel;
+                      }) &&
+         llvm::all_of(maps, [rank](AffineMap map) {
+           return map.isIdentity() && map.getNumDims() == rank &&
+                  map.getNumResults() == rank;
+         });
+}
+
+static bool matchTensorI32Add(linalg::GenericOp add, Value product,
+                              Value &accumulator) {
+  if (!add.hasPureTensorSemantics() || add.getInputs().size() != 2 ||
+      add.getOutputs().size() != 1 || add.getResults().size() != 1 ||
+      !hasIdentityParallelMaps(add, 2))
+    return false;
+  if (add.getInputs()[0] == product)
+    accumulator = add.getInputs()[1];
+  else if (add.getInputs()[1] == product)
+    accumulator = add.getInputs()[0];
+  else
+    return false;
+  auto productType = dyn_cast<RankedTensorType>(product.getType());
+  auto accumulatorType = dyn_cast<RankedTensorType>(accumulator.getType());
+  if (!productType || !accumulatorType || productType.getRank() != 2 ||
+      accumulatorType != productType ||
+      add.getResult(0).getType() != productType ||
+      !productType.getElementType().isInteger(32))
+    return false;
+  Block &body = add.getRegion().front();
+  if (body.getNumArguments() != 3 || body.empty() ||
+      !isa<linalg::YieldOp>(body.back()) ||
+      std::distance(body.begin(), body.end()) != 2)
+    return false;
+  auto addOp = dyn_cast<arith::AddIOp>(&body.front());
+  auto yield = cast<linalg::YieldOp>(body.back());
+  if (!addOp || addOp.getOverflowFlags() != arith::IntegerOverflowFlags::none ||
+      yield.getNumOperands() != 1 || yield.getOperand(0) != addOp.getResult())
+    return false;
+  bool direct = addOp.getLhs() == body.getArgument(0) &&
+                addOp.getRhs() == body.getArgument(1);
+  bool swapped = addOp.getLhs() == body.getArgument(1) &&
+                 addOp.getRhs() == body.getArgument(0);
+  return direct || swapped;
+}
+
+static bool matchTensorI32Add(arith::AddIOp add, Value product,
+                              Value &accumulator) {
+  if (add.getOverflowFlags() != arith::IntegerOverflowFlags::none ||
+      (add.getLhs() != product && add.getRhs() != product))
+    return false;
+  accumulator = add.getLhs() == product ? add.getRhs() : add.getLhs();
+  auto productType = dyn_cast<RankedTensorType>(product.getType());
+  auto accumulatorType = dyn_cast<RankedTensorType>(accumulator.getType());
+  return productType && accumulatorType && productType.getRank() == 2 &&
+         accumulatorType == productType &&
+         productType.getElementType().isInteger(32);
+}
+
+/// Fuse the tensor spelling of `P = matmul(A, B, zero); C = C + P` before
+/// structured-to-memref and bufferization.  The proof is intentionally local:
+/// both operations stay in one block, P has exactly one consumer, and no
+/// effectful operation is crossed.  This preserves branch/loop boundaries and
+/// leaves ambiguous or non-private products for the ordinary lowering.
+static LogicalResult fuseBOSCAMETensorAccumulators(ModuleOp module) {
+  SmallVector<linalg::MatmulOp> candidates;
+  module.walk([&](linalg::MatmulOp matmul) {
+    if (matmul->hasAttr("bosc_ame.lower_to_ame") &&
+        matmul.hasPureTensorSemantics() && matmul.getResults().size() == 1)
+      candidates.push_back(matmul);
+  });
+
+  for (linalg::MatmulOp matmul : candidates) {
+    if (matmul.getInputs().size() != 2 || matmul.getOutputs().size() != 1)
+      continue;
+    auto outputType = dyn_cast<RankedTensorType>(matmul.getResult(0).getType());
+    if (!outputType || outputType.getRank() != 2 ||
+        !outputType.getElementType().isInteger(32) ||
+        !cast<RankedTensorType>(matmul.getInputs()[0].getType())
+             .getElementType()
+             .isInteger(8) ||
+        !cast<RankedTensorType>(matmul.getInputs()[1].getType())
+             .getElementType()
+             .isInteger(8) ||
+        matmul.getCast() != linalg::TypeFn::cast_signed)
+      continue;
+    Value product = matmul.getResult(0);
+    if (!product.hasOneUse())
+      continue;
+
+    Operation *consumer = *product.getUsers().begin();
+    Value accumulator;
+    linalg::GenericOp genericAdd;
+    arith::AddIOp scalarAdd;
+    if (auto candidate = dyn_cast<linalg::GenericOp>(consumer)) {
+      if (!matchTensorI32Add(candidate, product, accumulator))
+        continue;
+      genericAdd = candidate;
+    } else if (auto candidate = dyn_cast<arith::AddIOp>(consumer)) {
+      if (!matchTensorI32Add(candidate, product, accumulator))
+        continue;
+      scalarAdd = candidate;
+    } else {
+      continue;
+    }
+
+    if (!accumulator || accumulator == product ||
+        accumulator.getType() != product.getType() ||
+        matmul->getBlock() != consumer->getBlock() ||
+        !matmul->isBeforeInBlock(consumer))
+      continue;
+    Value zeroInit = matmul.getOutputs().front();
+    if (!isSplatZero(zeroInit))
+      continue;
+    auto zeroFill = zeroInit.getDefiningOp<linalg::FillOp>();
+    // Save the producer before erasing the fill: zeroInit is then invalid.
+    auto empty =
+        zeroFill
+            ? zeroFill.getOutputs().front().getDefiningOp<tensor::EmptyOp>()
+            : tensor::EmptyOp();
+
+    bool harmless = true;
+    for (Operation *between = matmul->getNextNode(); between != consumer;
+         between = between ? between->getNextNode() : nullptr) {
+      if (!between || !isMemoryEffectFree(between)) {
+        harmless = false;
+        break;
+      }
+    }
+    if (!harmless)
+      continue;
+
+    // The matmul already has the right result type.  Retarget its init to C,
+    // and keep it at the add's position so a locally defined C dominates it.
+    // Other uses of the old C tensor remain SSA uses; bufferization must
+    // preserve them when deciding whether its storage can be updated in place.
+    matmul->moveBefore(consumer);
+    matmul.getOutputsMutable()[0].set(accumulator);
+    // The dot's old init was zero. Its accumulator source metadata must be
+    // rebuilt from C by graph annotation, together with task/value IDs.
+    for (StringRef attr : {"bosc_ame.accumulator_origin_id",
+                           "bosc_ame.accumulator_source_load_origin_ids",
+                           "bosc_ame.accumulator_source_lineage_complete"})
+      matmul->removeAttr(attr);
+    if (genericAdd)
+      genericAdd.getResult(0).replaceAllUsesWith(matmul.getResult(0));
+    else
+      scalarAdd.getResult().replaceAllUsesWith(matmul.getResult(0));
+    consumer->erase();
+    if (zeroFill && zeroFill->use_empty())
+      zeroFill.erase();
+    if (empty && empty->use_empty())
+      empty.erase();
+  }
+  return success();
+}
+
 static linalg::GenericOp getZeroBasedRange(Value value) {
   auto range = value.getDefiningOp<linalg::GenericOp>();
   if (!range || !range.getInputs().empty() || range.getOutputs().size() != 1 ||
@@ -2117,6 +2278,40 @@ static void annotateComputeGraph(ModuleOp module) {
 
     for (ComputeNodeFacts &node : nodes) {
       Operation *op = node.operation;
+      if (auto matmul = dyn_cast<linalg::MatmulOp>(op);
+          matmul && op->hasAttr("bosc_ame.lower_to_ame") &&
+          !op->hasAttr("bosc_ame.accumulator_source_load_origin_ids")) {
+        // Fusion replaces a zero init with an existing tensor. Resolve its
+        // actual sources after the loop/branch lineage fixed point, using the
+        // snapshot captured at each to_tensor rather than later buffer writes.
+        SmallVector<int64_t> producers, origins;
+        collectProducers(matmul.getOutputs().front(), op, lineageWriters,
+                         lineageSnapshots, producers, AnalysisMode::Lineage);
+        for (int64_t producer : producers)
+          if (auto index = nodeIndexById.find(producer);
+              index != nodeIndexById.end()) {
+            const auto &sourceOrigins = nodes[index->second].sourceLoadOrigins;
+            origins.append(sourceOrigins.begin(), sourceOrigins.end());
+          }
+        normalizeIds(origins);
+        op->setAttr("bosc_ame.accumulator_source_load_origin_ids",
+                    DenseI64ArrayAttr::get(context, origins));
+        op->setAttr("bosc_ame.accumulator_source_lineage_complete",
+                    BoolAttr::get(context, graphComplete));
+        // Only a direct snapshot of a single load is an origin forwarding
+        // proof. A computed tensor can have the same one-element source set.
+        if (producers.size() == 1)
+          if (auto index = nodeIndexById.find(producers.front());
+              index != nodeIndexById.end())
+            if (auto memory = nodes[index->second]
+                                  .operation->getAttrOfType<DictionaryAttr>(
+                                      "bosc_ame.memory")) {
+              auto kind = memory.getAs<StringAttr>("kind");
+              auto origin = memory.getAs<IntegerAttr>("origin_id");
+              if (kind && kind.getValue() == "load" && origin)
+                op->setAttr("bosc_ame.accumulator_origin_id", origin);
+            }
+      }
       op->setAttr("bosc_ame.compute_id",
                   IntegerAttr::get(IntegerType::get(context, 64), node.id));
       op->setAttr("bosc_ame.compute_kind",
@@ -3017,22 +3212,6 @@ public:
       }
       moduleOp->setAttr("bosc_ame.target",
                         StringAttr::get(&getContext(), target));
-      // External Triton stores use direct DDR writeback by default. Preserve a
-      // valid module policy so an explicitly authored compatibility contract
-      // survives the frontend and can be inherited by the standalone backend.
-      if (Attribute attr = moduleOp->getAttr("bosc_ame.store_policy")) {
-        auto value = dyn_cast<StringAttr>(attr);
-        if (!value || (value.getValue() != "direct-ddr" &&
-                       value.getValue() != "spm-dma")) {
-          moduleOp.emitError("invalid BOSCAME store policy; expected "
-                             "direct-ddr or spm-dma");
-          signalPassFailure();
-          return;
-        }
-      } else {
-        moduleOp->setAttr("bosc_ame.store_policy",
-                          StringAttr::get(&getContext(), "direct-ddr"));
-      }
       moduleOp->setAttr("bosc_ame.cpu_ddr_policy",
                         UnitAttr::get(&getContext()));
       // The logical placement mode is consumed by the standalone BOSCAME
@@ -3109,6 +3288,13 @@ public:
     }
     if (config.enableBOSCAME) {
       if (failed(specializeBOSCAMETiles(moduleOp))) {
+        signalPassFailure();
+        return;
+      }
+      // Specialization clones full/tail branches before tensor use-def
+      // fusion. No external memory event moves across a branch or loop, and
+      // graph IDs and loop dependencies are generated only after cleanup.
+      if (failed(fuseBOSCAMETensorAccumulators(moduleOp))) {
         signalPassFailure();
         return;
       }

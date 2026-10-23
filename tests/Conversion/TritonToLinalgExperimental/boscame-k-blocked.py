@@ -37,7 +37,7 @@ def main():
             [
                 opt,
                 str(input_path),
-                *experimental_pipeline(store_policy="spm-dma"),
+                *experimental_pipeline(),
                 "-o",
                 str(output),
             ],
@@ -55,10 +55,17 @@ def main():
         assert "memref.memory_space_cast" not in text
         assert "bufferization.to_tensor" not in text
         assert "bufferization.to_buffer" not in text
-        assert any(
-            "vector.load " in line and "#bosc_ame.spm<" in line
+        operand_loads = [
+            line
             for line in text.splitlines()
-        ), "AME preparation must consume the DMA-populated SPM buffers"
+            if "bosc_ame.tile.load_a " in line
+            or "bosc_ame.tile.load_b " in line
+        ]
+        assert len(operand_loads) == 8
+        assert all(
+            "bosc_ame.direct_ddr" in line or "#bosc_ame.spm<" in line
+            for line in operand_loads
+        ), "AME operands must use a proven direct route or an SPM window"
         subprocess.run(
             [
                 opt,
@@ -131,7 +138,7 @@ def main():
     dynamic = work / "dynamic-mask.ttir"
     dynamic.write_text(masked)
     rejected = subprocess.run(
-        [opt, str(dynamic), *experimental_pipeline(store_policy="spm-dma")],
+        [opt, str(dynamic), *experimental_pipeline()],
         capture_output=True,
         text=True,
     )

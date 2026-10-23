@@ -52,7 +52,7 @@ def main():
             [
                 opt,
                 input_path,
-                *experimental_pipeline(store_policy="spm-dma"),
+                *experimental_pipeline(),
                 "-o",
                 module,
             ]
@@ -69,11 +69,11 @@ def main():
         )
         text = llvm.read_text()
         assert not re.search(r"@(?:malloc|aligned_alloc|free)\b", text)
-        assert (
-            text.count("call i64 @bosc_ame_dma_start")
-            == text.count("call void @bosc_ame_dma_wait")
-            > 0
-        )
+        dma_starts = text.count("call i64 @bosc_ame_dma_start")
+        assert dma_starts == text.count("call void @bosc_ame_dma_wait")
+        # GEMM's complete A/B/C ranges may all use proven direct routes;
+        # masked LayerNorm still needs its four external DMA boundaries.
+        assert dma_starts == (0 if ame else 4)
         run(
             [
                 llc,
@@ -102,12 +102,20 @@ def main():
             "NR FPGA ISA does not permit lane-index generation"
         )
         checked = run(
-            [sys.executable, tools / "restrict_fpga_assembly.py"], encoded
+            [
+                sys.executable,
+                tools / "restrict_fpga_assembly.py",
+                "--expand-f32-sub",
+            ],
+            encoded,
         )
         (work / (name + ".nr.s")).write_text(checked)
-        assert re.search(r"\bvle(?:8|32)\.v\b", checked) and re.search(
-            r"\bvse(?:8|32)\.v\b", checked
-        )
+        if ame:
+            assert not re.search(r"\bvadd\.vv\b", checked)
+        else:
+            assert re.search(r"\bvle(?:8|32)\.v\b", checked) and re.search(
+                r"\bvse(?:8|32)\.v\b", checked
+            )
         assert not re.search(
             r"\bvlenb\b|\b(?:vs[1248]r|vl[1248]re\d+)\.v\b", checked
         )

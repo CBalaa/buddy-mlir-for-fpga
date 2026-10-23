@@ -56,15 +56,9 @@ def run_pass(buddy_opt, fixture, output, dma_abi=True, extra=None):
     return result.returncode, result.stderr
 
 
-def experimental_pipeline(store_policy=None):
-    """The public frontend, explicit bufferization and standalone backend.
-
-    ``store_policy`` is optional so callers can exercise the explicit
-    compatibility path without changing the frontend's direct-DDR default.
-    """
+def experimental_pipeline():
+    """The public frontend, explicit bufferization and automatic backend planner."""
     backend = "--linalg-to-boscame"
-    if store_policy is not None:
-        backend += f"=store-policy={store_policy}"
     return [
         "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
         "--empty-tensor-to-alloc-tensor",

@@ -1,4 +1,4 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr' | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s
 
 // The input and direct-DDR output share a root but occupy adjacent 64-byte
 // intervals, so the direct store is legal.

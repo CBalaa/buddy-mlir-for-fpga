@@ -1,16 +1,12 @@
-// The independent buffer-form pass records the external-store policy in the
-// module contract even when the module has no Linalg consumers yet.
-// RUN: buddy-opt %s --linalg-to-boscame | FileCheck %s --check-prefix=DEFAULT
-// RUN: not buddy-opt %s --linalg-to-boscame='store-policy=unknown' 2>&1 | FileCheck %s --check-prefix=INVALID
-// RUN: not buddy-opt %s --linalg-to-boscame='store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=SPM-ABI
-// RUN: buddy-opt %s --linalg-to-boscame='store-policy=spm-dma enable-spm-dma=true dma-abi=args_aligned64_nonalias' | FileCheck %s --check-prefix=SPM
-// RUN: buddy-opt %s --linalg-to-boscame-store=spm-dma --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' | FileCheck %s --check-prefix=ALIAS
+// Legacy modules carrying the removed global policy receive a migration
+// diagnostic before planning. Route selection is now automatic per access.
+// RUN: not buddy-opt %s --linalg-to-boscame 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=OPTION
+// RUN: not buddy-opt %s --linalg-to-boscame-store=direct-ddr 2>&1 | FileCheck %s --check-prefix=ALIAS
 
-module {
+module attributes {bosc_ame.store_policy = "direct-ddr"} {
 }
 
-// DEFAULT: bosc_ame.store_policy = "direct-ddr"
-// INVALID: invalid store-policy: unknown
-// SPM-ABI: store-policy=spm-dma requires enable-spm-dma=true
-// SPM: bosc_ame.store_policy = "spm-dma"
-// ALIAS: bosc_ame.store_policy = "spm-dma"
+// CHECK: bosc_ame.store_policy is obsolete; remove it and rerun the automatic BOSCAME planner
+// OPTION: no such option store-policy
+// ALIAS: Unknown command line argument '--linalg-to-boscame-store=direct-ddr'

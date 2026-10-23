@@ -1,10 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias store-policy=spm-dma plan-report=true' -o %t 2>%t.plan
+// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
 // RUN: FileCheck %s < %t.plan
 
-// The unrelated root needs an entire bank. AME's selected staged A/B/C need
-// 64 KiB + 64 KiB + 16 KiB, which fits the original two-bank workspace but
-// cannot fit beside the resident root. AME roots remain outside the new
-// placement model, while their staging still participates in its budget.
+// The unrelated root occupies an entire bank. The external C has a proven
+// direct route, so only A/B need staging and their two 64 KiB windows fit in
+// the other bank. Both selected routes participate in the placement budget.
 module {
   func.func @ame_staging_is_in_the_budget(
       %a: memref<64x1024xi8>,
@@ -21,6 +20,8 @@ module {
   }
 }
 
-// CHECK: buffer-placement: resident=0 ddr=1 applied=false
-// CHECK: root[0]: kind=StagedFallback bytes=131072{{.*}}reason=missing-staging-capacity applied=false
-// CHECK-SAME: detail=resident + explicit windows leave insufficient per-op staging capacity for linalg.matmul
+// CHECK: buffer-placement: resident=1 ddr=0 applied=true
+// CHECK: root[0]: kind=SpmResident bytes=131072 bank=0 offset=0{{.*}}reason=group-legality-and-capacity applied=true
+// CHECK: transfer[0]:{{.*}}role=input-a{{.*}}bank=1 offset=0 capacity=65536
+// CHECK: transfer[1]:{{.*}}role=input-b{{.*}}bank=1 offset=65536 capacity=65536
+// CHECK: direct-C=direct-ddr (proven)

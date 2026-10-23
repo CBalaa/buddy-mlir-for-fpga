@@ -1,4 +1,4 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true store-policy=spm-dma dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t
 // RUN: FileCheck %s < %t
 // RUN: FileCheck %s --check-prefix=COUNT < %t
 // RUN: buddy-opt %t --lower-bosc-ame | FileCheck %s --check-prefix=LOWERED
@@ -72,7 +72,7 @@ module {
 // CHECK: return
 
 // COUNT-LABEL: func.func @pitched_b
-// COUNT-COUNT-35: bosc_ame.dma.start
+// COUNT-COUNT-33: bosc_ame.dma.start
 // COUNT-NOT: bosc_ame.dma.start
 // COUNT: return
 // COUNT-LABEL: func.func @static_offset

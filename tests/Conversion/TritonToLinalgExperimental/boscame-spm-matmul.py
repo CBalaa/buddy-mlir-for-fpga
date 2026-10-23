@@ -99,7 +99,7 @@ def floating_source(row_major_b):
 
 
 def check_floating(work, opt, rng):
-    mode = experimental_pipeline("spm-dma")
+    mode = experimental_pipeline()
     for row_major_b in (True, False):
         name = "floating-row-b" if row_major_b else "floating-column-b"
         source = work / (name + ".ttir")
@@ -238,7 +238,7 @@ def main():
             [
                 opt,
                 str(original),
-                *experimental_pipeline("spm-dma"),
+                *experimental_pipeline(),
                 "-o",
                 str(lowered),
             ],
@@ -260,9 +260,15 @@ def main():
             if "memref.load " in line or "memref.store " in line
         )
         if name == "direct":
-            # Only the producer's A/B windows and accumulator workspace remain.
-            assert text.count("bosc_ame.spm.view") == 3
-            assert text.count("bosc_ame.dma.start") == 4
+            # Keep the producer's A/B windows; legal external C is direct.
+            assert text.count("bosc_ame.spm.view") == 2
+            assert text.count("bosc_ame.dma.start") == 2
+            assert all(
+                "bosc_ame.direct_ddr" in line
+                for line in text.splitlines()
+                if "bosc_ame.tile.load_acc " in line
+                or "bosc_ame.tile.store_acc " in line
+            )
         subprocess.run(
             [
                 opt,
@@ -336,7 +342,7 @@ def main():
         [
             opt,
             str(negative),
-            *experimental_pipeline("spm-dma"),
+            *experimental_pipeline(),
         ],
         capture_output=True,
         text=True,
@@ -346,7 +352,7 @@ def main():
     assert "memref<480xi8" in result.stdout
     negative.write_text(source.replace("memref<480xi8", "memref<448xi8"))
     result = subprocess.run(
-        [opt, str(negative), *experimental_pipeline("spm-dma")],
+        [opt, str(negative), *experimental_pipeline()],
         capture_output=True,
         text=True,
     )
@@ -373,7 +379,7 @@ def main():
         [
             opt,
             str(negative),
-            *experimental_pipeline("spm-dma"),
+            *experimental_pipeline(),
         ],
         capture_output=True,
         text=True,

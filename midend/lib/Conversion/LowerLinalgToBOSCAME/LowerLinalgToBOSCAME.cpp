@@ -59,14 +59,6 @@ using namespace ::buddy::boscame;
 
 namespace {
 
-// Compatibility spelling for scripts that select the external DDR store
-// policy independently of the other backend options.  The regular pass
-// spelling remains `--linalg-to-boscame='store-policy=...'`.
-static llvm::cl::opt<std::string> linalgToBOSCAMEStoreOverride(
-    "linalg-to-boscame-store",
-    llvm::cl::desc("external DDR store policy: direct-ddr | spm-dma"),
-    llvm::cl::init(""));
-
 enum class ElementwiseKind {
   Add,
   Sub,
@@ -1594,8 +1586,8 @@ static void printBOSCAMEPlanReport(ModuleOp module,
          << "  target="
          << (config.target.empty() ? "<unspecified>" : config.target)
          << " tile=[" << config.bm << ',' << config.bn << ',' << config.bk
-         << "] store-policy=" << config.storePolicy
-         << " bank-capacity=" << workspace.bankCapacity << " bytes\n";
+         << "] routing=automatic bank-capacity=" << workspace.bankCapacity
+         << " bytes\n";
 
   const TargetInfo &target = workspace.target;
   auto printAmeRole = [&](StringRef name, const AmeRoleCapability &role) {
@@ -1992,6 +1984,30 @@ static void printBOSCAMEPlanReport(ModuleOp module,
            << (access.transferIndex ? "planned-legal" : "unassessed");
     if (access.logicalValueId)
       stream << " logical-value=" << *access.logicalValueId;
+    auto routeName = [](BufferAccessRoute route) -> StringRef {
+      switch (route) {
+      case BufferAccessRoute::Unassessed:
+        return "unassessed";
+      case BufferAccessRoute::DirectDdr:
+        return "direct-ddr";
+      case BufferAccessRoute::ExistingSpm:
+        return "existing-spm";
+      case BufferAccessRoute::Staging:
+        return "staging";
+      }
+      llvm_unreachable("unknown access route");
+    };
+    stream << " route=" << routeName(access.route);
+    if (!access.routeReason.empty())
+      stream << " reason=" << access.routeReason;
+    stream << " route-bytes=";
+    if (access.routeBytes)
+      stream << *access.routeBytes;
+    else
+      stream << "<unknown>";
+    stream << " route-bank=" << access.routeBank
+           << " route-offset=" << access.routeOffset
+           << " route-capacity=" << access.routeCapacityBytes;
     stream << '\n';
   }
   stream << "  buffer-inventory: count=" << workspace.bufferInventory.size()
@@ -2303,8 +2319,10 @@ static void printBOSCAMEPlanReport(ModuleOp module,
       return;
 
     StringRef decision;
-    if (config.storePolicy == "direct-ddr") {
-      decision = "direct-ddr (provenance)";
+    if (operation->hasAttr("bosc_ame.direct_ddr") ||
+        operation->hasAttr("bosc_ame.direct_ddr_store") ||
+        operation->hasAttr("bosc_ame.direct_ddr_c")) {
+      decision = "direct-ddr (proven)";
     } else if (auto linalg = dyn_cast<linalg::LinalgOp>(operation)) {
       for (Value output : linalg.getDpsInits())
         if (findPlannedTransfer(workspace, output)) {
@@ -2367,10 +2385,6 @@ public:
   Option<bool> enableAME{*this, "enable-ame",
                          llvm::cl::desc("lower marked i8 matmuls to AME"),
                          llvm::cl::init(false)};
-  Option<std::string> storePolicy{
-      *this, "store-policy",
-      llvm::cl::desc("external DDR store policy: direct-ddr | spm-dma"),
-      llvm::cl::init("direct-ddr")};
   Option<std::string> dmaAbi{*this, "dma-abi",
                              llvm::cl::desc("DMA caller contract"),
                              llvm::cl::init("")};
@@ -2423,26 +2437,20 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
     return;
   }
 
-  bool storePolicyOverride = !linalgToBOSCAMEStoreOverride.empty();
-  if (storePolicyOverride) {
-    if (storePolicy.getNumOccurrences() &&
-        storePolicy != linalgToBOSCAMEStoreOverride) {
-      module.emitError("conflicting BOSCAME store policy command-line "
-                       "options");
-      signalPassFailure();
-      return;
-    }
-    storePolicy = linalgToBOSCAMEStoreOverride;
+  if (module->hasAttr("bosc_ame.store_policy")) {
+    module.emitError("bosc_ame.store_policy is obsolete; remove it and "
+                     "rerun the automatic BOSCAME planner");
+    signalPassFailure();
+    return;
   }
 
   // The planner is opt-in.  Keeping this boundary explicit preserves the
   // historical --lower-linalg-to-boscame output for existing users while
   // making the new buffer-form contract fail early and diagnostically.
   if (Independent || enableSpmDma || enableAME || bufferPlacement ||
-      storePolicy.getNumOccurrences() || storePolicyOverride ||
       !target.empty() || module->hasAttr("bosc_ame.enable_spm_dma") ||
       module->hasAttr("bosc_ame.enable_ame") ||
-      module->hasAttr("bosc_ame.store_policy")) {
+      module->hasAttr("bosc_ame.target")) {
     using namespace ::buddy::boscame::spmdma;
     auto inheritBool = [&](StringRef name, auto &option) -> LogicalResult {
       if (Attribute attr = module->getAttr(name)) {
@@ -2468,27 +2476,8 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
       }
       return success();
     };
-    auto inheritStorePolicy = [&]() -> LogicalResult {
-      Attribute attr = module->getAttr("bosc_ame.store_policy");
-      if (!attr)
-        return success();
-      auto value = dyn_cast<StringAttr>(attr);
-      if (!value ||
-          (value.getValue() != "direct-ddr" && value.getValue() != "spm-dma"))
-        return module.emitError()
-               << "invalid or conflicting BOSCAME module configuration: "
-               << "bosc_ame.store_policy (expected direct-ddr or spm-dma)";
-      // The command line is an explicit override.  Frontends record their
-      // default in the module so a standalone backend invocation can inherit
-      // it, while a compatibility/debug invocation can deliberately select
-      // spm-dma without being rejected as a conflict.
-      if (!storePolicy.getNumOccurrences() && !storePolicyOverride)
-        storePolicy = value.getValue().str();
-      return success();
-    };
     if (failed(inheritBool("bosc_ame.enable_spm_dma", enableSpmDma)) ||
         failed(inheritBool("bosc_ame.enable_ame", enableAME)) ||
-        failed(inheritStorePolicy()) ||
         failed(inheritTile("bosc_ame.bm", bm)) ||
         failed(inheritTile("bosc_ame.bn", bn)) ||
         failed(inheritTile("bosc_ame.bk", bk))) {
@@ -2532,17 +2521,6 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
       signalPassFailure();
       return;
     }
-    if (storePolicy != "direct-ddr" && storePolicy != "spm-dma") {
-      module.emitError() << "invalid store-policy: " << storePolicy
-                         << "; expected direct-ddr or spm-dma";
-      signalPassFailure();
-      return;
-    }
-    if (storePolicy == "spm-dma" && !enableSpmDma) {
-      module.emitError("store-policy=spm-dma requires enable-spm-dma=true");
-      signalPassFailure();
-      return;
-    }
     if (Attribute attr = module->getAttr("bosc_ame.target")) {
       auto contract = dyn_cast<StringAttr>(attr);
       if (!contract || contract.getValue() != "nr-fpga" ||
@@ -2557,8 +2535,14 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
     ::buddy::boscame::LinalgToBOSCAMEConfig config;
     config.enableSpmDma = enableSpmDma;
     config.enableAME = enableAME;
-    config.bufferPlacement = bufferPlacement;
-    config.storePolicy = storePolicy;
+    // Logical frontend buffers are compiler-owned snapshots. Place them
+    // automatically; retain the existing option as a physical-placement
+    // debugging override without changing tensor fusion.
+    auto placement = module->getAttrOfType<StringAttr>("bosc_ame.placement");
+    config.bufferPlacement =
+        bufferPlacement.getNumOccurrences()
+            ? bool(bufferPlacement)
+            : enableSpmDma && placement && placement.getValue() == "logical";
     config.dmaAbi = dmaAbi;
     config.target = target;
     config.bm = bm;
@@ -2578,9 +2562,7 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
       }
     }
     if (failed(verifyStandaloneSurface(module, false)) ||
-        ((config.enableSpmDma || config.storePolicy == "direct-ddr") &&
-         failed(::buddy::boscame::normalizeBOSCAMEMemoryCopies(
-             module, config.storePolicy == "direct-ddr")))) {
+        failed(::buddy::boscame::normalizeBOSCAMEMemoryCopies(module, true))) {
       signalPassFailure();
       return;
     }
@@ -2591,7 +2573,10 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
     }
     if (planReport)
       printBOSCAMEPlanReport(module, config, *workspace);
+    auto graphVersion =
+        module->getAttrOfType<IntegerAttr>("bosc_ame.compute_graph_version");
     bool preserveGraph =
+        (graphVersion && graphVersion.getInt() == 1) ||
         llvm::any_of(workspace->bufferPlacements,
                      [](const BufferPlacementDecision &decision) {
                        return decision.applied;

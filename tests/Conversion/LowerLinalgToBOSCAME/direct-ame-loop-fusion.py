@@ -79,7 +79,7 @@ def lower(
 def check_fusion(result, expected):
     assert result.returncode == 0, result.stderr
     direct_accumulator_ops = re.findall(
-        r"bosc_ame\.tile\.(?:load|store)_acc[^\n]*bosc_ame\.direct_ddr",
+        r"bosc_ame\.tile\.(?:load|store)_acc[^\n]*bosc_ame\.direct_ddr\b",
         result.stdout,
     )
     assert len(direct_accumulator_ops) == (2 if expected else 0), result.stdout

@@ -1,10 +1,10 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/aligned-mask.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' | FileCheck %s --check-prefix=ALIGNED
-// RUN: buddy-opt %t/reversed-clamp.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' | FileCheck %s --check-prefix=ALIGNED
-// RUN: buddy-opt %t/selected-clamp.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' | FileCheck %s --check-prefix=ALIGNED
-// RUN: not buddy-opt %t/unaligned-mask.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=UNALIGNED
-// RUN: not buddy-opt %t/wrong-upper-bound.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=BAD-BOUND
-// RUN: not buddy-opt %t/selected-wrong-upper-bound.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=SELECT-BAD-BOUND
+// RUN: buddy-opt %t/aligned-mask.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=ALIGNED
+// RUN: buddy-opt %t/reversed-clamp.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=ALIGNED
+// RUN: buddy-opt %t/selected-clamp.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=ALIGNED
+// RUN: not buddy-opt %t/unaligned-mask.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=UNALIGNED
+// RUN: not buddy-opt %t/wrong-upper-bound.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=BAD-BOUND
+// RUN: not buddy-opt %t/selected-wrong-upper-bound.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=SELECT-BAD-BOUND
 
 // ALIGNED: bosc_ame.dma.start
 // UNALIGNED: dynamic BOSCAME prefix extent must be clamped to the static maximum and provably divisible by a DMA packet

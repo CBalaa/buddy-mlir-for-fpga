@@ -74,7 +74,7 @@ def main():
             input_path = specialize_full_gemm(
                 input_path, work / "gemm.static.ttir"
             )
-        pipeline = experimental_pipeline(store_policy="spm-dma")
+        pipeline = experimental_pipeline()
         if name == "tiled-gemm":
             contract = run(
                 [

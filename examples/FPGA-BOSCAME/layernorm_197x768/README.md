@@ -48,7 +48,7 @@ buddy-opt build/layernorm_197x768/kernel.frontend.mlir \
   --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" \
   --canonicalize --cse -o build/layernorm_197x768/kernel.bufferized.mlir
 buddy-opt build/layernorm_197x768/kernel.bufferized.mlir \
-  --linalg-to-boscame="store-policy=spm-dma buffer-placement=true" \
+  --linalg-to-boscame \
   --promote-buffers-to-stack -o build/layernorm_197x768/kernel.boscame.mlir
 buddy-opt build/layernorm_197x768/kernel.boscame.mlir \
   --lower-bosc-ame -o build/layernorm_197x768/kernel.llvm.mlir
@@ -73,13 +73,16 @@ five 4 KiB roots: zero padding, X/centered/normalized, Weight, Bias and squares.
 The surviving offsets keep each bank's high-water mark at 12 KiB; the unused
 window is not compacted. No lifetime overlap or spill search is used.
 X -> centered -> normalized -> weighted -> biased is computed in place in the
-same root.  The pass option defaults to false; this example enables it
-explicitly.
+same root. Logical frontend private buffers use automatic placement. The
+`buffer-placement` pass option is a physical-placement debug override; it
+does not select a computation fusion or external route.
 
 The logical tensor has 1024 lanes while only the first 768 are valid, so each
 external DMA moves the 3072-byte prefix: X, Weight and Bias read, and Out
 writes. The whole per-program traffic is four DMA events, 9216 read bytes and
-3072 write bytes; internal float arrays never round-trip through DDR.
+3072 write bytes; internal float arrays never round-trip through DDR. The
+automatic route planner keeps the output on SPM/DMA because only a valid
+prefix is written (`direct-store-coverage-or-address-unproven`).
 
 | Buffer | DDR location | External DMA |
 | --- | --- | --- |
@@ -148,11 +151,24 @@ program. `--write-output FILE` saves the complete 605184-byte output and
 `make check` builds `bin` and then verifies the typed entry LLVM ABI and
 the absence of heap allocation in `kernel.ll`, requires four
 `bosc_ame.dma.start` operations in `kernel.boscame.mlir`, and audits the
-complete ELF (1905 instructions, 54 RVV instructions, 24 vector memory
+complete ELF (1898 instructions, 54 RVV instructions, 24 vector memory
 instructions, zero AME instructions). The launcher runs two different inputs,
 all 197 rows in reverse order per round (394 programs), and checks 302592
 outputs against its independent C oracle with before/after DDR guards and
 input-change checks.
+
+The automatic-route build passes `make`, `make check` and `make simcheck`
+without changing the floating-point order or the tolerance. All 197 reversed
+programs have maximum absolute error zero. The complete output SHA256 is
+`ed6261ce27a36b49df83291fe18af274a0892e8db49f4a509957405cbebf8cbe`,
+matching the previous local-memory-redundancy build byte for byte. The final
+19 tasks, four DMA events per program and 12 KiB high-water mark in each SPM
+bank also remain unchanged. Across the grid, DMA reads 1815552 bytes and writes
+605184 bytes. Removing the explicit placement override reproduces the frontend,
+bufferized and BOSCAME IR, LLVM IR, NR assembly, ELF and binary byte for byte.
+The final-ELF call-chain stack audit includes DMA failure hooks and finds a
+992-byte peak within the unchanged 65536-byte stack. See
+[the accumulator-fusion validation record](../../../docs/validation/boscame-accumulator-routing/README.md).
 
 ELF/RVV checks establish code generation; the functional simulator establishes
 BOSCAME IR execution semantics. Neither proves the absence of backend register

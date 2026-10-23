@@ -204,7 +204,7 @@ Value subview(OpBuilder &builder, Location loc, Value source, int64_t row,
 Operation *emitLoopedMatmul(linalg::MatmulOp op,
                             const LinalgToBOSCAMEConfig &config,
                             const AmeMatmulTilePlan &tilePlan) {
-  if (config.storePolicy != "direct-ddr" || !op->hasAttr(kLoopAccumulatorAttr))
+  if (!op->hasAttr(kLoopAccumulatorAttr))
     return nullptr;
   auto loop = op->getParentOfType<scf::ForOp>();
   if (!loop || op->getBlock() != loop.getBody())
@@ -338,8 +338,7 @@ Operation *emitMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
       Value cTile = subview(builder, loc, c, mi, ni, rows, columns);
       auto accType = VectorType::get({rows, columns}, builder.getI32Type());
       auto loadAcc = TileLoadAccOp::create(builder, loc, accType, cTile);
-      if (config.storePolicy == "direct-ddr" &&
-          op->hasAttr(kDirectCOperandAttr) && !spmdma::getSpmBank(cType) &&
+      if (op->hasAttr(kDirectCOperandAttr) && !spmdma::getSpmBank(cType) &&
           isExternalDdrBuffer(c))
         loadAcc->setAttr("bosc_ame.direct_ddr", builder.getUnitAttr());
       Value accumulator = loadAcc.getMatrix();
@@ -376,8 +375,7 @@ Operation *emitMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
         accumulator = mma;
       }
       auto storeAcc = TileStoreAccOp::create(builder, loc, accumulator, cTile);
-      if (config.storePolicy == "direct-ddr" &&
-          op->hasAttr(kDirectCOperandAttr) && !spmdma::getSpmBank(cType) &&
+      if (op->hasAttr(kDirectCOperandAttr) && !spmdma::getSpmBank(cType) &&
           isExternalDdrBuffer(c))
         storeAcc->setAttr("bosc_ame.direct_ddr", builder.getUnitAttr());
       completion = storeAcc;

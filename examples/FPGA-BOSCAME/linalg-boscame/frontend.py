@@ -214,7 +214,7 @@ def build_frontend(args, kernel):
         PASS_OPTIONS
         if kernel == "gemm"
         else (
-            "enable-spm-dma=true enable-ame=true store-policy=spm-dma "
+            "enable-spm-dma=true enable-ame=true "
             "dma-abi=args_aligned64_nonalias target=nr-fpga"
         )
     )

@@ -1,4 +1,4 @@
-// RUN: buddy-opt %S/Inputs/layernorm-197x768-bufferized.mlir --linalg-to-boscame='buffer-placement=true store-policy=spm-dma plan-report=true' -o %t 2>%t.plan
+// RUN: buddy-opt %S/Inputs/layernorm-197x768-bufferized.mlir --linalg-to-boscame='buffer-placement=true plan-report=true' -o %t 2>%t.plan
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
 // RUN: FileCheck %s --check-prefix=IR < %t
 // RUN: FileCheck %s --check-prefix=ROOTS < %t

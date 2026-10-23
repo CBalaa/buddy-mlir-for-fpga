@@ -151,7 +151,7 @@ $(V_DIR)/kernel.bufferized.mlir: $(V_DIR)/kernel.frontend.mlir $(BUILD_MAKEFILE)
 	$(BUDDY_OPT) $< --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" --canonicalize --cse -o $@
 
 $(V_DIR)/kernel.boscame.mlir: $(V_DIR)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
-	$(BUDDY_OPT) $< --linalg-to-boscame="store-policy=spm-dma buffer-placement=true" -o $@
+	$(BUDDY_OPT) $< --linalg-to-boscame -o $@
 
 boscame: $(V_DIR)/kernel.boscame.mlir
 

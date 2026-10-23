@@ -57,9 +57,10 @@ The kernel masks the rows past `M` in the final M program (and the K lanes past
 elements outside the logical 196 rows.  The accumulator is initialized from C
 itself with `tl.load` and stored back once after the reduction. A compact
 SPM C buffer carries the accumulator through all six K iterations. Each
-iteration loads A/B from DDR directly into their SPM windows, moves subtiles
-into AME registers, writes the product from accumulator registers into SPM,
-and adds it to C with RVV registers.
+iteration loads A/B from DDR directly into their SPM windows, loads C and A/B subtiles into AME registers, accumulates directly into C,
+and writes the accumulator back to the same C SPM window. Each K iteration
+finishes its accumulator store before the next DMA; registers do not stay live
+across runtime calls.
 The launcher owns the logical
 `A[196,768]`, `B[768,768]` and `C[196,768]` buffers and validates those rows
 only.
@@ -67,32 +68,32 @@ only.
 All effective copy extents are static after specialization. Both branches
 have full N/K extents; only the tail branch initializes invalid A/C rows.
 B is physically K-contiguous in both branches. Graph annotation runs after
-the rewrite and cleanup, producing 16 distinct tasks and two marked matmuls;
+the rewrite and cleanup, producing 12 distinct tasks and two marked matmuls;
 the control-flow graph remains conservatively incomplete.
 
-The four main buffers have 64-byte alignment and total **53248 B**:
+The three main buffers have 64-byte alignment and total **36864 B**:
 
 | Buffer | Logical shape | DDR strides (elements) | SPM strides | Bytes | Bank / byte offset |
 | --- | --- | --- | --- | ---: | --- |
 | A | `[32,128]` i8 | `[768,1]` | `[128,1]` | 4096 | 1 / 0 |
 | B | `[128,128]` i8 | `[1,768]` | `[1,128]` | 16384 | 1 / 4096 |
 | C / running sum | `[32,128]` i32 | `[768,1]` | identity `[128,1]` | 16384 | 0 / 0 |
-| Matmul product | `[32,128]` i32 | — | identity `[128,1]` | 16384 | 0 / 16384 |
 
-C stays live through the K loop. A/B and the product reuse the same fixed
+Logical private buffers are placed automatically; `buffer-placement` is a
+physical placement debug override. C stays live through the K loop. A/B reuse the same fixed
 windows on every iteration; `spm.view` denotes an address and does not allocate
 stack memory. Identity C lets bufferization send the same buffer to the final
 store. The two branches share these windows because their private roots cannot
 escape and the branches are mutually exclusive. Bank high-water marks are
-32768 B and 20480 B. Every DMA waits before computation or window reuse.
+16384 B and 20480 B. Every DMA waits before computation or window reuse.
 DDR and SPM addresses use their own descriptors, and 64-wide hardware subtiles
 keep their parent byte pitches: 128 for A/B and 512 for C.
 
-The final default ELF uses **1408 B** at its deepest stack point, including
+The final default ELF uses **2256 B** at its deepest stack point, including
 boot, launcher, adapter, MLIR wrapper, alignment, spills, DMA runtime and
-the AME encoder's transient register saves. **64128 B** remain in the existing
+the AME encoder's transient register saves. **63280 B** remain in the existing
 64 KiB E6 stack. The four major ordinary DDR temporaries and their repeated
-staging copies are gone. See the [validation record](../../../docs/validation/boscame-scf-placement/README.md)
+staging copies are gone. See the [validation record](../../../docs/validation/boscame-accumulator-routing/README.md)
 and its reproducible ELF audit; the linker configuration is unchanged.
 
 ## Pipeline
@@ -109,7 +110,7 @@ buddy-opt build/matmul_i8_196x768x768/kernel.frontend.mlir \
   --canonicalize --cse \
   -o build/matmul_i8_196x768x768/kernel.bufferized.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.bufferized.mlir \
-  --linalg-to-boscame="store-policy=spm-dma buffer-placement=true" \
+  --linalg-to-boscame \
   -o build/matmul_i8_196x768x768/kernel.boscame.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.boscame.mlir \
   --lower-bosc-ame -o build/matmul_i8_196x768x768/kernel.llvm.mlir

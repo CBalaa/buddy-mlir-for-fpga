@@ -1,7 +1,7 @@
 // RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.linalg 2> %t.facts
 // RUN: FileCheck %s --check-prefix=FACTS < %t.facts
 // RUN: FileCheck %s --check-prefix=IR < %t.linalg
-// RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true store-policy=spm-dma dma-abi=args_aligned64_nonalias plan-report=true' 2>&1 | FileCheck %s --check-prefix=NO-DYNAMIC-DMA
+// RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' 2>&1 | FileCheck %s --check-prefix=NO-DYNAMIC-DMA
 
 module {
   tt.func public @dynamic_prefix(%src: !tt.ptr<f32>, %dst: !tt.ptr<f32>, %limit: i32) {

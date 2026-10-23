@@ -17,7 +17,7 @@
 // RUN: diff %t.layernorm-facts.mlir %t.layernorm-plain.mlir
 // RUN: buddy-opt %t.layernorm-plain.mlir --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse -o %t.layernorm-buffer.mlir
 // RUN: FileCheck %s --check-prefix=GRAPH-BUFFER < %t.layernorm-buffer.mlir
-// RUN: buddy-opt %S/Inputs/layernorm.ttir --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true store-policy=spm-dma dma-abi=args_aligned64_nonalias plan-report=true' -o %t.layernorm-boscame.mlir 2> %t.layernorm-plan
+// RUN: buddy-opt %S/Inputs/layernorm.ttir --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t.layernorm-boscame.mlir 2> %t.layernorm-plan
 // RUN: FileCheck %s --check-prefix=DATAFLOW < %t.layernorm-plan
 // RUN: buddy-opt %S/Inputs/matmul-i8.ttir --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.matmul-facts.mlir 2> %t.matmul-facts
 // RUN: FileCheck %s --check-prefix=MATMUL-FACTS < %t.matmul-facts
@@ -63,7 +63,6 @@ module {
 // TENSOR-SAME: bosc_ame.enable_ame = true
 // TENSOR-SAME: bosc_ame.enable_spm_dma = true
 // TENSOR-SAME: bosc_ame.expected_ame_matmuls = 0 : i64
-// TENSOR-SAME: bosc_ame.store_policy = "direct-ddr"
 // TENSOR-LABEL: func.func @masked_copy
 // TENSOR-SAME: bosc_ame.program_axis = 0 : i32
 // TENSOR-SAME: bosc_ame.program_role = "num_programs"
@@ -97,7 +96,7 @@ module {
 // MARK-SAME: bosc_ame.lower_to_ame
 // MARK-SAME: bosc_ame.origin_id
 // MARK-BUFFER: bosc_ame.compute_graph_complete = false
-// MARK-BUFFER-SAME: bosc_ame.compute_graph_node_count = 11 : i64
+// MARK-BUFFER-SAME: bosc_ame.compute_graph_node_count = 10 : i64
 // MARK-BUFFER: linalg.matmul
 // MARK-BUFFER-SAME: bosc_ame.a_origin_id = 0 : i64
 // MARK-BUFFER-SAME: bosc_ame.b_origin_id = 1 : i64
@@ -151,7 +150,7 @@ module {
 // DATAFLOW: task[21]: op=linalg.generic kind=memory-store
 // DATAFLOW: logical-value[11]: producer=5 consumers=[11,13] lifetime=known
 // DATAFLOW: logical-value[36]: producer=20 consumers=[21] lifetime=known
-// DATAFLOW: resources: transfers=28 dma-packets=33 read-bytes=65536 write-bytes=61440 totals-exact=true latency=uncalibrated
+// DATAFLOW: resources: transfers=4 dma-packets=4 read-bytes=9216 write-bytes=3072 totals-exact=true latency=uncalibrated
 // MATMUL-FACTS: SourceFacts:
 // MATMUL-FACTS: event id=2 kind=dot {{.*}}accumulator-source=block-argument
 // MATMUL-FACTS: event id=3 kind=load result=tensor<16x16xi32>

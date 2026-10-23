@@ -113,7 +113,7 @@ def main():
         [
             sys.argv[1],
             sys.argv[2],
-            "--linalg-to-boscame=buffer-placement=true store-policy=spm-dma",
+            "--linalg-to-boscame=buffer-placement=true ",
         ],
         text=True,
         capture_output=True,
@@ -121,6 +121,11 @@ def main():
     )
     before, descriptors, counts, _ = graph(source)
     after, placed_descriptors, placed_counts, dma_tasks = graph(result.stdout)
+    # Routing decisions accompany the physical plan; they are independent of
+    # the logical compute graph that placement preserves.
+    for attributes in after.values():
+        attributes.pop("bosc_ame.store_staging_reason", None)
+        attributes.pop("bosc_ame.direct_ddr_store", None)
     assert set(before) == set(range(22)), before
     expected = {
         task: dict(attributes)

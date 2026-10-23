@@ -1,5 +1,5 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr' | FileCheck %s
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr' --lower-bosc-ame | FileCheck %s --check-prefix=LLVM
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' --lower-bosc-ame | FileCheck %s --check-prefix=LLVM
 
 // A frontend-preserved store event stages the producer into SPM, then writes
 // the result directly to its external DDR destination with vector stores.

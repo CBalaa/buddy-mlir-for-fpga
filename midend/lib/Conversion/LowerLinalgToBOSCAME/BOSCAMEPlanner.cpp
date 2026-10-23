@@ -40,6 +40,7 @@ using namespace ::buddy::boscame;
 static constexpr StringLiteral kDirectAOperandAttr = "bosc_ame.direct_ddr_a";
 static constexpr StringLiteral kDirectBOperandAttr = "bosc_ame.direct_ddr_b";
 static constexpr StringLiteral kDirectCOperandAttr = "bosc_ame.direct_ddr_c";
+static constexpr StringLiteral kDirectStoreAttr = "bosc_ame.direct_ddr_store";
 static constexpr StringLiteral kPrefixRangeAttr = "bosc_ame.prefix_range";
 static constexpr StringLiteral kPrefixMaskAuxAttr = "bosc_ame.prefix_mask_aux";
 
@@ -1047,16 +1048,9 @@ findResidentCandidates(ModuleOp module, const KernelFacts &facts,
   return candidates;
 }
 
-/// A frontend-preserved store event names an external DDR destination
-/// explicitly.  Under the direct-ddr policy such an event must remain on the
-/// ordinary memory path; staging its destination here would silently turn the
-/// requested direct store back into an SPM/DMA round trip.  Keep the check
-/// conservative until the metadata is present: legacy buffer-form Linalg with
-/// only `kind = "store"` continues to use its established staging behavior.
-static bool isDirectExternalStore(linalg::LinalgOp op,
-                                  const LinalgToBOSCAMEConfig &config) {
-  if (config.storePolicy != "direct-ddr")
-    return false;
+/// A frontend-preserved store event names an external DDR destination. This
+/// identifies a candidate; only kDirectStoreAttr records a selected route.
+static bool isDirectExternalStore(linalg::LinalgOp op) {
   auto memory = op->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
   if (!memory)
     return false;
@@ -1075,30 +1069,26 @@ static bool hasLogicalPlacement(Operation *op) {
 }
 
 /// Direct vector stores currently lower a complete rectangular tile.  A
-/// frontend mask or a shape mismatch would make the generated stores overwrite
-/// elements outside the valid region, so reject that form in direct mode
-/// instead of silently staging it through the compatibility DMA path.
-static LogicalResult verifyDirectStoreMetadata(Operation *op,
-                                               Value destination) {
+/// frontend mask or a shape mismatch makes that route unsafe; return false so
+/// the planner can try ordinary SPM/DMA staging automatically.
+static bool isDirectStoreMetadataLegal(Operation *op, Value destination) {
   auto memory = op->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
   if (!memory)
-    return success();
+    return true;
   auto masked = memory.getAs<BoolAttr>("masked");
   auto logical = memory.getAs<DenseI64ArrayAttr>("logical_shape");
   auto valid = memory.getAs<DenseI64ArrayAttr>("valid_shape");
   if (!masked || masked.getValue())
-    return op->emitError("direct-ddr store does not support masked stores; "
-                         "select store-policy=spm-dma");
+    return false;
   if (!logical || !valid || logical.asArrayRef() != valid.asArrayRef())
-    return op->emitError("direct-ddr store requires equal static logical and "
-                         "valid shapes");
+    return false;
   auto type = dyn_cast<MemRefType>(destination.getType());
   if (!type || (type.getRank() != 1 && type.getRank() != 2) ||
       type.getRank() != static_cast<int64_t>(logical.size()) ||
       type.getShape() != logical.asArrayRef() ||
       llvm::any_of(logical.asArrayRef(),
                    [](int64_t extent) { return extent <= 0; }))
-    return op->emitError("direct-ddr store requires a positive static shape");
+    return false;
   // Direct vector stores advance one physical row at a time.  The target
   // instruction stream has no byte-granular prologue for a row, so every row
   // address must remain cache-line aligned just like a DMA packet.
@@ -1110,20 +1100,16 @@ static LogicalResult verifyDirectStoreMetadata(Operation *op,
       strides.size() != static_cast<size_t>(type.getRank()) ||
       llvm::any_of(strides, [](int64_t stride) { return stride <= 0; }) ||
       strides.back() != 1)
-    return op->emitError(
-        "direct-ddr store requires a positive contiguous final axis");
+    return false;
   if (type.getRank() == 2) {
     int64_t rowStrideBytes;
     if (strides.front() < type.getShape().back() ||
         llvm::MulOverflow(strides.front(), elementBytes, rowStrideBytes) ||
         rowStrideBytes % spmdma::kDmaAlignmentBytes != 0)
-      return op->emitError(
-          "direct-ddr store requires 64-byte-aligned physical row strides");
+      return false;
   }
-  if (failed(spmdma::verifyEndpointPointerAlignment(
-          op, destination, "direct-DDR store", spmdma::kDmaAlignmentBytes)))
-    return failure();
-  return success();
+  return spmdma::isEndpointPointerAlignmentProven(destination,
+                                                  spmdma::kDmaAlignmentBytes);
 }
 
 /// Function block arguments are the external DDR pointers at the
@@ -2620,6 +2606,60 @@ getDisjointAccessProof(const BufferAccessFact &lhs, const BufferAccessFact &rhs,
   return std::nullopt;
 }
 
+/// A direct write has no staging barrier between its input reads and output
+/// writes. Prove the complete operation's inputs disjoint before any capacity
+/// planning skips the destination. The selected marker is consumed by both
+/// the transfer planner and the SPM vector emitter.
+static void markDirectExternalStores(ModuleOp module,
+                                     const LinalgToBOSCAMEConfig &config,
+                                     const BufferAliasContext &aliases) {
+  module.walk([&](linalg::LinalgOp op) {
+    op->removeAttr(kDirectStoreAttr);
+    op->removeAttr("bosc_ame.store_staging_reason");
+    if (!isDirectExternalStore(op))
+      return;
+    auto fallback = [&](StringRef reason) {
+      op->setAttr("bosc_ame.store_staging_reason",
+                  StringAttr::get(module.getContext(), reason));
+    };
+    if (config.dmaAbi != spmdma::kDmaAbiAlignedNonAliasing ||
+        op.getNumDpsInits() != 1 || !isStageableBufferLinalg(op) ||
+        !llvm::all_of(op.getIndexingMapsArray(),
+                      [](AffineMap map) { return map.isIdentity(); }) ||
+        !llvm::all_of(op.getIteratorTypesArray(), [](utils::IteratorType kind) {
+          return kind == utils::IteratorType::parallel;
+        })) {
+      fallback("direct-store-contract-unavailable");
+      return;
+    }
+    Value destination = op.getDpsInits().front();
+    if (!isExternalDdrBuffer(destination) ||
+        !isDirectStoreMetadataLegal(op, destination)) {
+      fallback("direct-store-coverage-or-address-unproven");
+      return;
+    }
+    BufferAccessFact output;
+    output.operation = op;
+    output.effect = BufferAccessEffect::Write;
+    output.accessedValue = destination;
+    populateBufferAccessLayout(output);
+    for (Value operand : op.getDpsInputs()) {
+      if (!isa<MemRefType>(operand.getType()))
+        continue;
+      BufferAccessFact input;
+      input.operation = op;
+      input.effect = BufferAccessEffect::Read;
+      input.accessedValue = operand;
+      populateBufferAccessLayout(input);
+      if (!getDisjointAccessProof(output, input, aliases)) {
+        fallback("direct-store-alias-unproven");
+        return;
+      }
+    }
+    op->setAttr(kDirectStoreAttr, UnitAttr::get(module.getContext()));
+  });
+}
+
 /// Compare known storage roots within each function. Same-root intervals use
 /// checked bounding ranges, while cross-root disjointness needs a named ABI or
 /// global-symbol contract. Other cross-root pairs remain absent (unknown).
@@ -3132,26 +3172,6 @@ static bool directAmeAddressLegal(Value value, int64_t alignmentBytes) {
          spmdma::isEndpointPointerAlignmentProven(value, alignmentBytes);
 }
 
-static bool directAmeAddressKnownMisaligned(Value value,
-                                            int64_t alignmentBytes) {
-  auto type = dyn_cast<MemRefType>(value.getType());
-  unsigned width =
-      type ? spmdma::getSpmElementByteWidth(type.getElementType()) : 0;
-  auto offset = spmdma::getStaticDescriptorOffset(value);
-  if (alignmentBytes <= 0 || !width || !offset)
-    return false;
-  int64_t factor =
-      alignmentBytes / std::gcd(alignmentBytes, static_cast<int64_t>(width));
-  if (*offset % factor != 0)
-    return true;
-  // Keep a statically misaligned `memref.view` on the direct path long enough
-  // for the tile verifier to issue its direct-DDR diagnostic.  A dynamic
-  // shift has no static origin and therefore remains an ordinary fallback
-  // candidate (the DMA analyzer will apply its own endpoint proof).
-  auto origin = spmdma::getStaticPointerOrigin(value);
-  return origin && origin->byteShift % alignmentBytes != 0;
-}
-
 static void markLogicalAmeInputs(linalg::MatmulOp matmul,
                                  const LinalgToBOSCAMEConfig &config,
                                  AmeMatmulTilePlan *tilePlan,
@@ -3169,12 +3189,9 @@ static void markLogicalAmeInputs(linalg::MatmulOp matmul,
   // in the default direct-ddr mode. Explicit spm-dma remains the compatibility
   // path for such output layouts.
   auto output = matmul.getOutputs().front();
-  if (config.storePolicy == "direct-ddr" &&
-      directAmeOutputTilesLegal(matmul, tilePlan, target) &&
+  if (directAmeOutputTilesLegal(matmul, tilePlan, target) &&
       isExternalDdrBuffer(output) &&
-      (directAmeAddressLegal(output, target.dma.endpointAlignmentBytes) ||
-       directAmeAddressKnownMisaligned(output,
-                                       target.dma.endpointAlignmentBytes)))
+      directAmeAddressLegal(output, target.dma.endpointAlignmentBytes))
     matmul->setAttr(kDirectCOperandAttr, UnitAttr::get(matmul.getContext()));
   if (!hasLogicalPlacement(matmul))
     return;
@@ -3240,8 +3257,7 @@ static LogicalResult verifyDirectAmeOutput(linalg::MatmulOp matmul,
                                            const LinalgToBOSCAMEConfig &config,
                                            const AmeMatmulTilePlan *tilePlan,
                                            const TargetInfo &target) {
-  if (config.storePolicy != "direct-ddr" ||
-      !matmul->hasAttr(::buddy::boscame::lowering::kLowerToAme) ||
+  if (!matmul->hasAttr(::buddy::boscame::lowering::kLowerToAme) ||
       matmul.getOutputs().size() != 1 ||
       !isSupportedAmeMatmul(matmul, target.ame))
     return success();
@@ -3254,26 +3270,10 @@ static LogicalResult verifyDirectAmeOutput(linalg::MatmulOp matmul,
   auto cType = dyn_cast<MemRefType>(output.getType());
   auto cLayout = cType ? computeTileStorageLayout(cType, TileRole::Accumulator)
                        : std::optional<TileStorageLayout>();
-  if (cLayout &&
-      cLayout->rowStrideBytes % target.dma.endpointAlignmentBytes != 0)
-    return matmul.emitError(
-        "BOSCAME direct-DDR operand requires a 64-byte-aligned physical row "
-        "stride");
-  if (!directAmeOutputTilesLegal(matmul, tilePlan, target))
-    return matmul.emitError(
-        "direct-ddr AME C output cannot be tiled with 64-byte-aligned "
-        "accumulator rows; choose store-policy=spm-dma for compatibility "
-        "staging");
-  if (!directAmeAddressLegal(output, target.dma.endpointAlignmentBytes)) {
-    if (directAmeAddressKnownMisaligned(output,
-                                        target.dma.endpointAlignmentBytes))
-      return matmul.emitError(
-          "BOSCAME direct-DDR operand requires a 64-byte-aligned descriptor "
-          "offset");
-    return matmul.emitError(
-        "direct-ddr AME C output address must be provably 64-byte aligned; "
-        "dynamic or misaligned per-tile offsets require store-policy=spm-dma");
-  }
+  (void)cLayout;
+  // Direct output is only one candidate.  If the tile, row stride, or
+  // descriptor proof fails, leave the operand unmarked so the ordinary planner
+  // can reserve a C window and stage it through DMA.
   return success();
 }
 
@@ -3392,9 +3392,6 @@ static FailureOr<TransferPlan> analyzeDynamicPrefixCopy(
   auto kind = provenance ? provenance.getAs<StringAttr>("kind") : StringAttr();
   if (!kind || (kind.getValue() != "load" && kind.getValue() != "store"))
     return fail("dynamic BOSCAME copy requires load/store provenance");
-  if (kind.getValue() == "store" && config.storePolicy != "spm-dma")
-    return fail("dynamic prefix stores require store-policy=spm-dma");
-
   FailureOr<DynamicPrefixSubview> source =
       getDynamicPrefixSubview(copy, copy.getSource());
   if (failed(source))
@@ -3566,7 +3563,8 @@ static bool matchI32Add(linalg::GenericOp candidate, Value expected,
     if (auto addOp = dyn_cast<arith::AddIOp>(&nested))
       add = addOp;
   auto yield = cast<linalg::YieldOp>(body.back());
-  if (!add || add.getType() != expectedType.getElementType() ||
+  if (!add || add.getOverflowFlags() != arith::IntegerOverflowFlags::none ||
+      add.getType() != expectedType.getElementType() ||
       yield.getNumOperands() != 1 || yield.getOperand(0) != add.getResult())
     return false;
   return (add.getLhs() == body.getArgument(0) &&
@@ -3606,6 +3604,10 @@ static void eraseDeadBuffer(Value value) {
     return;
   SmallVector<Operation *> users(value.getUsers());
   for (Operation *user : users) {
+    if (isa<memref::DeallocOp>(user)) {
+      user->erase();
+      continue;
+    }
     if (auto copy = dyn_cast<memref::CopyOp>(user)) {
       if (copy.getTarget() == value)
         copy.erase();
@@ -3714,6 +3716,581 @@ static bool hasHarmlessFusionGap(Operation *from, Operation *to) {
   return true;
 }
 
+/// Fuse the storage-route-independent buffer spelling
+/// `fill(P, 0); matmul(A, B, P); C += P`.  This deliberately runs before the
+/// route planner chooses DDR, an existing SPM window, or operation-local
+/// staging.  It is limited to compiler-private P allocations and a same-block
+/// add so the old C value remains observable everywhere else.
+static bool updateAdjacentAccumulatorGraph(linalg::MatmulOp matmul,
+                                           linalg::FillOp fill,
+                                           linalg::GenericOp add,
+                                           Value accumulator) {
+  SmallVector<Operation *> fused{fill, matmul, add};
+  if (llvm::none_of(fused, [](Operation *operation) {
+        return operation->hasAttr("bosc_ame.compute_id");
+      }))
+    return true;
+  auto taskId = matmul->getAttrOfType<IntegerAttr>("bosc_ame.compute_id");
+  auto fillId = fill->getAttrOfType<IntegerAttr>("bosc_ame.compute_id");
+  auto addId = add->getAttrOfType<IntegerAttr>("bosc_ame.compute_id");
+  auto inputs = getI64Array(matmul, "bosc_ame.compute_input_values");
+  auto addInputs = getI64Array(add, "bosc_ame.compute_input_values");
+  auto outputs = getI64Array(add, "bosc_ame.compute_output_values");
+  if (!taskId || !fillId || !addId || inputs.size() != 3 ||
+      addInputs.size() != 2 || outputs.size() != 1)
+    return false;
+  auto function = matmul->getParentOfType<func::FuncOp>();
+  bool ordered = true;
+  function.walk([&](Operation *op) {
+    if (op == fill || op == matmul || op == add)
+      return;
+    auto id = op->getAttrOfType<IntegerAttr>("bosc_ame.compute_id");
+    if (!id || id.getInt() > taskId.getInt())
+      return;
+    for (int64_t predecessor : getI64Array(op, "bosc_ame.compute_predecessors"))
+      if (predecessor == fillId.getInt() || predecessor == addId.getInt())
+        ordered = false;
+  });
+  // Contracting a fill with a later matmul must not create a back edge through
+  // an intervening task. Keep that annotated chain intact when its ordering
+  // cannot be represented by the surviving task.
+  if (!ordered)
+    return false;
+  inputs.back() = addInputs[add.getInputs()[0] == accumulator ? 0 : 1];
+  Builder builder(matmul.getContext());
+  auto normalize = [](SmallVector<int64_t> &ids) {
+    llvm::sort(ids);
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  };
+  auto set = [&](Operation *op, StringRef name, ArrayRef<int64_t> ids) {
+    op->setAttr(name, builder.getDenseI64ArrayAttr(ids));
+  };
+  SmallVector<int64_t> predecessors, origins, axes;
+  bool barrier = false;
+  for (Operation *op : fused) {
+    auto deps = getI64Array(op, "bosc_ame.compute_predecessors");
+    predecessors.append(deps.begin(), deps.end());
+    auto loads = getI64Array(op, "bosc_ame.source_load_origin_ids");
+    origins.append(loads.begin(), loads.end());
+    auto varying = getI64Array(op, "bosc_ame.varying_program_axes");
+    axes.append(varying.begin(), varying.end());
+    if (auto attribute =
+            op->getAttrOfType<BoolAttr>("bosc_ame.compute_barrier_after"))
+      barrier |= attribute.getValue();
+  }
+  llvm::erase_if(predecessors, [&](int64_t id) {
+    return id == fillId.getInt() || id == taskId.getInt() ||
+           id == addId.getInt();
+  });
+  normalize(predecessors);
+  normalize(origins);
+  normalize(axes);
+  if (llvm::any_of(predecessors,
+                   [&](int64_t id) { return id >= taskId.getInt(); }))
+    return false;
+  set(matmul, "bosc_ame.compute_input_values", inputs);
+  set(matmul, "bosc_ame.compute_output_values", outputs);
+  set(matmul, "bosc_ame.logical_value_ids", outputs);
+  set(matmul, "bosc_ame.compute_predecessors", predecessors);
+  set(matmul, "bosc_ame.source_load_origin_ids", origins);
+  set(matmul, "bosc_ame.varying_program_axes", axes);
+  auto invariant = getI64Array(matmul, "bosc_ame.invariant_program_axes");
+  llvm::erase_if(invariant,
+                 [&](int64_t axis) { return llvm::is_contained(axes, axis); });
+  set(matmul, "bosc_ame.invariant_program_axes", invariant);
+  matmul->setAttr("bosc_ame.compute_barrier_after",
+                  builder.getBoolAttr(barrier));
+  matmul->setAttr("bosc_ame.rematerializable", builder.getBoolAttr(false));
+  DenseMap<int64_t, SmallVector<int64_t>> consumers;
+  SmallVector<Operation *> liveTasks;
+  DenseMap<int64_t, Operation *> liveById;
+  int64_t count = 0;
+  function.walk([&](Operation *op) {
+    if (op == fill || op == add)
+      return;
+    if (auto id = op->getAttrOfType<IntegerAttr>("bosc_ame.compute_id")) {
+      ++count;
+      liveTasks.push_back(op);
+      liveById.try_emplace(id.getInt(), op);
+      auto deps = getI64Array(op, "bosc_ame.compute_predecessors");
+      for (int64_t &dep : deps)
+        if (dep == addId.getInt() || dep == fillId.getInt())
+          dep = taskId.getInt();
+      normalize(deps);
+      set(op, "bosc_ame.compute_predecessors", deps);
+      for (int64_t value : getI64Array(op, "bosc_ame.compute_input_values"))
+        consumers[value].push_back(id.getInt());
+    }
+    if (auto slots =
+            op->getAttrOfType<ArrayAttr>("bosc_ame.loop_carried_slots")) {
+      SmallVector<Attribute> updated;
+      for (Attribute slot : slots) {
+        NamedAttrList fields(cast<DictionaryAttr>(slot));
+        for (StringRef key :
+             {"backedge_producer_compute_ids", "exit_consumer_compute_ids",
+              "init_producer_compute_ids", "iter_arg_consumer_compute_ids"}) {
+          if (auto ids = dyn_cast_or_null<DenseI64ArrayAttr>(fields.get(key))) {
+            SmallVector<int64_t> values(ids.asArrayRef());
+            for (int64_t &id : values)
+              if (id == addId.getInt())
+                id = taskId.getInt();
+            llvm::erase(values, fillId.getInt());
+            normalize(values);
+            fields.set(key, builder.getDenseI64ArrayAttr(values));
+          }
+        }
+        updated.push_back(fields.getDictionary(matmul.getContext()));
+      }
+      op->setAttr("bosc_ame.loop_carried_slots", builder.getArrayAttr(updated));
+    }
+  });
+  for (auto &entry : consumers)
+    normalize(entry.second);
+  llvm::sort(liveTasks, [](Operation *lhs, Operation *rhs) {
+    return lhs->getAttrOfType<IntegerAttr>("bosc_ame.compute_id").getInt() <
+           rhs->getAttrOfType<IntegerAttr>("bosc_ame.compute_id").getInt();
+  });
+  for (Operation *op : liveTasks) {
+    int64_t stage = 0;
+    for (int64_t predecessor :
+         getI64Array(op, "bosc_ame.compute_predecessors")) {
+      auto producer = liveById.find(predecessor);
+      if (producer == liveById.end())
+        continue;
+      auto previousStage = producer->second->getAttrOfType<IntegerAttr>(
+          "bosc_ame.compute_stage");
+      auto previousBarrier = producer->second->getAttrOfType<BoolAttr>(
+          "bosc_ame.compute_barrier_after");
+      if (previousStage && previousBarrier)
+        stage = std::max(stage, previousStage.getInt() +
+                                    int64_t(previousBarrier.getValue()));
+    }
+    op->setAttr("bosc_ame.compute_stage", builder.getI64IntegerAttr(stage));
+  }
+  function.walk([&](Operation *op) {
+    if (op == fill || op == add)
+      return;
+    auto ids = getI64Array(op, "bosc_ame.logical_value_ids");
+    if (ids.empty() || !op->hasAttr("bosc_ame.logical_value_users"))
+      return;
+    SmallVector<Attribute> users;
+    for (int64_t id : ids)
+      users.push_back(builder.getDenseI64ArrayAttr(consumers[id]));
+    op->setAttr("bosc_ame.logical_value_users", builder.getArrayAttr(users));
+  });
+  for (unsigned index = 0; index < function.getNumArguments(); ++index)
+    if (auto id = function.getArgAttrOfType<IntegerAttr>(
+            index, "bosc_ame.logical_value_id"))
+      if (function.getArgAttr(index, "bosc_ame.logical_value_users"))
+        function.setArgAttr(
+            index, "bosc_ame.logical_value_users",
+            builder.getDenseI64ArrayAttr(consumers[id.getInt()]));
+  function->setAttr("bosc_ame.compute_graph_node_count",
+                    builder.getI64IntegerAttr(count));
+  return true;
+}
+
+static bool fuseAdjacentAmeAccumulator(linalg::MatmulOp matmul,
+                                       const LinalgToBOSCAMEConfig &config) {
+  if (!matmul->hasAttr(::buddy::boscame::lowering::kLowerToAme) ||
+      !matmul.hasPureBufferSemantics() || matmul.getOutputs().size() != 1 ||
+      matmul.getInputs().size() != 2)
+    return false;
+  auto outputType = dyn_cast<MemRefType>(matmul.getOutputs().front().getType());
+  if (!outputType || outputType.getRank() != 2 ||
+      !outputType.getElementType().isInteger(32))
+    return false;
+
+  Value product = matmul.getOutputs().front();
+  linalg::FillOp zeroFill;
+  for (Operation *user : product.getUsers()) {
+    if (auto fill = dyn_cast<linalg::FillOp>(user)) {
+      if (fill.getOutputs().size() == 1 &&
+          fill.getOutputs().front() == product &&
+          fill.getInputs().size() == 1 &&
+          matchPattern(fill.getInputs().front(), m_Zero()) && !zeroFill)
+        zeroFill = fill;
+    }
+  }
+  if (!zeroFill || zeroFill->getBlock() != matmul->getBlock() ||
+      !zeroFill->isBeforeInBlock(matmul))
+    return false;
+
+  linalg::GenericOp add;
+  Value accumulator, destination;
+  for (Operation *user : product.getUsers()) {
+    auto candidate = dyn_cast<linalg::GenericOp>(user);
+    if (!candidate || candidate->getBlock() != matmul->getBlock() ||
+        !matmul->isBeforeInBlock(candidate))
+      continue;
+    Value other, output;
+    if (!matchI32Add(candidate, product, other, output) || output != other)
+      continue;
+    if (add)
+      return false;
+    add = candidate;
+    accumulator = other;
+    destination = output;
+  }
+  if (!add || accumulator != destination ||
+      add->getPrevNode() != matmul.getOperation())
+    return false;
+
+  Value productRoot = getStorageRoot(product);
+  Value accumulatorRoot = getStorageRoot(accumulator);
+  if (!productRoot || !accumulatorRoot || productRoot == accumulatorRoot)
+    return false;
+  auto function = matmul->getParentOfType<func::FuncOp>();
+  if (!function)
+    return false;
+  auto aliases = getBufferAliasContext(function->getParentOfType<ModuleOp>(),
+                                       config.dmaAbi);
+  for (Value input : matmul.getInputs()) {
+    Value root = getStorageRoot(input);
+    if (!root || root == productRoot ||
+        !getDistinctRootProof(accumulatorRoot, root, function, aliases))
+      return false;
+  }
+  if (!isPrivateFusionBuffer(product, {matmul, zeroFill, add}))
+    return false;
+
+  // C may have readers before or after the chain, but none between the
+  // matmul and add may observe its old contents.
+  for (Operation *user : accumulator.getUsers()) {
+    if (user == add.getOperation() || user->getBlock() != matmul->getBlock())
+      continue;
+    if (matmul->isBeforeInBlock(user) && user->isBeforeInBlock(add))
+      return false;
+  }
+  if (!updateAdjacentAccumulatorGraph(matmul, zeroFill, add, accumulator))
+    return false;
+
+  matmul.getOutputsMutable()[0].set(accumulator);
+  add.erase();
+  zeroFill.erase();
+  eraseDeadBuffer(product);
+  return true;
+}
+
+static bool updateDirectAccumulatorComputeGraph(
+    linalg::MatmulOp matmul, Operation *load, linalg::FillOp fill,
+    linalg::GenericOp add, Operation *store, ArrayRef<Operation *> copies,
+    Value destination);
+
+/// A normalized dot already consumes the complete previous-C snapshot as its
+/// initial output. Forward that snapshot's storage only when the load, matmul,
+/// private handoffs and final store form an isolated same-block chain.
+static bool
+forwardAccumulatingMatmulStorage(linalg::MatmulOp matmul,
+                                 const LinalgToBOSCAMEConfig &config,
+                                 const DataflowPlan &plan) {
+  if (matmul.getOutputs().size() != 1 || matmul.getInputs().size() != 2)
+    return false;
+  Value snapshot = matmul.getOutputs().front();
+  Operation *load = nullptr;
+  Value loadSource;
+  for (Operation *user : snapshot.getUsers()) {
+    Value source, target;
+    if (!matchIdentityCopy(user, source, target) || target != snapshot ||
+        !isUnmaskedMemoryEvent(user, "load", source))
+      continue;
+    if (load)
+      return false;
+    load = user;
+    loadSource = source;
+  }
+  if (!load || !isExternalDdrBuffer(loadSource) ||
+      !hasHarmlessFusionGap(load, matmul))
+    return false;
+  Operation *store = nullptr;
+  Value destination;
+  SmallVector<Operation *> copies;
+  SmallVector<Value> targets;
+  Value cursor = snapshot;
+  llvm::SmallPtrSet<Operation *, 8> visited;
+  while (!store) {
+    Operation *next = nullptr;
+    Value nextTarget;
+    for (Operation *user : cursor.getUsers()) {
+      Value source, target;
+      if (!matchIdentityCopy(user, source, target) || source != cursor)
+        continue;
+      if (next || !visited.insert(user).second)
+        return false;
+      next = user;
+      nextTarget = target;
+    }
+    if (!next)
+      return false;
+    if (next->hasAttr("bosc_ame.memory")) {
+      if (!isUnmaskedMemoryEvent(next, "store", nextTarget) ||
+          !isDirectStoreMetadataLegal(next, nextTarget))
+        return false;
+      store = next;
+      destination = nextTarget;
+      break;
+    }
+    copies.push_back(next);
+    targets.push_back(nextTarget);
+    cursor = nextTarget;
+  }
+  if (destination != loadSource || !isExternalDdrBuffer(destination))
+    return false;
+  Operation *previous = matmul;
+  for (Operation *copy : copies) {
+    if (!hasHarmlessFusionGap(previous, copy))
+      return false;
+    previous = copy;
+  }
+  if (!hasHarmlessFusionGap(previous, store) ||
+      !isPrivateFusionBuffer(
+          snapshot, {load, matmul, copies.empty() ? store : copies.front()}))
+    return false;
+  for (auto [index, target] : llvm::enumerate(targets))
+    if (!isPrivateFusionBuffer(target, {copies[index], index + 1 < copies.size()
+                                                           ? copies[index + 1]
+                                                           : store}))
+      return false;
+  auto snapshotType = dyn_cast<MemRefType>(snapshot.getType());
+  auto destinationType = dyn_cast<MemRefType>(destination.getType());
+  if (!snapshotType || !destinationType ||
+      snapshotType.getShape() != destinationType.getShape() ||
+      snapshotType.getElementType() != destinationType.getElementType() ||
+      !directAmeOutputTilesLegal(
+          matmul, findAmeMatmulTilePlan(plan, matmul.getOperation()),
+          plan.target) ||
+      !directAmeAddressLegal(destination,
+                             plan.target.dma.endpointAlignmentBytes))
+    return false;
+  auto function = matmul->getParentOfType<func::FuncOp>();
+  auto aliases = getBufferAliasContext(function->getParentOfType<ModuleOp>(),
+                                       config.dmaAbi);
+  for (Value input : matmul.getInputs())
+    if (!getDistinctRootProof(getStorageRoot(destination),
+                              getStorageRoot(input), function, aliases))
+      return false;
+  if (!updateDirectAccumulatorComputeGraph(matmul, load, {}, {}, store, copies,
+                                           destination))
+    return false;
+  matmul.getOutputsMutable()[0].set(destination);
+  store->erase();
+  for (Operation *copy : llvm::reverse(copies))
+    copy->erase();
+  load->erase();
+  for (Value target : llvm::reverse(targets))
+    eraseDeadBuffer(target);
+  eraseDeadBuffer(snapshot);
+  return true;
+}
+
+/// Forward the external C storage through a normalized accumulating matmul
+/// loop. The private loop accumulator starts at zero and is combined with a
+/// complete C snapshot only after the loop; C is otherwise unobserved across
+/// that interval. Each iteration still loads and stores the AME accumulator.
+static bool fuseAccumulatingLoopStorage(linalg::MatmulOp matmul,
+                                        const LinalgToBOSCAMEConfig &config,
+                                        const DataflowPlan &plan) {
+  auto loop = matmul->getParentOfType<scf::ForOp>();
+  if (!loop || matmul->getBlock() != loop.getBody() ||
+      matmul.getOutputs().size() != 1 || matmul.getInputs().size() != 2)
+    return false;
+  auto lower = getConstantIntValue(loop.getLowerBound());
+  auto upper = getConstantIntValue(loop.getUpperBound());
+  auto step = getConstantIntValue(loop.getStep());
+  if (!lower || !upper || !step || *step <= 0 || *upper <= *lower)
+    return false;
+  Value accumulation = matmul.getOutputs().front();
+  linalg::FillOp fill;
+  for (Operation *user : accumulation.getUsers()) {
+    auto candidate = dyn_cast<linalg::FillOp>(user);
+    if (!candidate || candidate.getOutputs().size() != 1 ||
+        candidate.getOutputs().front() != accumulation)
+      continue;
+    if (fill || candidate->getBlock() != loop->getBlock() ||
+        !candidate->isBeforeInBlock(loop) ||
+        !matchPattern(candidate.getInputs().front(), m_Zero()))
+      return false;
+    fill = candidate;
+  }
+  if (!fill)
+    return false;
+  for (Operation &operation : loop.getBody()->getOperations()) {
+    if (&operation == matmul.getOperation() ||
+        operation.hasTrait<OpTrait::IsTerminator>() ||
+        isa<memref::AllocOp, memref::AllocaOp>(&operation) ||
+        isMemoryEffectFree(&operation))
+      continue;
+    return false;
+  }
+
+  linalg::GenericOp add;
+  Operation *load = nullptr;
+  Value snapshot;
+  for (Operation *user : accumulation.getUsers()) {
+    auto candidate = dyn_cast<linalg::GenericOp>(user);
+    Value other, output;
+    if (!candidate || candidate->getBlock() != loop->getBlock() ||
+        !loop->isBeforeInBlock(candidate) ||
+        !matchI32Add(candidate, accumulation, other, output) ||
+        output != accumulation || add)
+      continue;
+    Operation *candidateLoad = nullptr;
+    for (Operation *snapshotUser : other.getUsers()) {
+      Value source, target;
+      if (!matchIdentityCopy(snapshotUser, source, target) || target != other ||
+          !isUnmaskedMemoryEvent(snapshotUser, "load", source))
+        continue;
+      if (candidateLoad)
+        return false;
+      candidateLoad = snapshotUser;
+    }
+    if (!candidateLoad)
+      continue;
+    add = candidate;
+    load = candidateLoad;
+    snapshot = other;
+  }
+  Operation *store = nullptr;
+  Value destination;
+  for (Operation *user : accumulation.getUsers()) {
+    Value source, target;
+    if (!matchIdentityCopy(user, source, target) || source != accumulation ||
+        !isUnmaskedMemoryEvent(user, "store", target))
+      continue;
+    if (store || !isDirectStoreMetadataLegal(user, target))
+      return false;
+    store = user;
+    destination = target;
+  }
+  if (!add || !load || !store || load->getBlock() != loop->getBlock() ||
+      store->getBlock() != loop->getBlock() || !loop->isBeforeInBlock(load) ||
+      !load->isBeforeInBlock(add) || add->getNextNode() != store ||
+      !hasHarmlessFusionGap(loop, load) || !hasHarmlessFusionGap(load, add))
+    return false;
+  Value source, ignored;
+  if (!matchIdentityCopy(load, source, ignored) || source != destination ||
+      !isExternalDdrBuffer(destination) ||
+      !isPrivateFusionBuffer(accumulation, {fill, matmul, add, store}) ||
+      !isPrivateFusionBuffer(snapshot, {load, add}))
+    return false;
+  auto accumulatorType = dyn_cast<MemRefType>(accumulation.getType());
+  auto destinationType = dyn_cast<MemRefType>(destination.getType());
+  if (!accumulatorType || !destinationType ||
+      accumulatorType.getShape() != destinationType.getShape() ||
+      accumulatorType.getElementType() != destinationType.getElementType() ||
+      !directAmeOutputTilesLegal(
+          matmul, findAmeMatmulTilePlan(plan, matmul.getOperation()),
+          plan.target) ||
+      !directAmeAddressLegal(destination,
+                             plan.target.dma.endpointAlignmentBytes))
+    return false;
+  auto function = matmul->getParentOfType<func::FuncOp>();
+  auto module = function->getParentOfType<ModuleOp>();
+  auto aliases = getBufferAliasContext(module, config.dmaAbi);
+  for (Value input : matmul.getInputs())
+    if (!getDistinctRootProof(getStorageRoot(destination),
+                              getStorageRoot(input), function, aliases))
+      return false;
+
+  auto oldInputs = getI64Array(matmul, "bosc_ame.compute_input_values");
+  auto cInputs = getI64Array(load, "bosc_ame.compute_input_values");
+  SmallVector<int64_t> removedIds;
+  for (Operation *operation :
+       {fill.getOperation(), load, add.getOperation(), store})
+    if (auto id = operation->getAttrOfType<IntegerAttr>("bosc_ame.compute_id"))
+      removedIds.push_back(id.getInt());
+  if (destination.getDefiningOp() && !moveViewBeforeLoop(destination, loop))
+    return false;
+  if (!updateDirectAccumulatorComputeGraph(matmul, load, fill, add, store, {},
+                                           destination))
+    return false;
+  // Retain the recurrence: the external C version initializes the loop slot,
+  // and the surviving matmul produces every backedge and final C version.
+  if (auto slots =
+          loop->getAttrOfType<ArrayAttr>("bosc_ame.loop_carried_slots")) {
+    Builder builder(matmul.getContext());
+    auto task = matmul->getAttrOfType<IntegerAttr>("bosc_ame.compute_id");
+    auto outputs = getI64Array(matmul, "bosc_ame.compute_output_values");
+    if (task && oldInputs.size() == 3 && cInputs.size() == 1 &&
+        outputs.size() == 1) {
+      SmallVector<Attribute> updated;
+      for (Attribute attribute : slots) {
+        NamedAttrList fields(cast<DictionaryAttr>(attribute));
+        auto iter =
+            dyn_cast_or_null<IntegerAttr>(fields.get("iter_arg_value_id"));
+        bool matched = iter && iter.getInt() == oldInputs.back();
+        for (StringRef name :
+             {"init_producer_compute_ids", "iter_arg_consumer_compute_ids",
+              "backedge_producer_compute_ids", "exit_consumer_compute_ids"}) {
+          if (auto ids =
+                  dyn_cast_or_null<DenseI64ArrayAttr>(fields.get(name))) {
+            SmallVector<int64_t> live(ids.asArrayRef());
+            llvm::erase_if(live, [&](int64_t id) {
+              return llvm::is_contained(removedIds, id);
+            });
+            if (matched && (name == "iter_arg_consumer_compute_ids" ||
+                            name == "backedge_producer_compute_ids"))
+              live.assign(1, task.getInt());
+            fields.set(name, builder.getDenseI64ArrayAttr(live));
+          }
+        }
+        if (matched) {
+          fields.set("init_value_id",
+                     builder.getI64IntegerAttr(cInputs.front()));
+          fields.set("yielded_value_id",
+                     builder.getI64IntegerAttr(outputs.front()));
+        }
+        updated.push_back(fields.getDictionary(matmul.getContext()));
+      }
+      loop->setAttr("bosc_ame.loop_carried_slots",
+                    builder.getArrayAttr(updated));
+      SmallVector<Attribute> resultUsers;
+      for (int64_t result : getI64Array(loop, "bosc_ame.logical_value_ids")) {
+        SmallVector<int64_t> consumers;
+        function.walk([&](Operation *operation) {
+          if (operation == fill || operation == load || operation == add ||
+              operation == store)
+            return;
+          if (auto id =
+                  operation->getAttrOfType<IntegerAttr>("bosc_ame.compute_id"))
+            if (llvm::is_contained(
+                    getI64Array(operation, "bosc_ame.compute_input_values"),
+                    result))
+              consumers.push_back(id.getInt());
+        });
+        resultUsers.push_back(builder.getDenseI64ArrayAttr(consumers));
+      }
+      loop->setAttr("bosc_ame.logical_value_users",
+                    builder.getArrayAttr(resultUsers));
+      auto inputs = getI64Array(matmul, "bosc_ame.compute_input_values");
+      inputs.back() = oldInputs.back();
+      matmul->setAttr("bosc_ame.compute_input_values",
+                      builder.getDenseI64ArrayAttr(inputs));
+    }
+  }
+  auto accumulatorOrigins =
+      getI64Array(matmul, "bosc_ame.accumulator_source_load_origin_ids");
+  auto cOrigins = getI64Array(load, "bosc_ame.source_load_origin_ids");
+  accumulatorOrigins.append(cOrigins.begin(), cOrigins.end());
+  llvm::sort(accumulatorOrigins);
+  accumulatorOrigins.erase(
+      std::unique(accumulatorOrigins.begin(), accumulatorOrigins.end()),
+      accumulatorOrigins.end());
+  if (!accumulatorOrigins.empty())
+    matmul->setAttr(
+        "bosc_ame.accumulator_source_load_origin_ids",
+        DenseI64ArrayAttr::get(matmul.getContext(), accumulatorOrigins));
+  matmul.getOutputsMutable()[0].set(destination);
+  matmul->removeAttr("bosc_ame.loop_accumulator");
+  load->erase();
+  add.erase();
+  store->erase();
+  fill.erase();
+  eraseDeadBuffer(snapshot);
+  eraseDeadBuffer(accumulation);
+  return true;
+}
+
 /// Fuse the bufferized frontend form where the C snapshot is outside the K
 /// loop.  Each marked matmul currently writes a zero-initialized temporary and
 /// adds it into a loop-carried accumulation buffer; after the loop the
@@ -3724,6 +4301,8 @@ static bool hasHarmlessFusionGap(Operation *from, Operation *to) {
 static bool fuseLoopedAmeAccumulator(linalg::MatmulOp matmul,
                                      const LinalgToBOSCAMEConfig &config,
                                      const DataflowPlan &plan) {
+  if (fuseAccumulatingLoopStorage(matmul, config, plan))
+    return true;
   auto loop = matmul->getParentOfType<scf::ForOp>();
   if (!loop || matmul->getBlock() != loop.getBody()) {
     return false;
@@ -3918,7 +4497,7 @@ static bool fuseLoopedAmeAccumulator(linalg::MatmulOp matmul,
   if (!matchIdentityCopy(load, cSource, ignored) ||
       !isExternalDdrBuffer(cSource) || !isExternalDdrBuffer(destination) ||
       cSource != destination ||
-      failed(verifyDirectStoreMetadata(store, destination))) {
+      !isDirectStoreMetadataLegal(store, destination)) {
     return false;
   }
   // Direct C read/modify/write changes the point at which C is observed. If
@@ -3973,8 +4552,7 @@ static bool fuseLoopedAmeAccumulator(linalg::MatmulOp matmul,
     return false;
 
   matmul.getOutputsMutable()[0].set(destination);
-  matmul->setAttr("bosc_ame.loop_accumulator",
-                  UnitAttr::get(matmul.getContext()));
+  matmul->removeAttr("bosc_ame.loop_accumulator");
   zeroCopy.erase();
   innerAdd.erase();
   load->erase();
@@ -3996,6 +4574,7 @@ static bool updateDirectAccumulatorComputeGraph(
     linalg::GenericOp add, Operation *store, ArrayRef<Operation *> copies,
     Value destination) {
   SmallVector<Operation *> fused{load, fill, matmul, add, store};
+  llvm::erase_if(fused, [](Operation *operation) { return !operation; });
   fused.append(copies.begin(), copies.end());
   bool hasMetadata = llvm::any_of(fused, [](Operation *operation) {
     return operation->hasAttr("bosc_ame.compute_id");
@@ -4211,6 +4790,8 @@ fuseDirectAmeAccumulator(ModuleOp module, const LinalgToBOSCAMEConfig &config,
   for (linalg::MatmulOp matmul : matmuls) {
     if (fuseLoopedAmeAccumulator(matmul, config, plan))
       continue;
+    if (forwardAccumulatingMatmulStorage(matmul, config, plan))
+      continue;
     Value product = matmul.getOutputs().front();
     linalg::FillOp zeroFill;
     for (Operation *user : product.getUsers())
@@ -4320,10 +4901,9 @@ fuseDirectAmeAccumulator(ModuleOp module, const LinalgToBOSCAMEConfig &config,
     if (!ordered || !hasHarmlessFusionGap(previous, store))
       continue;
 
-    // Preserve direct-mode diagnostics for masked or malformed stores rather
-    // than erasing their provenance and emitting a full-tile accumulator store.
-    if (failed(verifyDirectStoreMetadata(store, destination)))
-      return failure();
+    // Keep malformed or masked stores on the staging route.
+    if (!isDirectStoreMetadataLegal(store, destination))
+      continue;
     auto productType = dyn_cast<MemRefType>(product.getType());
     auto destinationType = dyn_cast<MemRefType>(destination.getType());
     if (!productType || !destinationType ||
@@ -4551,6 +5131,101 @@ static bool getPacketReadCost(const TransferPlan &transfer, uint64_t &readBytes,
   return true;
 }
 
+/// Record the route of every surviving read/write after placement and
+/// transfer selection. No emitter needs to infer a global storage strategy.
+static void collectBufferAccessRoutes(DataflowPlan &plan) {
+  for (BufferAccessFact &access : plan.bufferAccesses) {
+    if (!access.accessedValue || (access.effect != BufferAccessEffect::Read &&
+                                  access.effect != BufferAccessEffect::Write))
+      continue;
+    if (access.logicalFootprintBytes && *access.logicalFootprintBytes >= 0)
+      access.routeBytes = static_cast<uint64_t>(*access.logicalFootprintBytes);
+    if (access.transferIndex) {
+      const TransferPlan &transfer = plan.transfers[*access.transferIndex];
+      access.route = transfer.directExternalBoundary
+                         ? BufferAccessRoute::ExistingSpm
+                         : BufferAccessRoute::Staging;
+      access.routeReason =
+          transfer.directExternalBoundary
+              ? "resident-boundary-window"
+              : (transfer.crossTaskResident ? "proven-shared-residency"
+                                            : "operation-local-staging");
+      access.routeBank = transfer.spmBank;
+      access.routeOffset = transfer.spmOffset;
+      access.routeCapacityBytes = transfer.spmCapacity;
+      uint64_t bytes = 0, packets = 0;
+      if (getPacketReadCost(transfer, bytes, packets))
+        access.routeBytes = bytes;
+      if (auto reason = access.operation->getAttrOfType<StringAttr>(
+              "bosc_ame.store_staging_reason"))
+        access.routeReason = reason.getValue().str();
+      else if (auto matmul = dyn_cast<linalg::MatmulOp>(access.operation)) {
+        if (access.operandNumber == 2)
+          access.routeReason = isExternalDdrBuffer(access.accessedValue)
+                                   ? "accumulator-direct-unavailable"
+                                   : "private-accumulator-storage";
+        else if (const AmeMatmulTilePlan *tiles =
+                     findAmeMatmulTilePlan(plan, matmul)) {
+          bool eligible = access.operandNumber == 0 ? tiles->directAEligible
+                                                    : tiles->directBEligible;
+          access.routeReason = eligible ? "staged-lower-read-bytes"
+                                        : "staged-direct-unavailable";
+        }
+      }
+      continue;
+    }
+    if (auto bank = spmdma::getSpmBank(access.accessedValue.getType())) {
+      access.route = BufferAccessRoute::ExistingSpm;
+      access.routeReason = "existing-spm-window";
+      access.routeBank = *bank;
+      Value root = getStorageRoot(access.accessedValue);
+      if (auto view = root.getDefiningOp<SpmViewOp>()) {
+        access.routeOffset = view.getOffset();
+        access.routeCapacityBytes =
+            spmdma::getContiguousZeroOffsetByteSize(view.getType()).value_or(0);
+      }
+      continue;
+    }
+    Operation *operation = access.operation;
+    bool direct = operation->hasAttr("bosc_ame.direct_ddr");
+    if (auto matmul = dyn_cast<linalg::MatmulOp>(operation)) {
+      int64_t operand = access.operandNumber;
+      direct |= (operand == 0 && matmul->hasAttr(kDirectAOperandAttr)) ||
+                (operand == 1 && matmul->hasAttr(kDirectBOperandAttr)) ||
+                (operand == 2 && matmul->hasAttr(kDirectCOperandAttr));
+      if (direct && operand < 2) {
+        if (const AmeMatmulTilePlan *tiles =
+                findAmeMatmulTilePlan(plan, operation)) {
+          bool a = operand == 0;
+          bool byCapacity =
+              a ? tiles->directAByCapacity : tiles->directBByCapacity;
+          bool spmDisabled =
+              a ? tiles->directABySpmDisabled : tiles->directBBySpmDisabled;
+          uint64_t bytes =
+              a ? tiles->directAReadBytes : tiles->directBReadBytes;
+          uint64_t staged =
+              a ? tiles->stagedAReadBytes : tiles->stagedBReadBytes;
+          access.routeReason = byCapacity        ? "direct-capacity-fallback"
+                               : spmDisabled     ? "direct-spm-disabled"
+                               : bytes == staged ? "direct-byte-tie"
+                                                 : "direct-lower-read-bytes";
+          access.routeBytes = bytes;
+        }
+      } else if (direct) {
+        access.routeReason = "complete-legal-accumulator-tiles";
+      }
+    }
+    if (auto linalg = dyn_cast<linalg::LinalgOp>(operation))
+      direct |= linalg->hasAttr(kDirectStoreAttr) &&
+                access.operandNumber >= linalg.getNumDpsInputs();
+    if (direct) {
+      access.route = BufferAccessRoute::DirectDdr;
+      if (access.routeReason.empty())
+        access.routeReason = "complete-disjoint-external-store";
+    }
+  }
+}
+
 static bool hasLowerReadCost(uint64_t lhsBytes, uint64_t lhsPackets,
                              uint64_t rhsBytes, uint64_t rhsPackets) {
   return lhsBytes < rhsBytes ||
@@ -4620,9 +5295,16 @@ static void collectBufferPlacementFacts(ModuleOp module,
           storage.aliasProven = false;
         }
         StringRef name = user->getName().getStringRef();
-        storage.feedsAmeDirectRoute |= user->hasAttr(kDirectAOperandAttr) ||
-                                       user->hasAttr(kDirectBOperandAttr) ||
-                                       user->hasAttr(kDirectCOperandAttr) ||
+        bool directOperand = false;
+        if (auto matmul = dyn_cast<linalg::MatmulOp>(user)) {
+          constexpr StringLiteral attributes[] = {
+              kDirectAOperandAttr, kDirectBOperandAttr, kDirectCOperandAttr};
+          for (auto [index, operand] : llvm::enumerate(matmul->getOperands()))
+            if (index < 3 && operand == storage.views[i] &&
+                user->hasAttr(attributes[index]))
+              directOperand = true;
+        }
+        storage.feedsAmeDirectRoute |= directOperand ||
                                        user->hasAttr("bosc_ame.direct_ddr") ||
                                        name.starts_with("bosc_ame.tile.");
       }
@@ -4739,10 +5421,9 @@ planPlacementStaging(ModuleOp module, const LinalgToBOSCAMEConfig &config,
       if (matmul &&
           ((!write && index == 0 && op->hasAttr(kDirectAOperandAttr)) ||
            (!write && index == 1 && op->hasAttr(kDirectBOperandAttr)) ||
-           (write && config.storePolicy == "direct-ddr" &&
-            op->hasAttr(kDirectCOperandAttr))))
+           (write && op->hasAttr(kDirectCOperandAttr))))
         continue;
-      if (write && isDirectExternalStore(op, config))
+      if (write && op->hasAttr(kDirectStoreAttr))
         continue;
       if (llvm::any_of(local, [&](const TransferPlan &transfer) {
             return transfer.buffer == operand;
@@ -4994,11 +5675,6 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
   auto target = resolveTargetInfo(config.target);
   if (!target)
     return fail("unsupported BOSCAME target; expected nr-fpga");
-  if (config.storePolicy != "direct-ddr" && config.storePolicy != "spm-dma")
-    return fail("invalid BOSCAME store policy; expected direct-ddr or "
-                "spm-dma");
-  if (config.storePolicy == "spm-dma" && !config.enableSpmDma)
-    return fail("BOSCAME spm-dma store policy requires enable-spm-dma=true");
   if (config.enableSpmDma && config.dmaAbi != spmdma::kDmaAbiAlignedNonAliasing)
     return fail("SPM/DMA lowering requires dma-abi=args_aligned64_nonalias");
   if (failed(verifyCompleteComputeGraphs(module)))
@@ -5024,9 +5700,18 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
   // actually emitted as a direct DDR tile endpoint; an external C buffer that
   // fails that proof follows the ordinary SPM/DMA path.
   collectBufferSourceEvents(module, workspace);
-  if (config.storePolicy == "direct-ddr" &&
-      failed(fuseDirectAmeAccumulator(module, config, workspace)))
+  if (failed(fuseDirectAmeAccumulator(module, config, workspace)))
     return failure();
+  // The legacy external snapshot matcher also contracts its arithmetic.
+  // Independently fuse every remaining private product, including those for
+  // which external forwarding could not be proven. Collect first: erasing
+  // the successor add while walking the block invalidates the walk iterator.
+  SmallVector<linalg::MatmulOp> accumulatorCandidates;
+  module.walk([&](linalg::MatmulOp matmul) {
+    accumulatorCandidates.push_back(matmul);
+  });
+  for (linalg::MatmulOp matmul : accumulatorCandidates)
+    (void)fuseAdjacentAmeAccumulator(matmul, config);
   if (failed(verifyCompleteComputeGraphs(module)))
     return failure();
   module.walk([&](linalg::MatmulOp matmul) {
@@ -5045,6 +5730,9 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
   if (failed(directOutputStatus))
     return failure();
 
+  markDirectExternalStores(module, config,
+                           getBufferAliasContext(module, config.dmaAbi));
+
   // Direct stores use the same caller promise as DMA endpoints: a function
   // argument is only known to be 64-byte aligned and disjoint when the module
   // carries the explicit ABI contract.  Check this before any direct rewrite
@@ -5055,11 +5743,9 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
       if (operation->hasAttr("bosc_ame.direct_ddr"))
         needsDirectAbi = true;
       if (auto linalg = dyn_cast<linalg::LinalgOp>(operation)) {
-        if (config.storePolicy == "direct-ddr" &&
-            isDirectExternalStore(linalg, config))
+        if (linalg->hasAttr(kDirectStoreAttr))
           needsDirectAbi = true;
-        if (config.storePolicy == "direct-ddr" &&
-            linalg->hasAttr(::buddy::boscame::lowering::kLowerToAme))
+        if (linalg->hasAttr(::buddy::boscame::lowering::kLowerToAme))
           for (OpOperand &operand : linalg->getOpOperands())
             if (operand.getOperandNumber() >= linalg.getNumDpsInputs() &&
                 !spmdma::getSpmBank(operand.get().getType()) &&
@@ -5337,7 +6023,7 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
       if (!stagesBuffers && !usesFixedSpm)
         return;
 
-      bool directExternalStore = isDirectExternalStore(op, config);
+      bool directExternalStore = op->hasAttr(kDirectStoreAttr);
       OperationCapacityGroup group;
       group.operation = op.getOperation();
       group.block = op->getBlock();
@@ -5357,15 +6043,7 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
                 (index == 1 && matmul->hasAttr(kDirectBOperandAttr)))
               continue;
         }
-        auto memory = op->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
-        auto kind = memory ? memory.getAs<StringAttr>("kind") : StringAttr();
-        auto destination =
-            memory ? memory.getAs<StringAttr>("destination") : StringAttr();
-        bool externalStore = kind && destination &&
-                             kind.getValue() == "store" &&
-                             destination.getValue() == "external_ddr";
-        if (write && config.storePolicy == "direct-ddr" &&
-            (externalStore || op->hasAttr(kDirectCOperandAttr)) &&
+        if (write && op->hasAttr(kDirectCOperandAttr) &&
             isExternalDdrBuffer(operand))
           continue;
         if (llvm::any_of(group.requirements, [&](const CapacityRequirement &r) {
@@ -5811,15 +6489,15 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
         workspaceFunctions.insert(op->getParentOfType<func::FuncOp>());
         return;
       }
-    bool directExternalStore = isDirectExternalStore(op, config);
+    bool directExternalStore = op->hasAttr(kDirectStoreAttr);
     SmallVector<Value> directDestinations;
     if (directExternalStore) {
       for (OpOperand &operand : op->getOpOperands()) {
         if (operand.getOperandNumber() < op.getNumDpsInputs())
           continue;
-        if (failed(verifyDirectStoreMetadata(op, operand.get()))) {
-          status = failure();
-          return;
+        if (!isDirectStoreMetadataLegal(op, operand.get())) {
+          directExternalStore = false;
+          break;
         }
         if (!isExternalDdrBuffer(operand.get())) {
           status = op.emitError(
@@ -5833,8 +6511,7 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
     // AME accumulator stores carry their direct-DDR marker on the matmul
     // rather than on a frontend memory event. Apply the same definite-alias
     // check to an external C output versus A/B inputs.
-    if (config.storePolicy == "direct-ddr" &&
-        op->hasAttr(::buddy::boscame::lowering::kLowerToAme) &&
+    if (op->hasAttr(::buddy::boscame::lowering::kLowerToAme) &&
         op->hasAttr(kDirectCOperandAttr))
       for (OpOperand &operand : op->getOpOperands()) {
         if (operand.getOperandNumber() < op.getNumDpsInputs())
@@ -5849,6 +6526,7 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
     // a future iteration still needs. Keep same-root accesses only when their
     // byte ranges are proven disjoint; overlap and unknown ranges remain
     // rejected.
+    bool directAliasSafe = true;
     for (Value destination : directDestinations)
       for (Value input : op.getDpsInputs()) {
         if (getStorageRoot(destination) != getStorageRoot(input))
@@ -5865,12 +6543,18 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
         populateBufferAccessLayout(inputAccess);
         if (!getDisjointAccessProof(destinationAccess, inputAccess,
                                     aliasContext)) {
-          status = op.emitError(
-              "direct-ddr store destination aliases a Linalg input; "
-              "select store-policy=spm-dma or use distinct buffers");
-          return;
+          // Direct forwarding is unsafe for this alias pair.  Clear the
+          // candidate and let the normal staging planner diagnose capacity or
+          // endpoint limitations if no legal fallback exists.
+          directAliasSafe = false;
+          break;
         }
       }
+    if (!directAliasSafe) {
+      directExternalStore = false;
+      op->removeAttr(kDirectStoreAttr);
+      op->removeAttr(kDirectCOperandAttr);
+    }
     bool stagesBuffers = config.enableSpmDma && !ordinaryMatmul &&
                          isStageableBufferLinalg(op) &&
                          llvm::any_of(op->getOperandTypes(), [](Type type) {
@@ -5944,13 +6628,6 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
       bool write = index >= static_cast<size_t>(op.getNumDpsInputs());
       bool read =
           !write || op.payloadUsesValueFromOperand(&op->getOpOperand(index));
-      auto provenance = op->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
-      bool externalStore =
-          provenance && provenance.getAs<StringAttr>("kind") &&
-          provenance.getAs<StringAttr>("kind").getValue() == "store" &&
-          provenance.getAs<StringAttr>("destination") &&
-          provenance.getAs<StringAttr>("destination").getValue() ==
-              "external_ddr";
       if (directExternalStore && write) {
         if (!isExternalDdrBuffer(operand)) {
           status = op.emitError(
@@ -5970,13 +6647,12 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
             continue;
         }
       }
-      // In direct-DDR mode an AME accumulator is loaded from and written back
+      // A directly routed AME accumulator is loaded from and written back
       // to the external C buffer itself.  Do not reserve an SPM window or emit
       // a pair of C DMA packets for that output.  Explicit SPM destinations
       // retain their existing semantics and continue through the compatibility
       // path.
-      if (write && config.storePolicy == "direct-ddr" &&
-          (externalStore || op->hasAttr(kDirectCOperandAttr)) &&
+      if (write && op->hasAttr(kDirectCOperandAttr) &&
           !spmdma::getSpmBank(type) && isExternalDdrBuffer(operand))
         continue;
       auto found =
@@ -6202,7 +6878,17 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
       }
     }
     if (!allocation) {
-      status = op.emitError("BOSCAME SPM workspace capacity exceeded");
+      auto diagnostic = op.emitError("BOSCAME SPM workspace capacity exceeded");
+      diagnostic << "; per-bank capacity=" << workspace.bankCapacity
+                 << " reserved=[" << allocationReserved[0] << ", "
+                 << allocationReserved[1] << "] staged-bytes=[";
+      for (auto [index, transfer] : llvm::enumerate(operationTransfers)) {
+        if (index)
+          diagnostic << ", ";
+        diagnostic << transfer.spmCapacity;
+      }
+      diagnostic << ']';
+      status = failure();
       return;
     }
     for (auto [index, transfer] : llvm::enumerate(operationTransfers)) {
@@ -6297,8 +6983,6 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
                   BoolAttr::get(module.getContext(), config.enableSpmDma));
   module->setAttr("bosc_ame.enable_ame",
                   BoolAttr::get(module.getContext(), config.enableAME));
-  module->setAttr("bosc_ame.store_policy",
-                  StringAttr::get(module.getContext(), config.storePolicy));
   module->setAttr(
       "bosc_ame.bm",
       IntegerAttr::get(IntegerType::get(module.getContext(), 64), config.bm));
@@ -6319,6 +7003,7 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
                     StringAttr::get(module.getContext(), config.target));
   collectDataflowFacts(module, workspace);
   collectBufferAccessFacts(module, workspace, workspace.transfers);
+  collectBufferAccessRoutes(workspace);
   collectBufferInventoryFacts(workspace);
   collectBufferAliasPairs(module, workspace, aliasContext);
   collectMemoryDependencies(workspace, aliasContext);

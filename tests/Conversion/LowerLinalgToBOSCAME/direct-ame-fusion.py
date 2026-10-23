@@ -83,6 +83,38 @@ BUFFER_SOURCE = """module attributes {bosc_ame.placement = "logical"} {
 }
 """
 
+LOOP_SOURCE = """module attributes {bosc_ame.placement = "logical"} {
+  func.func @gemm(%a: memref<16x128xi8>, %b_storage: memref<2048xi8>, %c: memref<16x16xi32>) {
+    %zero = arith.constant @INITIAL@ : i32
+    %i0 = arith.constant 0 : index
+    %i1 = arith.constant 1 : index
+    %i2 = arith.constant 2 : index
+    %i64 = arith.constant 64 : index
+    %b = memref.reinterpret_cast %b_storage to offset: [0], sizes: [128, 16], strides: [1, 128] : memref<2048xi8> to memref<128x16xi8, strided<[1, 128]>>
+    %acc = memref.alloc() alignment = 64 : memref<16x16xi32>
+    linalg.fill ins(%zero : i32) outs(%acc : memref<16x16xi32>)
+    scf.for %k = %i0 to %i2 step %i1 {
+      %offset = arith.muli %k, %i64 : index
+      %at = memref.subview %a[0, %offset] [16, 64] [1, 1] : memref<16x128xi8> to memref<16x64xi8, strided<[128, 1], offset: ?>>
+      %bt = memref.subview %b[%offset, 0] [64, 16] [1, 1] : memref<128x16xi8, strided<[1, 128]>> to memref<64x16xi8, strided<[1, 128], offset: ?>>
+      @LOOP_EFFECT@
+      linalg.matmul {cast = #linalg.type_fn<cast_signed>, bosc_ame.lower_to_ame} ins(%at, %bt : memref<16x64xi8, strided<[128, 1], offset: ?>>, memref<64x16xi8, strided<[1, 128], offset: ?>>) outs(%acc : memref<16x16xi32>)
+    }
+    @GAP_EFFECT@
+    %snapshot = memref.alloc() alignment = 64 : memref<16x16xi32>
+    memref.copy %c, %snapshot {bosc_ame.memory = {kind = "load", logical_shape = array<i64: 16, 16>, valid_shape = array<i64: 16, 16>, masked = false}} : memref<16x16xi32> to memref<16x16xi32>
+    linalg.generic {indexing_maps = [affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>], iterator_types = ["parallel","parallel"]} ins(@ADD_INPUTS@ : memref<16x16xi32>, memref<16x16xi32>) outs(%acc : memref<16x16xi32>) {
+    ^bb0(%left: i32, %right: i32, %out: i32):
+      %sum = arith.addi %left, %right : i32
+      linalg.yield %sum : i32
+    }
+    memref.copy %acc, %c {bosc_ame.memory = {kind = "store", destination = "external_ddr", logical_shape = array<i64: 16, 16>, valid_shape = array<i64: 16, 16>, masked = false}} : memref<16x16xi32> to memref<16x16xi32>
+    @CONSUMER@
+    return
+  }
+}
+"""
+
 
 def lower_source(work, name, source, plan_report=False):
     path = work / f"{name}.mlir"
@@ -100,7 +132,7 @@ def lower_source(work, name, source, plan_report=False):
     )
 
 
-def lower(work, name, **changes):
+def lower(work, name, *, normalized=False, **changes):
     values = {
         "ARG_TYPE": "memref<64x64xi32>",
         "INITIAL": "0",
@@ -115,6 +147,19 @@ def lower(work, name, **changes):
     }
     values.update(changes)
     source = SOURCE
+    if normalized:
+        source = source.replace(
+            "    %p = memref.alloc() alignment = 64 : memref<64x64xi32>\n", ""
+        ).replace("    memref.dealloc %p : memref<64x64xi32>\n", "")
+        source = source.replace(
+            "    linalg.fill ins(%initial : i32) outs(%p : memref<64x64xi32>)\n",
+            "",
+        )
+        add = source.index(" ins(%p, %s :")
+        begin = source.rfind("    linalg.generic", 0, add)
+        end = source.index("\n    }", add) + len("\n    }")
+        source = source[:begin] + source[end:]
+        source = source.replace("outs(%p :", "outs(%s :")
     for key, value in values.items():
         source = source.replace(f"@{key}@", value)
     return lower_source(work, name, source)
@@ -242,10 +287,86 @@ def check_bufferized(work):
     assert machine.dma_log == []
 
 
+def check_loop_storage(work):
+    def lower_loop(name, **changes):
+        replacements = {
+            "INITIAL": "0",
+            "LOOP_EFFECT": "",
+            "GAP_EFFECT": "",
+            "ADD_INPUTS": "%acc, %snapshot",
+            "CONSUMER": "",
+        }
+        replacements.update(changes)
+        source = LOOP_SOURCE
+        for key, value in replacements.items():
+            source = source.replace(f"@{key}@", value)
+        return lower_source(work, name, source)
+
+    result = lower_loop("loop_accumulating")
+    check_success(result, fused=True)
+    assert "linalg.generic" not in result.stdout
+    assert "memref.alloc" not in result.stdout
+    assert result.stdout.index("scf.for ") < result.stdout.index(
+        "bosc_ame.tile.load_acc "
+    )
+    assert not re.search(r"scf.for[^\n]*iter_args[^\n]*vector<", result.stdout)
+    check_success(
+        lower_loop("loop_swapped_add", ADD_INPUTS="%snapshot, %acc"), fused=True
+    )
+    check_success(lower_loop("loop_nonzero", INITIAL="7"), fused=False)
+    check_success(
+        lower_loop(
+            "loop_extra_consumer",
+            CONSUMER="memref.copy %acc, %snapshot : memref<16x16xi32> to memref<16x16xi32>",
+        ),
+        fused=False,
+    )
+    for name, location in (
+        ("loop_read", "LOOP_EFFECT"),
+        ("gap_read", "GAP_EFFECT"),
+    ):
+        check_success(
+            lower_loop(
+                name,
+                **{
+                    location: "%old = memref.load %c[%i0, %i0] : memref<16x16xi32>"
+                },
+            ),
+            fused=False,
+        )
+    lowered = work / "loop_accumulating.lowered.mlir"
+    lowered.write_text(result.stdout)
+    a = [
+        [((i * 13 + k * 7) % 256) - 128 for k in range(128)] for i in range(16)
+    ]
+    b = [
+        [((j * 19 + k * 11) % 256) - 128 for k in range(128)] for j in range(16)
+    ]
+    previous = 0x7FFFFFF0
+    output = bytearray(struct.pack("<i", previous) * (16 * 16))
+    machine = Machine(lowered, "gemm")
+    machine.launch(
+        {
+            "%arg0": bytearray(value % 256 for row in a for value in row),
+            "%arg1": bytearray(value % 256 for row in b for value in row),
+            "%arg2": output,
+        }
+    )
+    for i in range(16):
+        for j in range(16):
+            total = previous + sum(a[i][k] * b[j][k] for k in range(128))
+            expected = (total + (1 << 31)) % (1 << 32) - (1 << 31)
+            assert (
+                struct.unpack_from("<i", output, (i * 16 + j) * 4)[0]
+                == expected
+            )
+    assert sum(name == "%arg2" for name, *_ in machine.accesses) == 16 * 2 * 2
+
+
 def check_success(result, fused):
     assert result.returncode == 0, result.stderr
     direct = re.findall(
-        r"bosc_ame.tile\.(?:load|store)_acc[^\n]*bosc_ame.direct_ddr",
+        r"bosc_ame.tile\.(?:load|store)_acc[^\n]*bosc_ame.direct_ddr\b",
         result.stdout,
     )
     assert len(direct) == (2 if fused else 0), result.stdout
@@ -254,8 +375,19 @@ def check_success(result, fused):
 def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
+    check_loop_storage(work)
     check_bufferized(work)
     check_success(lower(work, "canonical"), fused=True)
+    check_success(lower(work, "normalized", normalized=True), fused=True)
+    check_success(
+        lower(
+            work,
+            "normalized_side_effect",
+            normalized=True,
+            SIDE_EFFECT="memref.store %seven, %c[%idx0, %idx0] : memref<64x64xi32>",
+        ),
+        fused=False,
+    )
     nonzero = lower(work, "nonzero", INITIAL="7")
     check_success(nonzero, fused=False)
     assert "arith.constant dense<7> : vector<16xi32>" in nonzero.stdout
@@ -299,8 +431,9 @@ def main():
         fused=False,
     )
     masked = lower(work, "masked_store", STORE_MASK="true")
-    assert masked.returncode != 0
-    assert "direct-ddr store does not support masked stores" in masked.stderr
+    check_success(masked, fused=False)
+    assert "bosc_ame.dma.start" in masked.stdout
+    assert not re.search(r"arith.addi[^\n]*vector<", masked.stdout)
     # CHECK: PASS direct AME fusion: zero initialization, identity, masks and order
     print(
         "PASS direct AME fusion: zero initialization, identity, masks and order"

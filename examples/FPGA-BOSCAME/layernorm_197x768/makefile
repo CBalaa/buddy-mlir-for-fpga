@@ -48,10 +48,6 @@ TOOLS := $(REPO)/examples/FPGA-BOSCAME/tools
 NAME := layernorm_197x768
 OUT := $(ROOT)/build/$(NAME)
 BOSCAME_PASS ?= --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias"
-# The pass option defaults to buffer-placement=false; this example enables the
-# root-buffer placement path explicitly.  Keep the knob so the stored baseline
-# build (false) can be reproduced with the same file rules.
-BUFFER_PLACEMENT ?= true
 RUNTIME := $(REPO)/runtime/boscame/runtime
 UART := $(REPO)/runtime/boscame/uart
 PLATFORM := $(REPO)/runtime/boscame/nh_e6
@@ -92,7 +88,7 @@ $(OUT)/kernel.bufferized.mlir: $(OUT)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(w
 bufferized: $(OUT)/kernel.bufferized.mlir
 
 $(OUT)/kernel.boscame.mlir: $(OUT)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
-	$(BUDDY_OPT) $< --linalg-to-boscame="store-policy=spm-dma buffer-placement=$(BUFFER_PLACEMENT)" --promote-buffers-to-stack -o $@
+	$(BUDDY_OPT) $< --linalg-to-boscame --promote-buffers-to-stack -o $@
 boscame: $(OUT)/kernel.boscame.mlir
 
 # --- 3. BOSCAME -> LLVM dialect -> LLVM IR -----------------------------

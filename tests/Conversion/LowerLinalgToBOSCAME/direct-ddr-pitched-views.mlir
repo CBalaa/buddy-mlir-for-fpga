@@ -1,6 +1,6 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr' | FileCheck %s --check-prefix=DISJOINT
-// RUN: not buddy-opt %t/overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr' 2>&1 | FileCheck %s --check-prefix=OVERLAP
+// RUN: buddy-opt %t/disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=DISJOINT
+// RUN: not buddy-opt %t/overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=OVERLAP
 
 // The two 8x16 views have 64-byte rows separated by a 256-byte pitch.
 // Their bounding spans overlap, while their individual row ranges do not.
@@ -61,4 +61,4 @@ module {
   }
 }
 
-// OVERLAP: direct-ddr store destination aliases a Linalg input
+// OVERLAP: BOSCAME cannot prove distinct writable views of one DDR root do not alias

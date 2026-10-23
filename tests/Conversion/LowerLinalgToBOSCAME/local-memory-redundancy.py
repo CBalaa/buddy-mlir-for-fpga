@@ -13,7 +13,7 @@ from boscame_buffer_sim import Machine  # noqa: E402
 from boscame_sim import op_name, read_module, result_name  # noqa: E402
 
 TYPE = "memref<32xf32, #bosc_ame.spm<0>>"
-OPTIONS = "--lower-linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias store-policy=spm-dma"
+OPTIONS = "--lower-linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias "
 VALUES = tuple((i - 17) / 4 for i in range(32))
 OTHER = tuple(2 + i / 8 for i in range(32))
 
@@ -216,7 +216,7 @@ def check_layernorm(binary, directory):
         binary,
         fixture.read_text(),
         directory / "layernorm.mlir",
-        "--linalg-to-boscame=buffer-placement=true store-policy=spm-dma",
+        "--linalg-to-boscame=buffer-placement=true ",
     )
     tasks = {}
     for line in text.splitlines():

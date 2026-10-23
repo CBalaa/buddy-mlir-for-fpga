@@ -45,11 +45,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
 
     def invoke(name, source, args=None, expect=None):
-        args = (
-            experimental_pipeline(store_policy="spm-dma")
-            if args is None
-            else args
-        )
+        args = experimental_pipeline() if args is None else args
         file = work / (name + ".mlir")
         file.write_text(source)
         result = subprocess.run(

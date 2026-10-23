@@ -14,7 +14,7 @@ from boscame_buffer_sim import Machine  # noqa: E402
 
 PASS = (
     "--linalg-to-boscame=buffer-placement=true enable-spm-dma=true "
-    "dma-abi=args_aligned64_nonalias store-policy=spm-dma plan-report=true"
+    "dma-abi=args_aligned64_nonalias plan-report=true"
 )
 
 

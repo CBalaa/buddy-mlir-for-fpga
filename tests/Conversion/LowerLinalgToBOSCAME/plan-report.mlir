@@ -36,7 +36,7 @@ module {
 }
 
 // PLAN: BOSCAME plan report:
-// PLAN-NEXT:   target=nr-fpga tile=[64,64,128] store-policy=direct-ddr bank-capacity=131072 bytes
+// PLAN-NEXT:   target=nr-fpga tile=[64,64,128] routing=automatic bank-capacity=131072 bytes
 // PLAN-NEXT:   target-capabilities: name=nr-fpga dma={ddr-to-spm=true,spm-to-ddr=true,spm-to-spm=true,endpoint-alignment=64,packet-bytes=64,max-rank=2,pitched-rows=packetized} banks=2 channels=2 ame={signed-multiply=true,tile-mnk=64x64x64,a={bits=8,layout=mk-k-contiguous,spm=true,direct-ddr=true},b={bits=8,layout=kn-physical-nk-k-contiguous,spm=true,direct-ddr=true},accumulator={bits=32,layout=mn-n-contiguous,spm=true,direct-ddr=true}} rvv-vector-bytes=<unknown>
 // PLAN:   launch-grid: function=@gemm axis[0]=runtime(arg#0) extent=<unknown> axis[1]=runtime(arg#1) extent=<unknown> axis[2]=runtime(arg#2) extent=<unknown>
 // PLAN:   launch-grid: function=@copy unavailable
@@ -49,5 +49,5 @@ module {
 // PLAN:   bank[1]: high-water=4096/131072 bytes
 // PLAN:   marked-matmul: execution=AME m=64 n=64 k=64 a_origin_id=101 b_origin_id=202 accumulator_origin_id=<unknown> direct-A=spm-dma (planned) direct-B=spm-dma (planned) direct-C=direct-ddr (proven)
 // PLAN:   provenance-marked stores/direct decisions:
-// PLAN: op=linalg.generic destination=external_ddr decision=direct-ddr (provenance)
+// PLAN: op=linalg.generic destination=external_ddr decision=direct-ddr (proven)
 // PLAN:   limits: calibrated cost search, general cross-op residency, and cross-program reuse are not modeled.

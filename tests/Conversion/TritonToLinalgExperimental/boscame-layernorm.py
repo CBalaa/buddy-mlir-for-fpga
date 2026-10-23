@@ -21,7 +21,7 @@ def lower(source, output, boscame):
         opt,
         str(source),
         *(
-            experimental_pipeline("spm-dma")
+            experimental_pipeline()
             if boscame
             else ["--triton-to-linalg-experimental"]
         ),

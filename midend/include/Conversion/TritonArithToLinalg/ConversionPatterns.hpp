@@ -1318,54 +1318,78 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
          !cast<RankedTensorType>(opa.getType()).getElementType().isInteger(8) ||
          !cast<RankedTensorType>(opb.getType()).getElementType().isInteger(8)))
       return op.emitError("BOSCAME integer dot requires signed i8 x i8 -> i32");
-    bool skipC = isZeroTensor(opc, integers);
-    auto init =
-        rewriter.create<tensor::EmptyOp>(loc, dstType.getShape(), elementType);
-    TypedAttr constantAttr =
-        integers
-            ? static_cast<TypedAttr>(rewriter.getIntegerAttr(elementType, 0))
-            : static_cast<TypedAttr>(rewriter.getFloatAttr(elementType, 0));
-
-    auto zero = rewriter.create<mlir::arith::ConstantOp>(
-        op.getLoc(), elementType, constantAttr);
-
-    auto zeroes =
-        rewriter.create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{init})
-            .result();
-
     // For mixed-precision integer matmul (e.g. i8 x i8 -> i32), linalg.matmul
     // requires a cast attribute so the inner multiply can promote i8 operands
     // to the i32 accumulator type.  Without it the op verifier rejects the IR.
     Value res;
+    bool skipC = false;
     auto aElemType = cast<RankedTensorType>(opa.getType()).getElementType();
 
-    if (!integers && aElemType != elementType) {
-      // Promote float operands to accumulator type
-      auto opaType = cast<RankedTensorType>(opa.getType());
-      auto promotedAType =
-          RankedTensorType::get(opaType.getShape(), elementType);
-      opa = rewriter.create<arith::ExtFOp>(loc, promotedAType, opa);
-
-      auto opbType = cast<RankedTensorType>(opb.getType());
-      auto promotedBType =
-          RankedTensorType::get(opbType.getShape(), elementType);
-      opb = rewriter.create<arith::ExtFOp>(loc, promotedBType, opb);
-    }
-
-    bool isMixedIntPrecision = integers && (aElemType != elementType);
-    if (isMixedIntPrecision) {
-      auto castAttr = linalg::TypeFnAttr::get(rewriter.getContext(),
-                                              linalg::TypeFn::cast_signed);
-      res = rewriter
-                .create<linalg::MatmulOp>(loc, TypeRange{zeroes.getType()},
-                                          ValueRange{opa, opb},
-                                          ValueRange{zeroes}, castAttr)
-                .getResult(0);
+    // AME consumes the dot's accumulator directly.  Keeping the incoming C
+    // tensor as the linalg output makes the reduction order explicit and
+    // prevents a separate product tensor followed by a tensor add.  The
+    // ordinary Triton lowering below retains its historical zero-product
+    // expansion for integer and floating point dots outside BOSCAME.
+    if (enableBOSCAME && integers) {
+      bool isMixedIntPrecision = aElemType != elementType;
+      if (isMixedIntPrecision) {
+        auto castAttr = linalg::TypeFnAttr::get(rewriter.getContext(),
+                                                linalg::TypeFn::cast_signed);
+        res = rewriter
+                  .create<linalg::MatmulOp>(loc, TypeRange{opc.getType()},
+                                            ValueRange{opa, opb},
+                                            ValueRange{opc}, castAttr)
+                  .getResult(0);
+      } else {
+        res = rewriter
+                  .create<linalg::MatmulOp>(loc, ValueRange{opa, opb},
+                                            ValueRange{opc})
+                  .getResult(0);
+      }
     } else {
-      res = rewriter
-                .create<linalg::MatmulOp>(loc, ValueRange{opa, opb},
-                                          ValueRange{zeroes})
-                .getResult(0);
+      skipC = isZeroTensor(opc, integers);
+      auto init = rewriter.create<tensor::EmptyOp>(loc, dstType.getShape(),
+                                                   elementType);
+      TypedAttr constantAttr =
+          integers
+              ? static_cast<TypedAttr>(rewriter.getIntegerAttr(elementType, 0))
+              : static_cast<TypedAttr>(rewriter.getFloatAttr(elementType, 0));
+
+      auto zero = rewriter.create<mlir::arith::ConstantOp>(
+          op.getLoc(), elementType, constantAttr);
+
+      auto zeroes =
+          rewriter
+              .create<linalg::FillOp>(loc, ValueRange{zero}, ValueRange{init})
+              .result();
+
+      if (!integers && aElemType != elementType) {
+        // Promote float operands to accumulator type
+        auto opaType = cast<RankedTensorType>(opa.getType());
+        auto promotedAType =
+            RankedTensorType::get(opaType.getShape(), elementType);
+        opa = rewriter.create<arith::ExtFOp>(loc, promotedAType, opa);
+
+        auto opbType = cast<RankedTensorType>(opb.getType());
+        auto promotedBType =
+            RankedTensorType::get(opbType.getShape(), elementType);
+        opb = rewriter.create<arith::ExtFOp>(loc, promotedBType, opb);
+      }
+
+      if (integers && (aElemType != elementType)) {
+        auto castAttr = linalg::TypeFnAttr::get(rewriter.getContext(),
+                                                linalg::TypeFn::cast_signed);
+        res = rewriter
+                  .create<linalg::MatmulOp>(loc, TypeRange{zeroes.getType()},
+                                            ValueRange{opa, opb},
+                                            ValueRange{zeroes}, castAttr)
+                  .getResult(0);
+      } else {
+        res = rewriter
+                  .create<linalg::MatmulOp>(loc, ValueRange{opa, opb},
+                                            ValueRange{zeroes})
+                  .getResult(0);
+      }
     }
 
     if (enableBOSCAME && integers)
@@ -1392,12 +1416,11 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
           matmul->setAttr("bosc_ame.accumulator_origin_id", id);
     }
 
-    if (!skipC) {
-      if (integers) {
+    if (!(enableBOSCAME && integers) && !skipC) {
+      if (integers)
         res = rewriter.create<arith::AddIOp>(loc, opc, res);
-      } else {
+      else
         res = rewriter.create<arith::AddFOp>(loc, opc, res);
-      }
     }
 
     rewriter.replaceOp(op, res);

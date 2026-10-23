@@ -1,13 +1,11 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr plan-report=true' -o /dev/null 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o /dev/null 2>%t.plan
 // RUN: FileCheck %s --check-prefix=DIAG < %t.plan
 
-// This fixture uses heterogeneous projected input shapes to exercise a repair
-// that a valid current SPM generic cannot express. The planner report is
-// emitted before the SPM generic verifier rejects the operation. Sorted greedy
-// placement splits the ten 18,752-byte inputs evenly and cannot place the third
-// 18,688-byte input. A feasible packing moves one large input so four large
-// and three small windows exactly fill one bank.
+// This formerly exercised bounded bank repair by treating a projected generic
+// as a direct external store. Such a store lacks the identity/shape proof
+// required for direct writes. Automatic routing must account for its large
+// destination staging window and report the actual capacity limit before
+// reaching the unsupported heterogeneous SPM generic.
 module {
   func.func @bounded_bank_repair(
       %x0: memref<4688xf32>, %x1: memref<4688xf32>,
@@ -58,7 +56,4 @@ module {
   }
 }
 
-// PLAN: bank-allocation-search: scope=operation-local groups=1 exact-assignments=0 exact-rejected-assignments=0 bounded-groups=1 repair-groups=1 repair-search-nodes=18 repair-rejected-placements=6 objective=minimize-bank-high-water status=bounded latency=uncalibrated
-// PLAN: bank[0]: high-water=112512/131072 bytes
-// PLAN: bank[1]: high-water=131072/131072 bytes
-// DIAG: error: SPM generic requires matching shapes, element byte widths and identity indexing maps
+// DIAG: error: BOSCAME SPM workspace capacity exceeded; per-bank capacity=131072 reserved=[0, 0] staged-bytes=[87609344, 18752

@@ -521,20 +521,17 @@ static LogicalResult fuseDirectVectorStores(ModuleOp module, bool directDDR) {
     if (!zeroIndices)
       continue;
 
-    // Keep the same address contract used by a fused linalg store.  If the
-    // proof fails, leave the copy intact so the planner reports its usual
-    // direct-DDR diagnostic instead of silently creating an unaligned RVV
-    // transfer.  Physical row pitches are checked in bytes, independently of
-    // the vector's logical minor dimension.
+    // A failed direct proof keeps the copy available for automatic staging.
+    // Physical row pitches are checked in bytes, independently of the vector's
+    // logical minor dimension.
     auto origin = spmdma::getStaticPointerOrigin(copy.getTarget());
     auto rootArgument =
         origin ? dyn_cast<BlockArgument>(origin->root) : BlockArgument();
     if (!rootArgument || !rootArgument.getOwner()->isEntryBlock() ||
         !isa<func::FuncOp>(rootArgument.getOwner()->getParentOp()))
       continue;
-    if (failed(spmdma::verifyEndpointPointerAlignment(
-            copy, copy.getTarget(), "direct-DDR vector store", 64)))
-      return failure();
+    if (!spmdma::isEndpointPointerAlignmentProven(copy.getTarget(), 64))
+      continue;
     if (vectorProducerReadsRoot(transfer.getVector(), copy.getTarget()))
       continue;
     SmallVector<int64_t> strides;
@@ -553,9 +550,7 @@ static LogicalResult fuseDirectVectorStores(ModuleOp module, bool directDDR) {
         continue;
       if (llvm::MulOverflow(strides.front(), *elementBytes, rowBytes) ||
           rowBytes % spmdma::kDmaAlignmentBytes != 0)
-        return copy.emitError(
-            "direct-DDR vector store requires 64-byte-aligned physical row "
-            "strides");
+        continue;
     }
 
     // Preserve the exact transfer map and in-bounds contract while changing
@@ -744,6 +739,7 @@ LogicalResult emitBOSCAMEDmaTransfers(ModuleOp module,
       const int64_t packetElements =
           workspace.target.dma.packetGranularityBytes / transfer.elementBytes;
       auto vectorType = VectorType::get({packetElements}, transfer.elementType);
+      Operation *completion = nullptr;
       for (const DmaPacket &packet : transfer.packets) {
         int64_t endElements =
             packet.spmOffsetBytes / transfer.elementBytes + packetElements;
@@ -769,8 +765,15 @@ LogicalResult emitBOSCAMEDmaTransfers(ModuleOp module,
           emitPacket(builder, loc, transfer, packet, flat, /*write=*/true);
         }
         builder.setInsertionPointAfter(ifOp);
+        completion = ifOp;
       }
+      // The final guard completes the entire conditional memory event even
+      // when its extent is zero. Keep one task at that unconditional control
+      // point; a DMA wait inside the guard would disappear on the false path.
+      copyBOSCAMEGraphAttrs(consumer, completion);
       consumer->erase();
+      if (failed(verifyCompleteComputeGraphs(module)))
+        return failure();
       continue;
     }
     if (transfer.read)

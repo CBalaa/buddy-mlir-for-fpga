@@ -18,7 +18,6 @@ module {
   }
 }
 
-// CHECK: bosc_ame.store_policy = "direct-ddr"
 // CHECK: bosc_ame.tile.load_acc {{.*}} : memref<64x64xi32, strided<[64, 1]>, #bosc_ame.spm<
 // CHECK: bosc_ame.tile.store_acc {{.*}} : vector<64x64xi32>, memref<64x64xi32, strided<[64, 1]>, #bosc_ame.spm<
 // CHECK: bosc_ame.dma.start

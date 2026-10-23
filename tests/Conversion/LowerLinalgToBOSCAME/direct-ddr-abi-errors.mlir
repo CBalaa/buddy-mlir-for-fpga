@@ -1,7 +1,7 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='target=nr-fpga' 2>&1 | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='target=nr-fpga' 2>&1 | FileCheck %s
 
-// Direct external stores use the same aligned, non-aliasing caller promise as
-// typed DMA endpoints, even when no input requires SPM staging.
+// Without an aligned, non-aliasing caller promise the planner cannot prove
+// a direct forwarding route. Ordinary buffer loops retain the copy semantics.
 module {
   func.func @store(%src: memref<64xf32>, %dst: memref<64xf32>) {
     memref.copy %src, %dst {
@@ -13,4 +13,8 @@ module {
   }
 }
 
-// CHECK: direct DDR AME operands/stores require dma-abi=args_aligned64_nonalias
+// CHECK-NOT: bosc_ame.direct_ddr
+// CHECK-NOT: bosc_ame.dma.start
+// CHECK: scf.for
+// CHECK: memref.load
+// CHECK: memref.store

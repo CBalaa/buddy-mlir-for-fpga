@@ -10,7 +10,6 @@ module attributes {
   bosc_ame.enable_ame = true,
   bosc_ame.enable_spm_dma = true,
   bosc_ame.placement = "logical",
-  bosc_ame.store_policy = "direct-ddr",
   bosc_ame.target = "nr-fpga"
 } {
   func.func @logical_gemm(

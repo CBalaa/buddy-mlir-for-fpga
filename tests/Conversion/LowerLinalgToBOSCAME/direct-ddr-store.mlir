@@ -2,8 +2,8 @@
 // RUN: FileCheck %s --check-prefix=IR < %t
 // RUN: buddy-opt %t --lower-bosc-ame | FileCheck %s --check-prefix=LLVM
 
-// External C stores use the default direct-DDR policy.  A and B still use the
-// typed SPM/DMA staging path, while the AME accumulator reads and writes C
+// The automatic planner proves the external C store is direct DDR. A and B
+// still use the typed SPM/DMA staging path, while the AME accumulator reads and writes C
 // itself, so no C DMA request is emitted.
 module {
   func.func @gemm(%a: memref<64x64xi8>,
@@ -17,7 +17,6 @@ module {
   }
 }
 
-// IR: bosc_ame.store_policy = "direct-ddr"
 // IR-COUNT-2: bosc_ame.dma.start
 // IR: bosc_ame.tile.load_acc {{.*}} {bosc_ame.direct_ddr}
 // IR: bosc_ame.tile.store_acc {{.*}} {bosc_ame.direct_ddr}

@@ -1,6 +1,7 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
 """Execute guarded dynamic-prefix DMA at zero, partial, and full extents."""
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ def main():
         [
             buddy_opt_path(),
             str(input_path),
-            *experimental_pipeline(store_policy="spm-dma"),
+            *experimental_pipeline(),
             "-o",
             str(optimized),
         ],
@@ -35,6 +36,24 @@ def main():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+    lowered = optimized.read_text()
+    assert "bosc_ame.compute_graph_complete = true" in lowered
+    assert "bosc_ame.compute_graph_node_count = 3 : i64" in lowered
+    assert sorted(
+        map(int, re.findall(r"bosc_ame.compute_id = (\d+)", lowered))
+    ) == [
+        0,
+        1,
+        2,
+    ]
+    # Guarded load/store task IDs belong to the final scf.if, which completes
+    # the memory event even when all packet guards are false at extent zero.
+    for task_id in (1, 2):
+        assert re.search(
+            rf"^\s*\}} \{{[^\n]*bosc_ame.compute_id = {task_id} : i64",
+            lowered,
+            re.M,
+        ), lowered
 
     loops = work / "dynamic-prefix.loops.mlir"
     subprocess.run(

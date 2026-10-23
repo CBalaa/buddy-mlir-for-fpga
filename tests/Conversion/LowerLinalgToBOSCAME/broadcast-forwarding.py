@@ -106,7 +106,7 @@ def main():
             [
                 binary,
                 "-",
-                "--lower-linalg-to-boscame=buffer-placement=true enable-spm-dma=true store-policy=spm-dma dma-abi=args_aligned64_nonalias",
+                "--lower-linalg-to-boscame=buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias",
             ],
             input=source(case),
             text=True,

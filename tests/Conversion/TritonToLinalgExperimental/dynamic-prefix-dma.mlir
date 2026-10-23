@@ -1,4 +1,4 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true store-policy=spm-dma dma-abi=args_aligned64_nonalias plan-report=true' -o %t.ir 2>%t.plan
+// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t.ir 2>%t.plan
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
 // RUN: FileCheck %s --check-prefix=IR --implicit-check-not=memref.copy < %t.ir
 
@@ -24,27 +24,28 @@ module {
 // PLAN: resources: {{.*}}totals-exact=false
 
 // A load packet's guard encloses its immediate wait and the SPM-to-local copy.
-// IR: scf.for {{.*}} to %c32 step %c16
-// IR: vector.store %cst
-// IR: arith.cmpi sge, {{.*}}, %c16 : index
+// IR: [[ZERO:%.*]] = vector.broadcast %cst : f32 to vector<16xf32>
+// IR: scf.for {{.*}} to %c32{{(_[0-9]+)?}} step %c16{{(_[0-9]+)?}}
+// IR: vector.store [[ZERO]]
+// IR: arith.cmpi sge, {{.*}}, %c16{{(_[0-9]+)?}} : index
 // IR: scf.if
 // IR: bosc_ame.dma.start {{.*}}, %c64
 // IR-NEXT: bosc_ame.dma.wait
 // IR: vector.load
 // IR: vector.store
-// IR: arith.cmpi sge, {{.*}}, %c32 : index
+// IR: arith.cmpi sge, {{.*}}, %c32{{(_[0-9]+)?}} : index
 // IR: scf.if
 // IR: bosc_ame.dma.start {{.*}}, %c64
 // IR-NEXT: bosc_ame.dma.wait
 
 // A store packet is guarded through both its source read and DDR write.
-// IR: arith.cmpi sge, {{.*}}, %c16 : index
+// IR: arith.cmpi sge, {{.*}}, %c16{{(_[0-9]+)?}} : index
 // IR: scf.if
 // IR: bosc_ame.dma.start {{.*}}, %c64
 // IR-NEXT: bosc_ame.dma.wait
 // IR: bosc_ame.dma.start {{.*}}, %c64
 // IR-NEXT: bosc_ame.dma.wait
-// IR: arith.cmpi sge, {{.*}}, %c32 : index
+// IR: arith.cmpi sge, {{.*}}, %c32{{(_[0-9]+)?}} : index
 // IR: scf.if
 // IR: bosc_ame.dma.start {{.*}}, %c64
 // IR-NEXT: bosc_ame.dma.wait

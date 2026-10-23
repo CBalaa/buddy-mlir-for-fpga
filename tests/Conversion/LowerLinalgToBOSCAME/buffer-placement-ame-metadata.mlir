@@ -1,4 +1,4 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias store-policy=spm-dma plan-report=true' -o %t 2>%t.plan
+// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
 // RUN: FileCheck %s --check-prefix=GRAPH < %t
 // RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null

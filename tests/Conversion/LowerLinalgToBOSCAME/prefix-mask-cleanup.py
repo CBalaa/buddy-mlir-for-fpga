@@ -11,7 +11,7 @@ graph = runpy.run_path(
 )["graph"]
 OPTIONS = (
     "--linalg-to-boscame=buffer-placement=true enable-spm-dma=true "
-    "dma-abi=args_aligned64_nonalias store-policy=spm-dma"
+    "dma-abi=args_aligned64_nonalias "
 )
 
 

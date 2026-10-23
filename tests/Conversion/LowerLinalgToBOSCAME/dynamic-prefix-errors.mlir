@@ -1,8 +1,8 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/strided-peer.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=STRIDED
-// RUN: not buddy-opt %t/oversized.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=CAPACITY
-// RUN: not buddy-opt %t/global-peer.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=ALIAS
-// RUN: not buddy-opt %t/helper-alias.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=spm-dma' 2>&1 | FileCheck %s --check-prefix=HELPER-ALIAS
+// RUN: not buddy-opt %t/strided-peer.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=STRIDED
+// RUN: not buddy-opt %t/oversized.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=CAPACITY
+// RUN: not buddy-opt %t/global-peer.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=ALIAS
+// RUN: not buddy-opt %t/helper-alias.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=HELPER-ALIAS
 
 // STRIDED: dynamic BOSCAME prefix peer buffer must be contiguous
 // CAPACITY: BOSCAME SPM workspace capacity exceeded

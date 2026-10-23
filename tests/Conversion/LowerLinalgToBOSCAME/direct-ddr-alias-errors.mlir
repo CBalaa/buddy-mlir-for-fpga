@@ -1,4 +1,4 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga store-policy=direct-ddr' 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s
 
 // A direct destination that is also a Linalg input has no write barrier in
 // the direct vector path.  Definite root aliasing is rejected up front.
@@ -13,4 +13,4 @@ module {
   }
 }
 
-// CHECK: direct-ddr store destination aliases a Linalg input
+// CHECK: SPM DMA copy source and destination overlap

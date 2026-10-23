@@ -161,8 +161,7 @@ def build_kernel(args, out, buddy_opt, buddy_translate, kernel):
         PASS_OPTIONS
         if kernel == "gemm"
         else (
-            "enable-spm-dma=true store-policy=spm-dma "
-            "dma-abi=args_aligned64_nonalias target=nr-fpga"
+            "enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga"
         )
     )
     shutil.copyfile(HERE / f"{kernel}.bufferized.mlir", bufferized)
