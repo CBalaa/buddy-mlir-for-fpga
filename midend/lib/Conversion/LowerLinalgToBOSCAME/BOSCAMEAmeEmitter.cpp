@@ -124,7 +124,6 @@ static bool isExternalDdrBuffer(Value value) {
 }
 
 LogicalResult verifyStagedOperands(linalg::MatmulOp op,
-                                   const LinalgToBOSCAMEConfig &config,
                                    const TargetInfo &target) {
   constexpr TileRole roles[] = {TileRole::A, TileRole::B,
                                 TileRole::Accumulator};
@@ -202,13 +201,14 @@ Value subview(OpBuilder &builder, Location loc, Value source, int64_t row,
                                    strides);
 }
 
-bool emitLoopedMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
-                      const AmeMatmulTilePlan &tilePlan) {
+Operation *emitLoopedMatmul(linalg::MatmulOp op,
+                            const LinalgToBOSCAMEConfig &config,
+                            const AmeMatmulTilePlan &tilePlan) {
   if (config.storePolicy != "direct-ddr" || !op->hasAttr(kLoopAccumulatorAttr))
-    return false;
+    return nullptr;
   auto loop = op->getParentOfType<scf::ForOp>();
   if (!loop || op->getBlock() != loop.getBody())
-    return false;
+    return nullptr;
 
   OpBuilder builder(op);
   Location loc = op.getLoc();
@@ -296,25 +296,27 @@ bool emitLoopedMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
         return yielded;
       });
   if (failed(newLoop))
-    return false;
+    return nullptr;
   loop = cast<scf::ForOp>(*newLoop);
 
-  // The marked matmul has been replaced by the tile chain in the loop body.
-  op.erase();
+  // Stores after the loop complete the whole accumulator chain, including
+  // every dynamic iteration. Retain the source until its metadata is moved.
   builder.setInsertionPointAfter(loop);
+  Operation *completion = nullptr;
   for (auto [index, cTile] : llvm::enumerate(cTiles)) {
     auto storeAcc = TileStoreAccOp::create(
         builder, loc, loop.getResult(originalResults + index), cTile);
     if (directC)
       storeAcc->setAttr("bosc_ame.direct_ddr", builder.getUnitAttr());
+    completion = storeAcc;
   }
-  return true;
+  return completion;
 }
 
-void emitMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
-                const AmeMatmulTilePlan &tilePlan) {
-  if (emitLoopedMatmul(op, config, tilePlan))
-    return;
+Operation *emitMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
+                      const AmeMatmulTilePlan &tilePlan) {
+  if (Operation *completion = emitLoopedMatmul(op, config, tilePlan))
+    return completion;
   OpBuilder builder(op);
   Location loc = op.getLoc();
   Value a = op.getInputs()[0], b = op.getInputs()[1], c = op.getOutputs()[0];
@@ -324,6 +326,7 @@ void emitMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
   int64_t blockM = tilePlan.tileM;
   int64_t blockN = tilePlan.tileN;
   int64_t blockK = tilePlan.tileK;
+  Operation *completion = nullptr;
 
   for (int64_t miIndex = 0; miIndex < tilePlan.mTileCount; ++miIndex) {
     int64_t mi = miIndex * blockM;
@@ -377,14 +380,25 @@ void emitMatmul(linalg::MatmulOp op, const LinalgToBOSCAMEConfig &config,
           op->hasAttr(kDirectCOperandAttr) && !spmdma::getSpmBank(cType) &&
           isExternalDdrBuffer(c))
         storeAcc->setAttr("bosc_ame.direct_ddr", builder.getUnitAttr());
+      completion = storeAcc;
     }
   }
-  op.erase();
+  return completion;
 }
 
 } // namespace
 
 namespace buddy::boscame {
+
+LogicalResult verifyBOSCAMEPlacedMatmul(Operation *operation,
+                                        const TargetInfo &target) {
+  auto matmul = dyn_cast<linalg::MatmulOp>(operation);
+  if (!matmul || !matmul->hasAttr(::buddy::boscame::lowering::kLowerToAme))
+    return operation->emitError("resident matmul must target AME");
+  if (failed(verifyMatmul(matmul, target.ame)))
+    return failure();
+  return verifyStagedOperands(matmul, target);
+}
 
 LogicalResult verifyBOSCAMEAmeConsumers(ModuleOp module,
                                         const DataflowPlan &plan) {
@@ -399,7 +413,8 @@ LogicalResult verifyBOSCAMEAmeConsumers(ModuleOp module,
 
 LogicalResult lowerBOSCAMEAmeConsumers(ModuleOp module,
                                        const LinalgToBOSCAMEConfig &config,
-                                       const DataflowPlan &plan) {
+                                       const DataflowPlan &plan,
+                                       bool preserveComputeGraph) {
   SmallVector<linalg::MatmulOp> targets;
   module.walk([&](linalg::MatmulOp op) {
     if (op->hasAttr(::buddy::boscame::lowering::kLowerToAme))
@@ -421,7 +436,7 @@ LogicalResult lowerBOSCAMEAmeConsumers(ModuleOp module,
   SmallVector<const AmeMatmulTilePlan *> tilePlans;
   for (linalg::MatmulOp op : targets) {
     if (failed(verifyMatmul(op, plan.target.ame)) ||
-        failed(verifyStagedOperands(op, config, plan.target)))
+        failed(verifyStagedOperands(op, plan.target)))
       return failure();
     const AmeMatmulTilePlan *tilePlan =
         findAmeMatmulTilePlan(plan, op.getOperation());
@@ -446,8 +461,19 @@ LogicalResult lowerBOSCAMEAmeConsumers(ModuleOp module,
   }
   module->setAttr(kAmeTargetAttrName,
                   StringAttr::get(module.getContext(), kAmeTargetNrFpga));
-  for (auto [index, op] : llvm::enumerate(targets))
-    emitMatmul(op, config, *tilePlans[index]);
+  for (auto [index, op] : llvm::enumerate(targets)) {
+    Operation *completion = emitMatmul(op, config, *tilePlans[index]);
+    if (preserveComputeGraph)
+      // M/N/K tiles are expanded statically. The final store is a unique
+      // completion point for every tile, rather than one dynamic inner MMA.
+      for (NamedAttribute attribute : op->getAttrs())
+        if (attribute.getName().getValue().starts_with("bosc_ame.") &&
+            attribute.getName().getValue() != lowering::kLowerToAme)
+          completion->setAttr(attribute.getName(), attribute.getValue());
+    op.erase();
+    if (preserveComputeGraph && failed(verifyCompleteComputeGraphs(module)))
+      return failure();
+  }
   return success();
 }
 

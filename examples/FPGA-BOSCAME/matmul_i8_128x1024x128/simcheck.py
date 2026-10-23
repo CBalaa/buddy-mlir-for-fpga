@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Bit-exact DDR-level check of the generated experimental BOSCAME kernel.
 
-`make host` verifies the Triton-to-linalg path, which does not contain the
-DMA/SPM/AME datapath at all.  This script runs the *AME* output instead:
+This script runs the experimental BOSCAME pass output:
 every program of the launch grid is executed by `tools/boscame_buffer_sim.py` (the
 functional NH/E6 model -- real DMA contract, two 128 KiB SPM banks, AME tile
 semantics) and the resulting C is compared against an independent NumPy INT32

@@ -416,6 +416,9 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32,
   }
 }
 
+// The report summarizes the complete module: @bounded contributes four
+// argument and five producer candidates; @producer_candidates adds five more
+// producer candidates, for fourteen joint candidates and ten producers.
 // PLAN: function-argument-residency-search: candidates=4 selected=4 rejected-capacity=0 objective=minimize-read-bytes-then-packets status=bounded latency=uncalibrated
-// PLAN: cross-task-residency-search: candidates=9 selected=9 rejected-capacity=0 objective=minimize-total-read-bytes-then-packets status=bounded latency=uncalibrated
-// PLAN: producer-output-residency-search: candidates=5 selected=5 rejected-capacity=0 objective=maximize-read-bytes-then-packets-saved status=bounded latency=uncalibrated
+// PLAN: cross-task-residency-search: candidates=14 selected=14 rejected-capacity=0 objective=minimize-total-read-bytes-then-packets status=bounded latency=uncalibrated
+// PLAN: producer-output-residency-search: candidates=10 selected=10 rejected-capacity=0 objective=maximize-read-bytes-then-packets-saved status=bounded latency=uncalibrated

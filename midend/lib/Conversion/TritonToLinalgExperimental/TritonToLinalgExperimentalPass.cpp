@@ -7,6 +7,7 @@
 
 #include "Analysis/LinalgComputationFacts.h"
 #include "Analysis/LinalgComputationFactsPrinter.h"
+#include "BOSCAMETileSpecialization.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
 #include "Conversion/TritonArithToLinalg/TritonArithToLinalg.h"
 #include "Conversion/TritonPtrToMemref/TritonPtrToMemref.h"
@@ -3107,6 +3108,17 @@ public:
       return;
     }
     if (config.enableBOSCAME) {
+      if (failed(specializeBOSCAMETiles(moduleOp))) {
+        signalPassFailure();
+        return;
+      }
+      OpPassManager cleanup(ModuleOp::getOperationName());
+      cleanup.addPass(createCanonicalizerPass());
+      cleanup.addPass(createCSEPass());
+      if (failed(runPipeline(cleanup, moduleOp))) {
+        signalPassFailure();
+        return;
+      }
       annotateStaticZeroTailSelects(moduleOp);
       annotateComputeGraph(moduleOp);
     }

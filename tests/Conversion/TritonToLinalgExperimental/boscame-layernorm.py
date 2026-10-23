@@ -54,12 +54,15 @@ def main():
     candidate = lower(source, str(prefix) + ".boscame.mlir", True)
     baseline = lower(source, str(prefix) + ".default.mlir", False)
     candidate_text = Path(str(prefix) + ".boscame.mlir").read_text()
-    assert "vector.reduction" not in candidate_text
-    assert candidate_text.count("vector.extract ") == 2
+    assert candidate_text.count("vector.reduction <add>") == 2
+    assert "vector.extract " not in candidate_text
+    assert "vector<1xf32>" not in candidate_text
+    assert not re.search(r"memref\.alloca?[^\n]*: memref<f32>", candidate_text)
+    assert not re.search(r"memref\.(?:load|store|copy)\b", candidate_text)
     assert (
         len(
             re.findall(
-                r"vector\.extract [^\n]*\[0\] : f32 from vector<1xf32>",
+                r"vector\.reduction <add>[^\n]*vector<16xf32> into f32",
                 candidate_text,
             )
         )
@@ -130,9 +133,16 @@ def main():
         reference.launch(reference_buffers, scalars)
         start, end = row * width * 4, (row + 1) * width * 4
         actual = np.frombuffer(buffers["%arg3"][start:end], dtype=np.float32)
-        assert (
-            buffers["%arg3"][start:end] == reference_buffers["%arg3"][start:end]
-        ), "default experimental path differs"
+        reference_actual = np.frombuffer(
+            reference_buffers["%arg3"][start:end], dtype=np.float32
+        )
+        np.testing.assert_allclose(
+            actual,
+            reference_actual,
+            rtol=2.0e-5,
+            atol=2.0e-5,
+            err_msg="default experimental path differs beyond vector-reduction tolerance",
+        )
         # The second reduction keeps 1024 lanes after selecting padded lanes to zero.
         padded = np.pad(x[row].astype(np.float64), (0, 256))
         mean = padded.sum() / width
@@ -144,8 +154,9 @@ def main():
         max_error = max(max_error, float(np.max(np.abs(actual - expected))))
         # An independent f32 oracle spells out each TTIR operation and the
         # sequential reduction selected by the unchanged Linalg loop path.
-        # Compare exactly; the f64 formula above measures accumulated rounding,
-        # including cancellation in the affine epilogue near zero.
+        # Vector reduction may round differently on the target. The f64
+        # formula above separately measures accumulated rounding, including
+        # cancellation in the affine epilogue near zero.
         padded32 = np.pad(x[row], (0, 256))
         mean32 = np.float32(
             np.cumsum(padded32, dtype=np.float32)[-1] / np.float32(width)
@@ -169,7 +180,7 @@ def main():
             bias,
             dtype=np.float32,
         )
-        np.testing.assert_array_equal(actual, oracle32)
+        np.testing.assert_allclose(actual, oracle32, rtol=2.0e-5, atol=2.0e-5)
         accesses = machine.accesses[-4:]
         assert accesses == [
             ("%arg0", start, end, "read"),
@@ -184,16 +195,18 @@ def main():
     print(
         f"PASS LayerNorm: {len(order)} programs, three 3072 B loads and one 3072 B store per program"
     )
-    # CHECK: PASS numerics: bit-identical to default experimental buffer IR; independent masked-lane TTIR oracle
+    # CHECK: PASS numerics: rtol=2e-5, atol=2e-5 against default experimental buffer IR and independent masked-lane TTIR oracle
     print(
-        f"PASS numerics: bit-identical to default experimental buffer IR; independent masked-lane TTIR oracle (max absolute error {max_error:.3g})"
+        f"PASS numerics: rtol=2e-5, atol=2e-5 against default experimental buffer IR and independent masked-lane TTIR oracle (max absolute error vs f64 {max_error:.3g})"
     )
     # CHECK: PASS guards: last row, Weight/Bias tails and persistent poisoned SPM
     print(
         "PASS guards: last row, Weight/Bias tails and persistent poisoned SPM"
     )
-    # CHECK: PASS SPM: direct vector arithmetic and two scalar-order reductions
-    print("PASS SPM: direct vector arithmetic and two scalar-order reductions")
+    # CHECK: PASS SPM: direct vector arithmetic and two ordered vector reductions
+    print(
+        "PASS SPM: direct vector arithmetic and two ordered vector reductions"
+    )
 
 
 if __name__ == "__main__":

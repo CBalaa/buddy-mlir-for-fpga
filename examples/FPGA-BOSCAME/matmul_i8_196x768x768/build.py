@@ -1,249 +1,152 @@
 #!/usr/bin/env python3
-"""Triton matmul_i8 [196,768] x [768,768]^T -> BOSCAME NR FPGA image.
+"""Triton INT8 matmul inputs for the NH/E6 BOSCAME image.
 
-Frontend, configuration and backend live in this single file:
+The makefile owns the full lowering pipeline::
 
-  1. Triton AST -> TTIR -> triton-riscv linalg          (``export_frontend``)
-  2. linalg -> bufferize -> BOSCAME AME -> LLVM dialect (``lower``)
-  3. LLVM IR -> RISC-V asm -> AME encoding -> NR ELF    (``link_nr``)
-  4. ELF -> flat ``.bin`` for ``../fpga_run.sh``
+    kernel.ttir --triton-to-linalg-experimental=boscame=true
+      -> kernel.frontend.mlir --one-shot-bufferize
+      -> kernel.bufferized.mlir --linalg-to-boscame
+      -> kernel.boscame.mlir --lower-bosc-ame --buddy-to-llvmir -> kernel.ll
 
-The problem size is fixed and written out below:
+This file owns the real Triton frontend export, the typed unranked ABI adapter
+and the generated C shape header used by the launcher.  The shape and tile
+constants are ``tl.constexpr`` globals in kernels.py; this file only derives
+the launch grid (:data:`SHAPE`) and emits their fixed ABI.
 
-    A[i8, 196, 768] row-major  @  B[i8, 768, 768] physical [N,K]  ->  C[i32, 196, 768]
+Logical problem (``kernels.py``)::
 
-``tl.dot`` accumulates into ``C`` (AME ``mqma.b.mm`` has += semantics), so the
-launcher pre-loads ``C`` and checks the sum against an independent INT32
-reduction.  The AME tile has a fixed 16-row M, so the kernel is compiled for
-the padded ``M=208`` with ``VALID_M=196``; the generated adapter stages the
-logical rows and copies only those back.  ``launch.c`` carries the host
-``main`` under ``HOST_TEST``, so no extra entry-point file is needed.
+    A[i8, 196, 768] row-major @ B[i8, 768, 768] physical [N,K]
+      -> C[i32, 196, 768]
 
-``--triton-to-boscame`` is what puts the matmul on the AME datapath.  The
-makefile can skip it (``make AME=0``) and lower the same kernel to scalar
-RISC-V instead; that image and the host oracle share ``lower(host=True)``, so
-the scalar image runs exactly the IR ``make host`` validated.
+The AME tile contract requested by this example is ``BM=32``, ``BN=BK=128``.
+The AME register file caps one tile dimension at 64, so the planner lowers
+``BN`` into two 64-column groups and ``BK`` into 64-wide K blocks.  M=196 is
+not a multiple of BM=32. The explicit launch-grid contract lets the frontend
+specialize full programs and the four-row boundary program. The kernel keeps
+its `tl.load`/`tl.store` masks and ``K/BK`` reduction loop; only the 196 logical
+rows of C are read or written.
 
-Build artifacts (``build/matmul_i8_196x768x768/``) are intentionally limited to
-IR and the final image:
+Build artifacts (``build/matmul_i8_196x768x768/``) are limited to IR and the
+final image:
 
-    kernel.ttir  kernel.linalg.mlir  kernel.bufferized.mlir  kernel.ame.mlir
-    kernel.stack.mlir  kernel.copies.mlir  kernel.llvm.mlir  kernel.ll
+    kernel.ttir  kernel.frontend.mlir  kernel.bufferized.mlir
+    kernel.boscame.mlir  kernel.llvm.mlir  kernel.ll
     matmul_i8_196x768x768.bin
 
-``kernel.ame.mlir``, ``kernel.boscame.mlir`` and ``kernel.llvm.mlir`` exist
-only for ``AME=1``; the ``AME=0`` variant adds ``kernel.bufferized.mlir``,
-``kernel.stack.mlir`` and ``kernel.copies.mlir`` instead.
+Generated C, assembly, objects, the ELF and the audit report are intermediates.
 
-Generated C, assembly, objects, the ELF, the audit report and the host oracle
-binary live in ``build/.scratch/``.  That directory is removed after a
-successful build and kept on failure for inspection.
+Run with the boscame Python 3.12 environment:
 
-Run with the ``boscame`` Python 3.12 environment:
-
-    python build.py           # NR ELF audit + flat .bin
-    python build.py --host    # host oracle built from the same LLVM IR
+    python build.py --ttir-only       # Triton frontend -> kernel.ttir
+    python build.py --adapter experimental-boscame
+    python build.py --config
+    python build.py --launch-grid
+    python build.py --check-abi path/to/kernel.ll
 """
 
 import argparse
-import json
 import os
 import re
-import shlex
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 REPO = ROOT.parents[2]
-# The shared BOSCAME runtime moved to runtime/boscame during the migration.
-RUNTIME_ROOT = REPO / "runtime" / "boscame"
-COMMON = RUNTIME_ROOT
-NR = RUNTIME_ROOT / "nr"
-AME_RUNTIME = RUNTIME_ROOT / "runtime"
-UART = RUNTIME_ROOT / "uart"
-FPGA_TOOLS = ROOT.parent / "tools"
 BUILD_ROOT = Path(
     os.environ.get("MATMUL_I8_BUILD_ROOT", str(ROOT / "build"))
 ).resolve()
 OUT = BUILD_ROOT / "matmul_i8_196x768x768"
-SCRATCH = BUILD_ROOT / ".scratch"
 sys.path.insert(0, str(ROOT))
+import kernels  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Fixed problem size (the only place these numbers are defined).
-# ---------------------------------------------------------------------------
-M, N, K = 196, 768, 768  # logical C[M,N] = A[M,K] @ B[N,K]^T
-AME_M_TILE = 16  # AME msettilem is fixed at 16 rows on patch6
-PADDED_M = (M + AME_M_TILE - 1) // AME_M_TILE * AME_M_TILE  # 208
-VALID_M = M  # rows >= VALID_M are zero padding only
-BM = 16  # Triton M block; PADDED_M / BM = 13 programs
-BN = 16  # Triton N block; must match AME nr-tile-n
-BK = 256  # K reduction block; K / BK = 3 iterations
-GRID = (PADDED_M // BM, N // BN, 1)
-# The pass transfers the accumulator tile of one program into a caller
-# scratch window. It also holds one masked A/B slab during prologue packing.
-# All views reuse offset zero, after the preceding DMA has completed.
-SCRATCH_BYTES = max(
-    BM * ((BN * 4 + 63) // 64 * 64), max(BM, BN) * ((BK + 63) // 64 * 64)
-)
+# The kernel's global constants come from kernels.py; only the derived launch
+# grid, the generated ABI bridge and image-layout checks live here.
 NAME = "matmul_i8_196x768x768"
 SYMBOL = "triton_" + NAME
 KERNEL = "matmul_i8"
 SIGNATURE = {"A": "*i8", "B": "*i8", "C": "*i32"}
-CONSTEXPRS = {
-    "M": PADDED_M,
-    "VALID_M": VALID_M,
-    "N": N,
-    "K": K,
-    "BM": BM,
-    "BN": BN,
-    "BK": BK,
-}
-
-assert PADDED_M % AME_M_TILE == 0 and PADDED_M >= M
-assert K % BK == 0, "the reduction loop must not need a partial k block"
 
 
-# ---------------------------------------------------------------------------
-# Toolchain and flags.  Repository builds are preferred, then PATH; every
-# value can be overridden with the environment variable of the same name.
-# ---------------------------------------------------------------------------
-def _env_list(name, default):
-    value = os.environ.get(name)
-    return shlex.split(value) if value else list(default)
+def shape_values():
+    """Return the one source of truth for the Triton shape and tile sizes."""
+    values = {
+        name: int(getattr(kernels, name).value)
+        for name in ("M", "N", "K", "BM", "BN", "BK")
+    }
+    if any(value <= 0 for value in values.values()):
+        raise ValueError("matmul shape and tile sizes must be positive")
+    for extent, tile, label in (
+        (values["N"], values["BN"], "N/BN"),
+        (values["K"], values["BK"], "K/BK"),
+    ):
+        if extent % tile:
+            raise ValueError(f"{label} must be an integer tile count")
+    values["GRID_M"] = (values["M"] + values["BM"] - 1) // values["BM"]
+    values["GRID_N"] = values["N"] // values["BN"]
+    return values
 
 
-def _tool_dir(candidates, executable):
-    return next(
-        (path for path in candidates if (path / executable).is_file()), None
+SHAPE = shape_values()
+
+# The checked-in linker script reserves these fixed windows.  Keep the checks
+# here so an oversized shape reports its cause before clang/ld or the board
+# does; the values mirror link.ld and the AME v0.5 tile contract.
+AME_MAX_TILE = 64
+DDR_SOURCE_CAPACITY = 0x80200000 - 0x80100000
+DDR_OUTPUT_CAPACITY = 0x802E0000 - 0x80200000
+DMA_GUARD_BYTES = 2 * 256 * 4
+
+
+def validate_target_shape():
+    # BN is a logical program tile: the planner splits it into 64-column AME
+    # groups, so only the hardware M tile has to fit one register tile.  The
+    # boundary M tile is masked in the kernel (M is not a multiple of BM).
+    if SHAPE["BM"] > AME_MAX_TILE:
+        raise ValueError(
+            f"BM={SHAPE['BM']} exceeds the AME tile capacity "
+            f"{AME_MAX_TILE}; use an M tile <= 64"
+        )
+    source_bytes = (
+        SHAPE["M"] * SHAPE["K"] + SHAPE["N"] * SHAPE["K"] + 2 * DMA_GUARD_BYTES
     )
+    output_bytes = SHAPE["M"] * SHAPE["N"] * 4 + DMA_GUARD_BYTES
+    if source_bytes > DDR_SOURCE_CAPACITY:
+        raise ValueError(
+            "A/B operands need "
+            f"{source_bytes} bytes, but link.ld reserves "
+            f"{DDR_SOURCE_CAPACITY} bytes before .dma_output"
+        )
+    if output_bytes > DDR_OUTPUT_CAPACITY:
+        raise ValueError(
+            "C output needs "
+            f"{output_bytes} bytes, but link.ld reserves "
+            f"{DDR_OUTPUT_CAPACITY} bytes (0x80200000..0x802e0000)"
+        )
 
 
-LLVM_BIN = (
-    Path(os.environ["LLVM_BIN"]).resolve()
-    if os.environ.get("LLVM_BIN")
-    else _tool_dir(
-        (REPO / "llvm/build-2d26/bin", REPO / "llvm/build/bin"), "clang"
-    )
-)
+def config_source(validate=True):
+    """Emit the C header consumed by the launcher.
 
-
-def llvm_tool(name):
-    """Repository LLVM first, then PATH (same order as common/toolchain.mk)."""
-    if LLVM_BIN is not None and (LLVM_BIN / name).is_file():
-        return str(LLVM_BIN / name)
-    return name
-
-
-BUDDY_BIN = _tool_dir(
-    (REPO / "build-migrate/bin", REPO / "build/bin"), "buddy-opt"
-)
-BUDDY_OPT = os.environ.get("BUDDY_OPT") or (
-    str(BUDDY_BIN / "buddy-opt") if BUDDY_BIN else "buddy-opt"
-)
-BUDDY_TRANSLATE = os.environ.get("BUDDY_TRANSLATE") or (
-    str(BUDDY_BIN / "buddy-translate") if BUDDY_BIN else "buddy-translate"
-)
-LLC = os.environ.get("LLC") or llvm_tool("llc")
-HOST_CC = os.environ.get("HOST_CC") or llvm_tool("clang")
-RISCV_CC = _env_list(
-    "RISCV_CC", [llvm_tool("clang"), "--target=riscv64-unknown-elf"]
-)
-RISCV_LD = _env_list("RISCV_LD", ["ld.lld", "-m", "elf64lriscv"])
-RISCV_OBJCOPY = os.environ.get("RISCV_OBJCOPY") or llvm_tool("llvm-objcopy")
-RISCV_OBJDUMP = os.environ.get("RISCV_OBJDUMP") or llvm_tool("llvm-objdump")
-
-# The integer AME kernel needs no RVV registers and must not acquire
-# accidental vector memory operations.
-SCALAR_FLAGS = _env_list("SCALAR_FLAGS", ["-mattr=+m,+a,+f,+d,+c,-v,+xboscame"])
-CFLAGS = _env_list(
-    "CFLAGS",
-    [
-        "-march=rv64gc_zicbom",
-        "-mabi=lp64d",
-        "-mcmodel=medany",
-        "-mno-relax",
-        "-O2",
-        "-nostdlib",
-        "-ffreestanding",
-        "-fno-builtin",
-        "-fno-pie",
-        "-fno-vectorize",
-        "-fno-slp-vectorize",
-        "-ffp-contract=off",
-        "-ffunction-sections",
-        "-fdata-sections",
-        f"-I{ROOT}",
-        f"-I{NR}",
-        f"-I{AME_RUNTIME}",
-        f"-I{UART}",
-    ],
-)
-HOST_CFLAGS = _env_list(
-    "HOST_CFLAGS", ["-O2", "-ffp-contract=off", "-DHOST_TEST", f"-I{ROOT}"]
-)
-LOWER = _env_list(
-    "LOWER",
-    [
-        "--convert-linalg-to-loops",
-        "--expand-strided-metadata",
-        "--lower-affine",
-        "--convert-vector-to-scf",
-        "--convert-vector-to-llvm",
-        "--convert-math-to-llvm",
-        "--convert-math-to-libm",
-        "--convert-scf-to-cf",
-        "--convert-cf-to-llvm",
-        "--convert-arith-to-llvm",
-        "--convert-index-to-llvm",
-        "--memref-expand",
-        "--finalize-memref-to-llvm",
-        "--convert-func-to-llvm",
-        "--reconcile-unrealized-casts",
-    ],
-)
-AME_PASS = _env_list("AME_PASS", ["--lower-linalg-to-boscame=target=nr-fpga"])
-# Opt-in v0.5 operand encoding; the previously verified wrappers are default.
-AME_GPR_MODE = os.environ.get("AME_GPR_MODE", "fixed")
-# Experimental adjacent identical fence sharing; the ELF audit still runs.
-NR_COALESCE_FENCES = os.environ.get("NR_COALESCE_FENCES", "0")
-if AME_GPR_MODE not in ("fixed", "direct"):
-    raise SystemExit("AME_GPR_MODE must be fixed or direct")
-if NR_COALESCE_FENCES not in ("0", "1"):
-    raise SystemExit("NR_COALESCE_FENCES must be 0 or 1")
-
-# One NR runtime set per image: startup, platform, memory and operator support
-# (common/README.md).  Extra flags are appended after CFLAGS, so they win.
-RUNTIME_SOURCES = (
-    (NR / "crt.S", "crt.o", []),
-    (NR / "nr_runtime.c", "nr_runtime.o", []),
-    (NR / "nr_memory.c", "nr_memory.o", []),
-    (NR / "nr_math.c", "nr_math.o", []),
-    (NR / "ame_sync.c", "ame_sync.o", []),
-    (NR / "nr_copy.S", "nr_copy.o", ["-march=rv64gcv_zicbom"]),
-    # The TTIR -> BOSCAME path stages DDR through real DMA, which the linalg
-    # path did not use, so its runtime helper is part of the image now.
-    (AME_RUNTIME / "bosc_ame_dma.c", "bosc_ame_dma.o", []),
-    (ROOT / "support.c", "support.o", []),
-)
-
-
-def command(args, cwd=None, output=None, input_text=None):
-    result = subprocess.run(
-        [str(arg) for arg in args],
-        cwd=cwd,
-        input=input_text,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    if output is not None:
-        Path(output).write_text(result.stdout)
-    if result.returncode:
-        raise RuntimeError(shlex.join(map(str, args)) + "\n" + result.stdout)
-    return result.stdout
+    Keeping the header generated from ``kernels.py`` makes a changed Triton
+    shape fail at compile time instead of reaching the adapter with stale
+    descriptors.
+    """
+    if validate:
+        validate_target_shape()
+    return f"""/* Generated by build.py from kernels.py; do not edit. */
+#ifndef MATMUL_I8_CONFIG_H
+#define MATMUL_I8_CONFIG_H
+#define MATMUL_I8_M {SHAPE["M"]}u
+#define MATMUL_I8_N {SHAPE["N"]}u
+#define MATMUL_I8_K {SHAPE["K"]}u
+#define MATMUL_I8_BM {SHAPE["BM"]}u
+#define MATMUL_I8_BN {SHAPE["BN"]}u
+#define MATMUL_I8_BK {SHAPE["BK"]}u
+#define MATMUL_I8_GRID_M {SHAPE["GRID_M"]}u
+#define MATMUL_I8_GRID_N {SHAPE["GRID_N"]}u
+#define MATMUL_I8_KERNEL _mlir_ciface_kernel_{NAME}
+#endif
+"""
 
 
 def configure_environment():
@@ -263,71 +166,17 @@ def configure_environment():
                 break
 
 
-def adapter_source():
-    """Descriptor/grid glue around the raw Triton entry.
+def adapter_source_experimental():
+    """Typed unranked descriptors for the experimental BOSCAME C wrapper.
 
-    AME does not accept a short M tile, so the kernel is compiled for
-    ``PADDED_M`` while the public ABI stays ``[M,N]``: the adapter stages the
-    logical rows in a padded activation buffer and copies only those rows of
-    the accumulator back to the caller.
-
-    This is the bridge of the *scalar* kernel (the ``AME=0`` image and the host
-    oracle): three descriptors and no scratch, because no DMA/SPM is involved.
-    ``-DMATMUL_I8_TRACE=1`` publishes the same per-program progress markers as
-    the board bridge, so an ``AME=0`` debug image is observable too.
+    Descriptor sizes/offsets are elements, including i32 C. The kernel takes
+    three buffers; the launcher's aligned, nonalias contiguous buffers satisfy
+    the DMA ABI. The grid covers the padded M extent so the masked boundary
+    tile is launched and the kernel itself skips the rows past M.
     """
-    return (
-        f"""#include "support.h"
-#if defined(MATMUL_I8_TRACE)
-extern void nh_e6_progress(uint32_t marker);
-#define MATMUL_I8_MARK(value) nh_e6_progress(value)
-#else
-#define MATMUL_I8_MARK(value) ((void)0)
-#endif
-typedef struct {{ void *allocated, *aligned; int64_t offset; }} MemRef0;
-extern void {SYMBOL}("""
-        + ", ".join(["int64_t, MemRef0 *"] * 3 + ["int32_t"] * 6)
-        + f""");
-static int8_t padded_a[{PADDED_M} * {K}] __attribute__((aligned(64)));
-static int32_t padded_c[{PADDED_M} * {N}] __attribute__((aligned(64)));
-void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c) {{
-  const int8_t *src_a = (const int8_t *)a->aligned + a->offset;
-  int32_t *dst_c = (int32_t *)c->aligned + c->offset;
-  for (int i = 0; i < {PADDED_M} * {K}; ++i) padded_a[i] = 0;
-  for (int i = 0; i < {M}; ++i) for (int j = 0; j < {K}; ++j)
-    padded_a[i * {K} + j] = src_a[i * a->strides[0] + j * a->strides[1]];
-  for (int i = 0; i < {PADDED_M} * {N}; ++i) padded_c[i] = 0;
-  for (int i = 0; i < {M}; ++i) for (int j = 0; j < {N}; ++j)
-    padded_c[i * {N} + j] = ((const int32_t *)c->aligned + c->offset)[i * c->strides[0] + j * c->strides[1]];
-  MemRef0 ma = {{padded_a, padded_a, 0}};
-  void *bp = (unsigned char *)b->aligned + b->offset;
-  MemRef0 mb = {{bp, bp, 0}};
-  MemRef0 mc = {{padded_c, padded_c, 0}};
-  for (int32_t x = 0; x < {GRID[0]}; ++x)
-    for (int32_t y = 0; y < {GRID[1]}; ++y)
-      for (int32_t z = 0; z < {GRID[2]}; ++z) {{
-        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {GRID[1]} + y) & 0xfffu));
-        {SYMBOL}(0, &ma, 0, &mb, 0, &mc, {GRID[0]}, {GRID[1]}, {GRID[2]}, x, y, z);
-      }}
-  for (int i = 0; i < {M}; ++i) for (int j = 0; j < {N}; ++j)
-    dst_c[i * c->strides[0] + j * c->strides[1]] = padded_c[i * {N} + j];
-}}
-"""
-    )
-
-
-def adapter_source_boscame():
-    """Glue for the `--triton-to-boscame` ABI.
-
-    The generated MLIR C wrapper takes four descriptor pointers and six grid
-    scalars. Calling the raw expanded LLVM signature with C structs by value
-    is incompatible with the RISC-V C ABI. Original buffers need no padding;
-    the pass handles masked boundaries in the separate DDR scratch window.
-
-    `-DMATMUL_I8_TRACE=1` publishes a progress marker before every program, so
-    a board run shows which (program_id_x, program_id_y) is executing (and, if
-    the platform reports TIMEOUT, which one stopped).
-    """
+    validate_target_shape()
+    grid_m = SHAPE["GRID_M"]
+    grid_n = SHAPE["GRID_N"]
     return f"""#include <stdint.h>
 #if defined(MATMUL_I8_TRACE)
 extern void nh_e6_progress(uint32_t marker);
@@ -337,50 +186,55 @@ extern void nh_e6_progress(uint32_t marker);
 #endif
 typedef struct {{ void *allocated, *aligned; int64_t offset; int64_t sizes[2], strides[2]; }} MemRef2;
 typedef struct {{ void *allocated, *aligned; int64_t offset, size, stride; }} Descriptor1D;
-extern void _mlir_ciface_{SYMBOL}(Descriptor1D *, Descriptor1D *, Descriptor1D *, Descriptor1D *,
+typedef struct {{ int64_t rank; void *descriptor; }} Unranked;
+extern void _mlir_ciface_{SYMBOL}(Unranked *, Unranked *, Unranked *,
                      int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
-void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c,
-                                void *scratch) {{
-  /* The kernel computes byte addresses from the root, so every descriptor is
-   * one contiguous byte range: A[M,K] i8, B[N,K] i8 and C[M,N] i32. */
+void _mlir_ciface_kernel_{NAME}(MemRef2 *a, MemRef2 *b, MemRef2 *c) {{
   void *ap = (int8_t *)a->aligned + a->offset;
   void *bp = (int8_t *)b->aligned + b->offset;
   void *cp = (int32_t *)c->aligned + c->offset;
-  Descriptor1D ma = {{a->allocated, ap, 0, (int64_t){M} * {K}, 1}};
-  Descriptor1D mb = {{b->allocated, bp, 0, (int64_t){N} * {K}, 1}};
-  Descriptor1D mc = {{c->allocated, cp, 0, (int64_t){M} * {N} * 4, 1}};
-  /* The accumulator tile leaves SPM through a transfer (the E6 cannot read
-   * the SPM window), so the kernel writes it here before the DDR-side
-   * epilogue reads it back. */
-  Descriptor1D ms = {{scratch, scratch, 0, (int64_t){SCRATCH_BYTES}, 1}};
-  for (int32_t x = 0; x < {GRID[0]}; ++x)
-    for (int32_t y = 0; y < {GRID[1]}; ++y)
-      for (int32_t z = 0; z < {GRID[2]}; ++z) {{
-        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {GRID[1]} + y) & 0xfffu));
-        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, &ms, {GRID[0]}, {GRID[1]}, {GRID[2]}, x, y, z);
+  if (((uintptr_t)ap | (uintptr_t)bp | (uintptr_t)cp) & 63u) __builtin_trap();
+  if (a->sizes[0] < {SHAPE["M"]} || a->sizes[1] < {SHAPE["K"]} ||
+      b->sizes[0] < {SHAPE["N"]} || b->sizes[1] < {SHAPE["K"]} ||
+      c->sizes[0] < {SHAPE["M"]} || c->sizes[1] < {SHAPE["N"]} ||
+      a->strides[0] != {SHAPE["K"]} || a->strides[1] != 1 ||
+      b->strides[0] != {SHAPE["K"]} || b->strides[1] != 1 ||
+      c->strides[0] != {SHAPE["N"]} || c->strides[1] != 1) __builtin_trap();
+  uintptr_t starts[3] = {{(uintptr_t)ap, (uintptr_t)bp, (uintptr_t)cp}};
+  uintptr_t lengths[3] = {{{SHAPE["M"]} * {SHAPE["K"]}, {SHAPE["N"]} * {SHAPE["K"]}, {SHAPE["M"]} * {SHAPE["N"]} * 4}};
+  for (int i = 0; i < 3; ++i) {{
+    if (lengths[i] > UINTPTR_MAX - starts[i]) __builtin_trap();
+    for (int j = 0; j < i; ++j)
+      if (starts[i] < starts[j] + lengths[j] && starts[j] < starts[i] + lengths[i]) __builtin_trap();
+  }}
+  Descriptor1D da = {{a->allocated, ap, 0, (int64_t){SHAPE["M"]} * {SHAPE["K"]}, 1}};
+  Descriptor1D db = {{b->allocated, bp, 0, (int64_t){SHAPE["N"]} * {SHAPE["K"]}, 1}};
+  Descriptor1D dc = {{c->allocated, cp, 0, (int64_t){SHAPE["M"]} * {SHAPE["N"]}, 1}};
+  Unranked ma = {{1, &da}}, mb = {{1, &db}}, mc = {{1, &dc}};
+  for (int32_t x = 0; x < {grid_m}; ++x)
+    for (int32_t y = 0; y < {grid_n}; ++y)
+      for (int32_t z = 0; z < 1; ++z) {{
+        MATMUL_I8_MARK(0x1000u + (uint32_t)((x * {grid_n} + y) & 0xfffu));
+        _mlir_ciface_{SYMBOL}(&ma, &mb, &mc, {grid_m}, {grid_n}, 1, x, y, z);
       }}
 }}
 """
 
 
 def export_frontend():
-    """Compile the real ``@triton.jit`` kernel into TTIR and shared linalg."""
+    """Compile the real @triton.jit kernel into TTIR."""
     configure_environment()
-    import kernels
     import triton
     from triton._C.libtriton import ir
     from triton.backends.compiler import GPUTarget
-    from triton.backends.triton_shared.compiler import (
-        CPUBackend,
-        _ttir_to_ttsharedir,
-    )
+    from triton.backends.triton_shared.compiler import CPUBackend
     from triton.compiler import ASTSource
 
     fn = getattr(kernels, KERNEL)
     target = GPUTarget("cpu", 0, 0)
     backend = CPUBackend(target)
     options = backend.parse_options({"enable_fp_fusion": False})
-    source = ASTSource(fn=fn, signature=SIGNATURE, constexprs=CONSTEXPRS)
+    source = ASTSource(fn=fn, signature=SIGNATURE, constexprs={})
     context = ir.context()
     ir.load_dialects(context)
     backend.load_dialects(context)
@@ -393,58 +247,17 @@ def export_frontend():
     )
     module = backend.make_ttir(module, {}, options)
     ttir = str(module)
-    linalg = _ttir_to_ttsharedir(module)
     # Symbol namespacing only, after genuine Triton/triton-riscv passes: no
-    # computation, loop body or linalg op is synthesized here.
+    # computation or loop body is synthesized here.
     pattern = r"@" + re.escape(KERNEL) + r"(?=[\s(])"
-    if not re.search(pattern, ttir) or not re.search(pattern, linalg):
+    if not re.search(pattern, ttir):
         raise RuntimeError(f"Cannot identify compiled entry symbol {KERNEL!r}")
     ttir = re.sub(pattern, "@" + SYMBOL, ttir)
-    linalg = re.sub(pattern, "@" + SYMBOL, linalg)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "kernel.ttir").write_text(ttir)
-    (OUT / "kernel.linalg.mlir").write_text(linalg)
     print(
         "exported " + NAME + " (triton " + triton.__version__ + ")", flush=True
     )
-
-
-def llvm_pipeline():
-    passes = list(LOWER)
-    before = passes.index("--convert-scf-to-cf")
-    additional = [
-        "--convert-vector-to-scf",
-        "--convert-vector-to-llvm=vector-transpose-lowering=eltwise",
-        "--convert-ub-to-llvm",
-    ]
-    passes[before:before] = [
-        option
-        for option in additional
-        if not any(
-            existing.split("=")[0] == option.split("=")[0]
-            for existing in passes
-        )
-    ]
-    return passes
-
-
-def ame_pipeline():
-    """Keep the Triton N blocking and the NR hardware tiling in agreement."""
-    passes = list(AME_PASS)
-    candidates = [
-        i
-        for i, value in enumerate(passes)
-        if value.startswith("--lower-linalg-to-boscame=")
-    ]
-    if len(candidates) != 1:
-        raise ValueError("Expected one explicit NR AME lowering pass")
-    index = candidates[0]
-    found = re.search(r"\bnr-tile-n=(\d+)", passes[index])
-    if found and int(found[1]) != BN:
-        raise ValueError("Triton BN and NR nr-tile-n disagree")
-    if not found and BN != 16:
-        passes[index] += " nr-tile-n=" + str(BN)
-    return passes
 
 
 def verify_abi(path):
@@ -471,140 +284,10 @@ def verify_abi(path):
         )
 
 
-def audit_elf(elf):
-    """Run the shared NR ELF audit and fail the build on any finding."""
-    report = SCRATCH / "audit.json"
-    command(
-        [
-            sys.executable,
-            FPGA_TOOLS / "check_nr_elf.py",
-            elf,
-            "--objdump",
-            RISCV_OBJDUMP,
-            "--output",
-            report,
-        ],
-        cwd=ROOT,
-    )
-    audit = json.loads(report.read_text())
-    if (
-        audit.get("status") != "PASS"
-        or audit.get("errors")
-        or not audit.get("ame_instructions")
-    ):
-        raise RuntimeError("NR ELF audit failed: " + json.dumps(audit))
-    return audit
-
-
-def lower(stage, host):
-    """linalg -> memrefs -> AME -> LLVM dialect -> kernel.ll in ``stage``."""
-    opt = shlex.split(BUDDY_OPT)
-    translate = shlex.split(BUDDY_TRANSLATE)
-    bufferized = stage / "kernel.bufferized.mlir"
-    command(
-        [
-            *opt,
-            OUT / "kernel.linalg.mlir",
-            "--empty-tensor-to-alloc-tensor",
-            "--one-shot-bufferize=allow-return-allocs-from-loops=true buffer-alignment=64",
-            "-o",
-            bufferized,
-        ],
-        cwd=ROOT,
-    )
-    lowered = bufferized
-    if not host:
-        lowered = stage / "kernel.ame.mlir"
-        command([*opt, bufferized, *ame_pipeline(), "-o", lowered], cwd=ROOT)
-        text = lowered.read_text()
-        if 'bosc_ame.target = "nr-fpga"' not in text:
-            raise RuntimeError(
-                "This runtime only accepts explicit nr-fpga lowering"
-            )
-        if "bosc_ame.mqma.b.mm" not in text or "linalg.matmul" in text:
-            raise RuntimeError("Integer Triton dot was not lowered to NR AME")
-    promoted = stage / "kernel.stack.mlir"
-    command(
-        [
-            *opt,
-            lowered,
-            "--canonicalize",
-            "--cse",
-            "--buffer-loop-hoisting",
-            "--promote-buffers-to-stack=max-alloc-size-in-bytes=65536",
-            "-o",
-            promoted,
-        ],
-        cwd=ROOT,
-    )
-    copies = stage / "kernel.copies.mlir"
-    command(
-        [
-            *opt,
-            promoted,
-            "--pass-pipeline=builtin.module(func.func(convert-strided-memref-copy-to-linalg))",
-            "-o",
-            copies,
-        ],
-        cwd=ROOT,
-    )
-    llvm_mlir = stage / "kernel.llvm.mlir"
-    command(
-        [
-            *opt,
-            copies,
-            "--canonicalize",
-            "--cse",
-            *([] if host else ["--lower-bosc-ame"]),
-            *llvm_pipeline(),
-            "-o",
-            llvm_mlir,
-        ],
-        cwd=ROOT,
-    )
-    llvm_ir = stage / "kernel.ll"
-    command(
-        [*translate, "--buddy-to-llvmir", llvm_mlir, "-o", llvm_ir], cwd=ROOT
-    )
-    verify_abi(llvm_ir)
-    return llvm_ir
-
-
-def run_host():
-    """Build and run the host oracle from the very same LLVM IR."""
-    SCRATCH.mkdir(parents=True, exist_ok=True)
-    (SCRATCH / "adapter.c").write_text(adapter_source())
-    llvm_ir = lower(SCRATCH, host=True)
-    image = SCRATCH / "host-check"
-    command(
-        [
-            *shlex.split(HOST_CC),
-            *HOST_CFLAGS,
-            llvm_ir,
-            SCRATCH / "adapter.c",
-            ROOT / "launch-host.c",
-            ROOT / "support.c",
-            "-lm",
-            "-o",
-            image,
-        ],
-        cwd=ROOT,
-    )
-    result = command([image], output=SCRATCH / "host-output.log")
-    if f"verify {NAME}: PASS" not in result:
-        raise RuntimeError("Host numerical oracle did not report PASS")
-    print("host PASS " + NAME, flush=True)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--host",
-        action="store_true",
-        help="Build and run the host oracle instead of the NR image",
     )
     parser.add_argument(
         "--output", type=Path, help="Build root (defaults to build/)"
@@ -612,69 +295,51 @@ def main():
     parser.add_argument(
         "--ttir-only",
         action="store_true",
-        help="Only export kernel.ttir / kernel.linalg.mlir",
+        help="Only export kernel.ttir from the Triton frontend",
+    )
+    parser.add_argument(
+        "--check-abi",
+        type=Path,
+        help="Verify the typed entry LLVM ABI and absence of heap allocation",
     )
     parser.add_argument(
         "--adapter",
-        choices=("triton-to-boscame", "linalg-to-boscame"),
+        choices=("experimental-boscame",),
         help="Only write the launcher adapter for that path",
     )
     parser.add_argument(
-        "--llvm",
-        choices=("ame", "noame"),
-        help="Only lower kernel.linalg.mlir to kernel.ll: `ame` runs "
-        "--triton-to-boscame, `noame` lowers straight to scalar CPU code "
-        "(the AME=0 image and the host oracle share this path)",
+        "--launch-grid",
+        action="store_true",
+        help="Print the frontend launch-grid contract from the kernel constants",
     )
     parser.add_argument(
-        "--stage",
-        type=Path,
-        help="Output directory for --llvm (defaults to the build output dir)",
+        "--config",
+        action="store_true",
+        help="Only write the generated C shape header for the launcher",
     )
     args = parser.parse_args()
-    global BUILD_ROOT, OUT, SCRATCH
+    if args.check_abi:
+        verify_abi(args.check_abi)
+        return
+    global BUILD_ROOT, OUT
     if args.output is not None:
         BUILD_ROOT = args.output.resolve()
         OUT = BUILD_ROOT / NAME
-        SCRATCH = BUILD_ROOT / ".scratch"
     if args.adapter is not None:
-        generator = (
-            adapter_source_boscame
-            if args.adapter == "triton-to-boscame"
-            else adapter_source
-        )
-        sys.stdout.write(generator())
+        sys.stdout.write(adapter_source_experimental())
         return
-    if args.llvm is not None:
-        stage = (args.stage or OUT).resolve()
-        stage.mkdir(parents=True, exist_ok=True)
-        lowered = lower(stage, host=args.llvm == "noame")
-        print("lowered " + str(lowered), flush=True)
+    if args.config:
+        sys.stdout.write(config_source())
+        return
+    if args.launch_grid:
+        print(f"{SYMBOL}:{SHAPE['GRID_M']},{SHAPE['GRID_N']},1")
         return
     if args.ttir_only:
-        (BUILD_ROOT / ".scratch").mkdir(parents=True, exist_ok=True)
         export_frontend()
         return
-    shutil.rmtree(SCRATCH, ignore_errors=True)
-    SCRATCH.mkdir(parents=True, exist_ok=True)
-    try:
-        export_frontend()
-        if args.host:
-            run_host()
-        else:
-            raise SystemExit(
-                "the NR image path moved to the makefile; "
-                "use `make` or `make host`"
-            )
-    except Exception:
-        print(
-            "build failed; intermediates kept in " + str(SCRATCH),
-            file=sys.stderr,
-        )
-        raise
-    # All build artifacts the user asked to see stay in OUT (IR + image);
-    # everything else is intermediate and removed here.
-    shutil.rmtree(SCRATCH, ignore_errors=True)
+    raise SystemExit(
+        "build.py only generates frontend/ABI inputs; use make for the image"
+    )
 
 
 if __name__ == "__main__":

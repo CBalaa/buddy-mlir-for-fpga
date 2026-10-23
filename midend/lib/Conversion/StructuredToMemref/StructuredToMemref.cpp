@@ -1771,8 +1771,7 @@ static StringRef classifyStoreDestination(Value value) {
 static DictionaryAttr memoryProvenance(OpBuilder &builder, StringRef kind,
                                        RankedTensorType logicalType,
                                        ArrayRef<OpFoldResult> mask,
-                                       Value destination = {},
-                                       Value other = {},
+                                       Value destination = {}, Value other = {},
                                        Operation *sourceEvent = nullptr) {
   NamedAttrList attrs;
   attrs.set("kind", builder.getStringAttr(kind));
@@ -1818,19 +1817,13 @@ private:
     if (failed(ranked))
       return op.emitError("BOSCAME load requires a ranked DDR view");
     ptr = *ranked;
-    auto bufferType =
-        MemRefType::get(tensorType.getShape(), tensorType.getElementType());
     SmallVector<int64_t> strides;
     int64_t offset;
-    if (succeeded(cast<MemRefType>(ptr.getType())
-                      .getStridesAndOffset(strides, offset)) &&
-        llvm::all_of(strides, [](int64_t stride) {
-          return !ShapedType::isDynamic(stride) && stride > 0;
+    if (failed(cast<MemRefType>(ptr.getType())
+                   .getStridesAndOffset(strides, offset)) ||
+        llvm::any_of(strides, [](int64_t stride) {
+          return ShapedType::isDynamic(stride) || stride <= 0;
         }))
-      bufferType = MemRefType::get(
-          tensorType.getShape(), tensorType.getElementType(),
-          StridedLayoutAttr::get(rewriter.getContext(), 0, strides));
-    else
       strides.clear();
 
     // A dense, unmasked i8 load from an external rank-2 DDR view is already a
@@ -1860,13 +1853,27 @@ private:
       return success();
     }
 
-    // LLVM allocation lowering requires an identity allocation layout. Keep
-    // non-row-major logical layouts in a view over ordinary flat storage.
-    int64_t rowStride = 1;
-    bool rowMajor = true;
-    for (int64_t axis = tensorType.getRank() - 1; axis >= 0; --axis) {
-      rowMajor &= strides.empty() || strides[axis] == rowStride;
-      if (llvm::MulOverflow(rowStride, tensorType.getDimSize(axis), rowStride))
+    // Preserve the physical contiguous axis, not the DDR pitch. A snapshot
+    // owns exactly one logical tile, including padding for a masked load.
+    // Source and destination subviews below retain their independent layouts.
+    bool rowMajor = false;
+    if (tensorType.getRank() == 1 && strides.size() == 1 && strides[0] == 1)
+      rowMajor = true;
+    else if (tensorType.getRank() == 2 && strides.size() == 2) {
+      if (strides[1] == 1 && strides[0] >= tensorType.getDimSize(1))
+        rowMajor = true;
+      else if (strides[0] != 1 || strides[1] < tensorType.getDimSize(0))
+        return op.emitError(
+            "BOSCAME load requires a non-overlapping rectangular "
+            "layout with a static unit-stride axis");
+    } else {
+      return op.emitError(
+          "BOSCAME load snapshot requires a rank-one or rank-two "
+          "rectangular layout with a static unit-stride axis");
+    }
+    int64_t elements = 1;
+    for (int64_t dim : tensorType.getShape()) {
+      if (dim <= 0 || llvm::MulOverflow(elements, dim, elements))
         return op.emitError("BOSCAME load snapshot size overflows");
     }
     Value snapshot;
@@ -1878,18 +1885,18 @@ private:
           rewriter.getI64IntegerAttr(64));
       snapshot = alloc;
     } else {
-      int64_t span = 1;
-      for (auto [dim, stride] : llvm::zip(tensorType.getShape(), strides)) {
-        int64_t extent;
-        if (dim <= 0 || llvm::MulOverflow(dim - 1, stride, extent) ||
-            llvm::AddOverflow(span, extent, span))
-          return op.emitError("BOSCAME load snapshot physical span overflows");
-      }
+      // LLVM allocations need identity layouts. Represent column-major B as
+      // a logical [K,N] view over compact physical [N,K] backing storage.
+      SmallVector<int64_t> compactStrides{1, tensorType.getDimSize(0)};
+      auto bufferType = MemRefType::get(
+          tensorType.getShape(), tensorType.getElementType(),
+          StridedLayoutAttr::get(rewriter.getContext(), 0, compactStrides));
       alloc = rewriter.create<memref::AllocOp>(
-          op.getLoc(), MemRefType::get({span}, tensorType.getElementType()),
+          op.getLoc(), MemRefType::get({elements}, tensorType.getElementType()),
           rewriter.getI64IntegerAttr(64));
       snapshot = rewriter.create<memref::ReinterpretCastOp>(
-          op.getLoc(), bufferType, alloc, 0, tensorType.getShape(), strides);
+          op.getLoc(), bufferType, alloc, 0, tensorType.getShape(),
+          compactStrides);
     }
     alloc->setAttr("bosc_ame.logical_shape",
                    rewriter.getDenseI64ArrayAttr(tensorType.getShape()));

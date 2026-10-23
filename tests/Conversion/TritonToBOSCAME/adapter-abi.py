@@ -1,5 +1,9 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
-"""Execute the real generated C wrapper/adapter against an expanded-ABI stub."""
+"""Execute the legacy lowering's real C wrapper against an expanded-ABI stub.
+
+The migrated examples expose only experimental typed-unranked adapters; this
+test exercises the legacy ranked ABI directly, independent of those examples.
+"""
 
 import os
 import re
@@ -109,21 +113,10 @@ def main():
         + wrapper
         + "\n"
     )
-    adapter = work / "adapter.c"
-    adapter.write_text(
-        run(
-            [
-                sys.executable,
-                REPO / "examples/FPGA-BOSCAME/matmul_i8_196x768x768/build.py",
-                "--adapter",
-                "triton-to-boscame",
-            ]
-        )
-    )
     probe = work / "probe.c"
     probe.write_text(r"""
 #include <stdint.h>
-typedef struct { void *allocated, *aligned; int64_t offset, sizes[2], strides[2]; } MemRef2;
+typedef struct { void *allocated, *aligned; int64_t offset, size, stride; } Descriptor;
 static unsigned char a[64], b[64];
 static int32_t c[16];
 static unsigned char scratch[4096];
@@ -134,19 +127,22 @@ void triton_matmul_i8_196x768x768(
     void *ca, void *cp, int64_t co, int64_t cs, int64_t cst,
     void *sa, void *sp, int64_t so, int64_t ss, int64_t sst,
     int32_t gx, int32_t gy, int32_t gz, int32_t x, int32_t y, int32_t z) {
-  failures += aa != a || ap != a + 3 || ao != 0 || as != 196 * 768 || ast != 1;
-  failures += ba != b || bp != b + 5 || bo != 0 || bs != 768 * 768 || bst != 1;
-  failures += ca != c || cp != c + 2 || co != 0 || cs != 196 * 768 * 4 || cst != 1;
-  failures += sa != scratch || sp != scratch || so != 0 || ss != 4096 || sst != 1;
+  failures += aa != a || ap != a + 3 || ao != 7 || as != 196 * 768 || ast != 1;
+  failures += ba != b || bp != b + 5 || bo != 11 || bs != 768 * 768 || bst != 1;
+  failures += ca != c || cp != c + 2 || co != 13 || cs != 196 * 768 * 4 || cst != 1;
+  failures += sa != scratch || sp != scratch || so != 17 || ss != 4096 || sst != 1;
   failures += gx != 13 || gy != 48 || gz != 1 || x != calls / 48 || y != calls % 48 || z != 0;
   ++calls;
 }
-extern void _mlir_ciface_kernel_matmul_i8_196x768x768(MemRef2 *, MemRef2 *, MemRef2 *, void *);
+extern void _mlir_ciface_triton_matmul_i8_196x768x768(Descriptor *, Descriptor *, Descriptor *, Descriptor *, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
 int main(void) {
-  MemRef2 ma = {a, a, 3, {196, 768}, {768, 1}};
-  MemRef2 mb = {b, b, 5, {768, 768}, {1, 768}};
-  MemRef2 mc = {c, c, 2, {196, 768}, {768, 1}};
-  _mlir_ciface_kernel_matmul_i8_196x768x768(&ma, &mb, &mc, scratch);
+  Descriptor ma = {a, a + 3, 7, 196 * 768, 1};
+  Descriptor mb = {b, b + 5, 11, 768 * 768, 1};
+  Descriptor mc = {c, c + 2, 13, 196 * 768 * 4, 1};
+  Descriptor ms = {scratch, scratch, 17, 4096, 1};
+  for (int32_t x = 0; x < 13; ++x)
+    for (int32_t y = 0; y < 48; ++y)
+      _mlir_ciface_triton_matmul_i8_196x768x768(&ma, &mb, &mc, &ms, 13, 48, 1, x, y, 0);
   return failures != 0 || calls != 13 * 48;
 }
 """)
@@ -155,7 +151,7 @@ int main(void) {
         clang = shutil.which("clang")
     assert clang, "clang is needed for the native ABI probe"
     executable = work / "probe"
-    run([clang, "-O2", wrapper_llvm, adapter, probe, "-o", executable])
+    run([clang, "-O2", wrapper_llvm, probe, "-o", executable])
     run([executable])
     # CHECK: PASS: generated C wrapper passes all descriptor fields and grid IDs for 624 calls
     print(

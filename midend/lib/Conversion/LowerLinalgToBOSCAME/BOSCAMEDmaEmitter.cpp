@@ -2,6 +2,7 @@
 //------------===//
 
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEDmaEmitter.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanner.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
 #include "Dialect/BOSCAME/SpmDma.h"
@@ -111,6 +112,8 @@ struct SpmCopyPlan {
   TransferPlan target;
 };
 
+static void copyBOSCAMEGraphAttrs(Operation *source, Operation *target);
+
 /// The compact packet offsets use physical-axis order. Both endpoints must
 /// agree on that order: DMA cannot transpose the elements of a row.
 int unitAxis(const TransferPlan &transfer) {
@@ -171,8 +174,8 @@ LogicalResult verifySpmCopyRanges(const SpmCopyPlan &copy,
   return success();
 }
 
-LogicalResult emitSpmCopy(const SpmCopyPlan &copy,
-                          const TargetInfo &targetInfo) {
+LogicalResult emitSpmCopy(const SpmCopyPlan &copy, const TargetInfo &targetInfo,
+                          bool preserveGraph) {
   OpBuilder builder(copy.operation);
   Location loc = copy.operation->getLoc();
   const TransferPlan &source = copy.source, &target = copy.target;
@@ -184,6 +187,7 @@ LogicalResult emitSpmCopy(const SpmCopyPlan &copy,
   int64_t sourceConsumed = 0, targetConsumed = 0;
   Value sourceOffset = descriptorOffset(builder, loc, source.buffer);
   Value targetOffset = descriptorOffset(builder, loc, target.buffer);
+  Operation *completion = nullptr;
   while (sourcePacket < source.packets.size()) {
     const DmaPacket &from = source.packets[sourcePacket];
     const DmaPacket &to = target.packets[targetPacket];
@@ -191,6 +195,14 @@ LogicalResult emitSpmCopy(const SpmCopyPlan &copy,
         std::min(from.bytes - sourceConsumed, to.bytes - targetConsumed);
     auto slice = [&](const TransferPlan &transfer, Value base,
                      int64_t offsetBytes) {
+      // The graph-preserving pipeline does not run the legacy greedy fold.
+      // Keep proved SPM offsets manifestly static for descriptor verification.
+      if (preserveGraph)
+        if (auto known = spmdma::getStaticDescriptorOffset(transfer.buffer))
+          return endpoint(
+              builder, loc, transfer.buffer,
+              index(builder, loc, *known + offsetBytes / transfer.elementBytes),
+              bytes / transfer.elementBytes);
       Value offset = base;
       if (offsetBytes)
         offset = arith::AddIOp::create(
@@ -205,7 +217,7 @@ LogicalResult emitSpmCopy(const SpmCopyPlan &copy,
     auto token = DmaStartOp::create(
         builder, loc, DMATokenType::get(builder.getContext(), channel), src,
         dst, index(builder, loc, bytes), builder.getI32IntegerAttr(channel));
-    DmaWaitOp::create(builder, loc, token.getToken());
+    completion = DmaWaitOp::create(builder, loc, token.getToken());
     sourceConsumed += bytes;
     targetConsumed += bytes;
     if (sourceConsumed == from.bytes) {
@@ -217,7 +229,15 @@ LogicalResult emitSpmCopy(const SpmCopyPlan &copy,
       targetConsumed = 0;
     }
   }
+  // The last wait completes every packet of the original identity copy.
+  // Preserve one task there rather than duplicating its ID on packet starts;
+  // predecessors and reverse logical users continue to name the same event.
+  if (preserveGraph && completion)
+    copyBOSCAMEGraphAttrs(copy.operation, completion);
+  ModuleOp module = copy.operation->getParentOfType<ModuleOp>();
   copy.operation->erase();
+  if (preserveGraph && failed(verifyCompleteComputeGraphs(module)))
+    return failure();
   return success();
 }
 
@@ -277,11 +297,67 @@ static void copyBOSCAMEGraphAttrs(Operation *source, Operation *target) {
     if (attr.getName().getValue().starts_with("bosc_ame."))
       target->setAttr(attr.getName(), attr.getValue());
 }
+
+/// Emit the exact boundary event selected by the planner, with both original
+/// endpoint descriptors. Keeping its task identity on the last DMA start
+/// preserves predecessor and logical-user references without contracting or
+/// renumbering the compute graph. The immediate wait completes the event at
+/// the original copy position, before the next computation observes it.
+static LogicalResult
+emitResidentBoundaryTransfer(ModuleOp module, const TransferPlan &transfer) {
+  Operation *copy = transfer.provider;
+  if (!copy || transfer.firstConsumer != copy ||
+      transfer.lastConsumer != copy || transfer.completionOperation != copy ||
+      !transfer.source || !transfer.target || !transfer.residentBuffer ||
+      transfer.packets.empty() || transfer.elementBytes <= 0 ||
+      transfer.read == transfer.write ||
+      transfer.buffer != (transfer.read ? transfer.source : transfer.target) ||
+      transfer.residentBuffer !=
+          (transfer.read ? transfer.target : transfer.source))
+    return module.emitError("invalid planned resident boundary DMA transfer");
+
+  OpBuilder builder(copy);
+  Location loc = copy->getLoc();
+  auto slice = [&](Value buffer, int64_t packetOffsetBytes, int64_t bytes) {
+    Value offset = descriptorOffset(builder, loc, buffer);
+    if (packetOffsetBytes)
+      offset = builder.createOrFold<arith::AddIOp>(
+          loc, offset,
+          index(builder, loc, packetOffsetBytes / transfer.elementBytes));
+    return endpoint(builder, loc, buffer, offset,
+                    bytes / transfer.elementBytes);
+  };
+  DmaStartOp completion;
+  for (const DmaPacket &packet : transfer.packets) {
+    Value external =
+        slice(transfer.buffer, packet.ddrOffsetBytes, packet.bytes);
+    Value resident =
+        slice(transfer.residentBuffer, packet.spmOffsetBytes, packet.bytes);
+    auto start = DmaStartOp::create(
+        builder, loc, DMATokenType::get(builder.getContext(), transfer.channel),
+        transfer.read ? external : resident,
+        transfer.read ? resident : external, index(builder, loc, packet.bytes),
+        builder.getI32IntegerAttr(transfer.channel));
+    DmaWaitOp::create(builder, loc, start.getToken());
+    if (failed(start.verify()))
+      return failure();
+    completion = start;
+  }
+  // One logical task covers the entire row sequence. Earlier packets retain
+  // no duplicate IDs; the last start is followed by its mandatory wait.
+  copyBOSCAMEGraphAttrs(copy, completion);
+  copy->erase();
+  if (failed(verifyCompleteComputeGraphs(module)))
+    return failure();
+  return success();
+}
 } // namespace
 
-LogicalResult
-buddy::boscame::emitBOSCAMEDmaCopies(ModuleOp module,
-                                     const TargetInfo &targetInfo) {
+namespace buddy::boscame {
+
+LogicalResult emitBOSCAMEDmaCopies(ModuleOp module,
+                                   const TargetInfo &targetInfo,
+                                   bool preserveGraph) {
   SmallVector<SpmCopyPlan, 0> copies;
   WalkResult result = module.walk([&](Operation *op) {
     Value source, targetBuffer;
@@ -342,7 +418,7 @@ buddy::boscame::emitBOSCAMEDmaCopies(ModuleOp module,
   if (result.wasInterrupted())
     return failure();
   for (const SpmCopyPlan &copy : copies)
-    if (failed(emitSpmCopy(copy, targetInfo)))
+    if (failed(emitSpmCopy(copy, targetInfo, preserveGraph)))
       return failure();
   return success();
 }
@@ -495,8 +571,7 @@ static LogicalResult fuseDirectVectorStores(ModuleOp module, bool directDDR) {
   return success();
 }
 
-LogicalResult buddy::boscame::normalizeBOSCAMEMemoryCopies(ModuleOp module,
-                                                           bool directDDR) {
+LogicalResult normalizeBOSCAMEMemoryCopies(ModuleOp module, bool directDDR) {
   if (failed(fuseDirectVectorStores(module, directDDR)))
     return failure();
   // A uniform fill is independent of logical axis order. Traverse the same
@@ -625,9 +700,8 @@ LogicalResult buddy::boscame::normalizeBOSCAMEMemoryCopies(ModuleOp module,
   return success();
 }
 
-LogicalResult
-buddy::boscame::emitBOSCAMEDmaTransfers(ModuleOp module,
-                                        const WorkspacePlan &workspace) {
+LogicalResult emitBOSCAMEDmaTransfers(ModuleOp module,
+                                      const WorkspacePlan &workspace) {
   for (const TransferPlan &transfer : workspace.transfers) {
     Operation *consumer = transfer.firstConsumer;
     if (!consumer)
@@ -648,6 +722,11 @@ buddy::boscame::emitBOSCAMEDmaTransfers(ModuleOp module,
          !workspace.target.dma.supports(StorageKind::SPM, StorageKind::DDR)))
       return consumer->emitError(
           "target does not support the planned DDR/SPM transfer direction");
+    if (transfer.directExternalBoundary) {
+      if (failed(emitResidentBoundaryTransfer(module, transfer)))
+        return failure();
+      continue;
+    }
     OpBuilder builder(consumer);
     Location loc = consumer->getLoc();
     auto flatType =
@@ -719,3 +798,5 @@ buddy::boscame::emitBOSCAMEDmaTransfers(ModuleOp module,
   }
   return success();
 }
+
+} // namespace buddy::boscame

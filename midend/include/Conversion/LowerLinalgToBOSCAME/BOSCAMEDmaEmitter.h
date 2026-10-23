@@ -25,9 +25,11 @@ mlir::LogicalResult emitBOSCAMEDmaTransfers(mlir::ModuleOp module,
                                             const WorkspacePlan &workspace);
 
 /// Lower pure copies between SPM windows to typed DMA packets and immediate
-/// waits. Computations, including casts and transposes, are not byte copies.
+/// waits. When requested, retain the copy's graph node at its final DMA wait,
+/// which completes the entire event, including every packet.
 mlir::LogicalResult emitBOSCAMEDmaCopies(mlir::ModuleOp module,
-                                         const TargetInfo &target);
+                                         const TargetInfo &target,
+                                         bool preserveGraph = false);
 
 } // namespace buddy::boscame
 

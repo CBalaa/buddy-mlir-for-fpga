@@ -13,6 +13,10 @@ class ModuleOp;
 
 namespace buddy::boscame {
 
+/// Check integer graph references as well as the ordinary SSA contract.
+mlir::LogicalResult verifyCompleteComputeGraphs(mlir::ModuleOp module);
+mlir::LogicalResult verifyBOSCAMEPlanningSurface(mlir::ModuleOp module);
+
 /// Analyze buffer-form Linalg and produce a bounded transfer/workspace plan.
 /// The planner never performs implicit bufferization and never treats a
 /// scalar SPM memref as a legal transfer.  Emitters consume this plan later.

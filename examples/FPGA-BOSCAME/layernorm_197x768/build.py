@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-"""Triton layernorm_197x768 [197,768] x [768] -> TTIR.
+"""Triton LayerNorm inputs for the NH/E6 BOSCAME image.
 
-This is the standalone migration of the ViT-B/16 LayerNorm operator, and it
-owns the first stage of the FPGA pipeline:
+The makefile owns the full lowering pipeline::
 
-  1. Triton AST -> TTIR                (real Triton/Triton-RISC-V passes)
-       -> ``kernel.ttir``
-  2. TTIR -> triton-riscv shared linalg
-       -> ``kernel.linalg.mlir``
+    kernel.ttir --triton-to-linalg-experimental=boscame=true
+      -> kernel.frontend.mlir --one-shot-bufferize
+      -> kernel.bufferized.mlir --linalg-to-boscame
+      -> kernel.boscame.mlir --lower-bosc-ame --buddy-to-llvmir -> kernel.ll
 
-``kernel.ttir`` is what the downstream BOSCAME stages consume;
-``kernel.linalg.mlir`` is the shared linalg form the scalar
-(Triton-to-linalg) lowering starts from, exactly as in
-``../matmul_i8_128x1024x128/build.py``, whose frontend this file mirrors.
-
-Only the frontend is here: the fixed problem size, the output paths and the
-Triton/triton-riscv environment.  No LLVM tool is involved, so the stage runs
-with the ``boscame`` Python environment alone.
+This file owns the real Triton frontend export, the fixed problem size and the
+typed unranked ABI adapter used by the launcher.  Only `kernel.ttir` is
+generated here; the remaining stages belong to the makefile.
 
     layernorm_197x768: X[197,768] f32, Weight[768] f32, Bias[768] f32
                        -> Out[197,768] f32, one program per row
+
+Run with the boscame Python environment:
+
+    python build.py --ttir-only       # Triton frontend -> kernel.ttir
+    python build.py --adapter         # typed launcher ABI bridge to stdout
 """
 
 import argparse
@@ -77,8 +76,8 @@ def configure_environment():
 def verify_ttir(ttir):
     """Fail the export unless the TTIR still carries the operator's structure.
 
-    Two ``tt.reduce`` (mean and variance over the hidden dimension) plus the
-    ``math.rsqrt`` of the shifted variance are the whole point of the kernel;
+    Two `tt.reduce` (mean and variance over the hidden dimension) plus the
+    `math.rsqrt` of the shifted variance are the whole point of the kernel;
     an export that loses one of them is not this operator.
     """
     missing = [
@@ -95,16 +94,13 @@ def verify_ttir(ttir):
 
 
 def export_frontend():
-    """Compile the real ``@triton.jit`` kernel into TTIR and shared linalg."""
+    """Compile the real `@triton.jit` kernel into TTIR."""
     configure_environment()
     import kernel
     import triton
     from triton._C.libtriton import ir
     from triton.backends.compiler import GPUTarget
-    from triton.backends.triton_shared.compiler import (
-        CPUBackend,
-        _ttir_to_ttsharedir,
-    )
+    from triton.backends.triton_shared.compiler import CPUBackend
     from triton.compiler import ASTSource
 
     fn = getattr(kernel, KERNEL)
@@ -124,18 +120,15 @@ def export_frontend():
     )
     module = backend.make_ttir(module, {}, options)
     ttir = str(module)
-    linalg = _ttir_to_ttsharedir(module)
     # Symbol namespacing only, after genuine Triton/triton-riscv passes: no
     # computation, loop body or linalg op is synthesized here.
     pattern = r"@" + re.escape(KERNEL) + r"(?=[\s(])"
-    if not re.search(pattern, ttir) or not re.search(pattern, linalg):
+    if not re.search(pattern, ttir):
         raise RuntimeError(f"Cannot identify compiled entry symbol {KERNEL!r}")
     ttir = re.sub(pattern, "@" + SYMBOL, ttir)
-    linalg = re.sub(pattern, "@" + SYMBOL, linalg)
     verify_ttir(ttir)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "kernel.ttir").write_text(ttir)
-    (OUT / "kernel.linalg.mlir").write_text(linalg)
     print(
         "exported " + NAME + " (triton " + triton.__version__ + ")", flush=True
     )
@@ -192,6 +185,31 @@ void _mlir_ciface_kernel_{NAME}(MemRef2 *x, MemRef1 *weight, MemRef1 *bias, MemR
 """
 
 
+def verify_abi(path):
+    """Verify the typed entry LLVM ABI and absence of heap allocation."""
+    contents = Path(path).read_text()
+    match = re.search(
+        r"define\s+void\s+@" + re.escape(SYMBOL) + r"\((.*?)\)", contents, re.S
+    )
+    if not match:
+        raise RuntimeError("Missing Triton entry definition: " + SYMBOL)
+    actual = [part.strip().split()[0] for part in match.group(1).split(",")]
+    expected = [value for _name in SIGNATURE for value in ("i64", "ptr")] + [
+        "i32"
+    ] * 6
+    if actual != expected:
+        raise RuntimeError(
+            f"Triton ABI changed: expected {expected}, got {actual}"
+        )
+    if re.search(
+        r"\b(?:call|declare)\b[^\n]*@(?:malloc|aligned_alloc|realloc|free)\b",
+        contents,
+    ):
+        raise RuntimeError(
+            "Unbounded per-grid heap allocation remains; stack promotion must remove it"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -205,12 +223,20 @@ def main():
     parser.add_argument(
         "--ttir-only",
         action="store_true",
-        help="Only export kernel.ttir / kernel.linalg.mlir",
+        help="Only export kernel.ttir from the Triton frontend",
+    )
+    parser.add_argument(
+        "--check-abi",
+        type=Path,
+        help="Verify the typed entry LLVM ABI and absence of heap allocation",
     )
     parser.add_argument(
         "--output", type=Path, help="Build root (defaults to build/)"
     )
     args = parser.parse_args()
+    if args.check_abi:
+        verify_abi(args.check_abi)
+        return
     if args.adapter:
         sys.stdout.write(adapter_source())
         return
@@ -218,8 +244,12 @@ def main():
     if args.output is not None:
         BUILD_ROOT = args.output.resolve()
         OUT = BUILD_ROOT / NAME
-    (BUILD_ROOT / ".scratch").mkdir(parents=True, exist_ok=True)
-    export_frontend()
+    if args.ttir_only:
+        export_frontend()
+        return
+    raise SystemExit(
+        "build.py only generates frontend/ABI inputs; use make for the image"
+    )
 
 
 if __name__ == "__main__":

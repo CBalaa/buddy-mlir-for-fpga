@@ -842,7 +842,7 @@ class Machine:
                 raise SimError("tile read before DMA wait")
             source = get(operands[0])
             shape, _ = type_shape(types.split(" -> ")[-1])
-            direct = "bosc_ame.direct_ddr" in op.text
+            direct = re.search(r"\bbosc_ame\.direct_ddr\b", op.text) is not None
             if (
                 direct
                 and name == "bosc_ame.tile.load_acc"
@@ -888,7 +888,7 @@ class Machine:
             matrix, destination = get(operands[0]), get(operands[1])
             if self.pending:
                 raise SimError("tile store before DMA wait")
-            direct = "bosc_ame.direct_ddr" in op.text
+            direct = re.search(r"\bbosc_ame\.direct_ddr\b", op.text) is not None
             if direct and destination.bank is not None:
                 raise SimError("direct tile store must target external DDR")
             if direct and (

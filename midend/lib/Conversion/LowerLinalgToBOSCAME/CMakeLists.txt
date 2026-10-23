@@ -1,8 +1,10 @@
 add_mlir_library(LowerLinalgToBOSCAMEPass
   LowerLinalgToBOSCAME.cpp
   BOSCAMEAmeEmitter.cpp
+  BOSCAMEBoundaryTransfers.cpp
   BOSCAMEDmaEmitter.cpp
   BOSCAMEFootprint.cpp
+  BOSCAMEPlacement.cpp
   BOSCAMEPlanner.cpp
 
   LINK_LIBS PUBLIC

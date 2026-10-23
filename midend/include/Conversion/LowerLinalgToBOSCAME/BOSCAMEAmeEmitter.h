@@ -8,12 +8,18 @@
 
 namespace mlir {
 class ModuleOp;
+class Operation;
 } // namespace mlir
 
 namespace buddy::boscame {
 
 struct LinalgToBOSCAMEConfig;
 struct DataflowPlan;
+struct TargetInfo;
+
+/// Check a prospective placed matmul with the emitter's actual tile layouts.
+mlir::LogicalResult verifyBOSCAMEPlacedMatmul(mlir::Operation *operation,
+                                              const TargetInfo &target);
 
 /// Validate the AME eligibility of a marked buffer-form matmul.  Floating
 /// point and unmarked integer matmuls stay on the ordinary RVV/memory path.
@@ -25,10 +31,12 @@ mlir::LogicalResult verifyBOSCAMEAmeConsumers(mlir::ModuleOp module,
 /// the physical [N,K] storage. This emitter inserts only static subviews and
 /// AME tile operations: no allocation, packing, scalar memory access or DMA.
 /// Each C tile is seeded once, accumulated across K in SSA, then stored once.
-mlir::LogicalResult
-lowerBOSCAMEAmeConsumers(mlir::ModuleOp module,
-                         const LinalgToBOSCAMEConfig &config,
-                         const DataflowPlan &plan);
+/// Graph preservation moves each task's metadata to its final tile store and
+/// verifies the graph after every rewrite; the consumed lowering marker is
+/// removed. The default preserves the established unannotated emitted IR.
+mlir::LogicalResult lowerBOSCAMEAmeConsumers(
+    mlir::ModuleOp module, const LinalgToBOSCAMEConfig &config,
+    const DataflowPlan &plan, bool preserveComputeGraph = false);
 
 } // namespace buddy::boscame
 

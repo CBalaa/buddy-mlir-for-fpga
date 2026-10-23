@@ -3,6 +3,7 @@ add_mlir_library(BuddyBOSCAMEHelpers
   StructuredMemory.cpp
   MarkedMatmul.cpp
   SPMPlacement.cpp
+  SPMBroadcasts.cpp
   SPMComputations.cpp
 
   LINK_LIBS PUBLIC

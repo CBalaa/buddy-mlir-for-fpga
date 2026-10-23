@@ -35,8 +35,10 @@ def main():
     text = Path(module).read_text()
     assert "tensor<" not in text and "unrealized_conversion_cast" not in text
     assert "bosc_ame.tile." not in text
-    assert text.count("vector.extract ") == 2
-    assert len(re.findall(r"vector<1xf32>", text)) >= 4
+    assert text.count("vector.reduction <add>") == 2
+    assert "vector<1xf32>" not in text
+    assert not re.search(r"memref\.alloca?[^\n]*: memref<f32>", text)
+    assert not re.search(r"memref\.(?:load|store|copy)\b", text)
     for line in text.splitlines():
         if re.search(r"\bmemref\.(?:load|store|copy)\b", line):
             assert "#bosc_ame.spm" not in line, line
@@ -57,7 +59,7 @@ def main():
     )
 
 
-# CHECK: SIM CHECK PASS: LayerNorm 3 rows, bit-identical to ordinary Linalg and padded ordered-f32 oracle
+# CHECK: SIM CHECK PASS: LayerNorm 3 rows, rtol=2e-5, atol=2e-5 against ordinary Linalg and padded ordered-f32 oracle
 # CHECK-SAME: three 3072 B reads and one 3072 B write per row
 # CHECK-SAME: last row, guards and persistent SPM checked
 if __name__ == "__main__":

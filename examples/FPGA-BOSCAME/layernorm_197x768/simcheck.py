@@ -48,6 +48,16 @@ def main():
     parser.add_argument(
         "--module", type=Path, default=example.OUT / "kernel.boscame.mlir"
     )
+    parser.add_argument(
+        "--write-output",
+        type=Path,
+        help="Save all 197x768 output f32 bit patterns as raw bytes (no guards)",
+    )
+    parser.add_argument(
+        "--compare-output",
+        type=Path,
+        help="Require all output bytes to match a previous --write-output run",
+    )
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as temp:
         loops = Path(temp) / "kernel.loops.mlir"
@@ -78,6 +88,7 @@ def main():
     original = {
         name: bytes(data) for name, data in buffers.items() if name != "%arg3"
     }
+    max_error = 0.0
     for row in reversed(range(example.ROWS)):
         start, end = row * example.WIDTH * 4, (row + 1) * example.WIDTH * 4
         machine.launch(
@@ -85,7 +96,15 @@ def main():
             {"%arg4": example.ROWS, "%arg5": 1, "%arg6": 1, "%arg7": row},
         )
         actual = np.frombuffer(buffers["%arg3"][start:end], dtype=np.float32)
-        np.testing.assert_array_equal(actual, oracle(x[row], weight, bias))
+        expected = oracle(x[row], weight, bias)
+        np.testing.assert_allclose(
+            actual,
+            expected,
+            rtol=2.0e-5,
+            atol=2.0e-5,
+            err_msg=f"row {row}: output exceeds vector-reduction tolerance",
+        )
+        max_error = max(max_error, float(np.max(np.abs(actual - expected))))
         assert machine.accesses[-4:] == [
             ("%arg0", start, end, "read"),
             ("%arg1", 0, example.WIDTH * 4, "read"),
@@ -96,8 +115,26 @@ def main():
         bytes(buffers[name]) == snapshot for name, snapshot in original.items()
     )
     assert buffers["%arg3"][-len(guard) :] == guard
+    output = bytes(buffers["%arg3"][: x.nbytes])
+    if args.compare_output is not None:
+        golden = args.compare_output.read_bytes()
+        if len(golden) != len(output):
+            raise AssertionError(
+                f"output byte count differs: got {len(output)}, "
+                f"golden has {len(golden)}"
+            )
+        if output != golden:
+            first = next(
+                index
+                for index, (actual, expected) in enumerate(zip(output, golden))
+                if actual != expected
+            )
+            raise AssertionError(f"output bytes differ at byte offset {first}")
+        print(f"OUTPUT CHECK PASS: all {len(output)} bytes match the golden")
+    if args.write_output is not None:
+        args.write_output.write_bytes(output)
     print(
-        f"SIM CHECK PASS: {example.ROWS} programs, masked-lane f32 oracle, four exact 3072 B DMA ranges per row, DDR guards intact"
+        f"SIM CHECK PASS: {example.ROWS} programs, masked-lane f32 oracle rtol=2e-5, atol=2e-5, four exact 3072 B DMA ranges per row, DDR guards intact; max absolute error {max_error:.3g}"
     )
 
 

@@ -2,6 +2,8 @@
 
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanner.h"
 #include "Conversion/BOSCAMEHelpers/BOSCAMEHelpers.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEBoundaryTransfers.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlacement.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
 #include "Dialect/BOSCAME/SpmDma.h"
@@ -14,6 +16,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/SymbolTable.h"
@@ -54,7 +57,8 @@ static SmallVector<int64_t> getI64Array(Operation *operation, StringRef name) {
 /// explicitly complete graph must be structurally valid before any rewrite
 /// can erase the evidence, and must remain valid after planning rewrites.
 /// Unsupported/incomplete analyses still use the ordinary fallback path.
-static LogicalResult verifyCompleteComputeGraphs(ModuleOp module) {
+namespace buddy::boscame {
+LogicalResult verifyCompleteComputeGraphs(ModuleOp module) {
   auto version =
       module->getAttrOfType<IntegerAttr>("bosc_ame.compute_graph_version");
   if (!version || version.getInt() != 1)
@@ -108,6 +112,15 @@ static LogicalResult verifyCompleteComputeGraphs(ModuleOp module) {
                    << name;
           return;
         }
+      for (StringRef name :
+           {"bosc_ame.compute_input_values", "bosc_ame.compute_output_values"})
+        for (int64_t value : getI64Array(operation, name))
+          if (value < 0) {
+            status =
+                operation->emitError("negative BOSCAME logical value ID in ")
+                << name;
+            return;
+          }
     });
     if (failed(status) || !claimsComplete(function))
       return;
@@ -137,8 +150,108 @@ static LogicalResult verifyCompleteComputeGraphs(ModuleOp module) {
                << predecessor << " -> " << id;
     }
   }
-  return success();
+  module.walk([&](func::FuncOp function) {
+    if (failed(status) || function.isExternal() || !claimsComplete(function))
+      return;
+    // Bufferization may introduce implicit content-version IDs without a
+    // descriptor or producer annotation. Do not invent those missing facts;
+    // check the full reverse relation wherever users are explicitly present.
+    DenseMap<int64_t, DenseSet<int64_t>> consumers;
+    function.walk([&](Operation *operation) {
+      auto task = operation->getAttrOfType<IntegerAttr>("bosc_ame.compute_id");
+      if (!task)
+        return;
+      for (int64_t value :
+           getI64Array(operation, "bosc_ame.compute_input_values"))
+        consumers[value].insert(task.getInt());
+    });
+    auto verifyUsers = [&](Operation *anchor, int64_t value,
+                           DenseI64ArrayAttr users) -> LogicalResult {
+      DenseSet<int64_t> declared;
+      for (int64_t user : users.asArrayRef()) {
+        auto task = tasks.find(user);
+        if (task == tasks.end() ||
+            task->second->getParentOfType<func::FuncOp>() != function)
+          return anchor->emitError("unresolved BOSCAME logical value user ")
+                 << user << " for value " << value;
+        if (!llvm::is_contained(
+                getI64Array(task->second, "bosc_ame.compute_input_values"),
+                value))
+          return anchor->emitError("BOSCAME logical value user ")
+                 << user << " does not read value " << value;
+        declared.insert(user);
+      }
+      const DenseSet<int64_t> &actual = consumers[value];
+      if (declared.size() != actual.size() ||
+          llvm::any_of(actual,
+                       [&](int64_t user) { return !declared.contains(user); }))
+        return anchor->emitError(
+                   "BOSCAME logical value users mismatch for value ")
+               << value;
+      return success();
+    };
+    for (unsigned index = 0; index < function.getNumArguments(); ++index) {
+      Attribute idAttribute =
+          function.getArgAttr(index, "bosc_ame.logical_value_id");
+      Attribute usersAttribute =
+          function.getArgAttr(index, "bosc_ame.logical_value_users");
+      if (!idAttribute && !usersAttribute)
+        continue;
+      auto id = dyn_cast_or_null<IntegerAttr>(idAttribute);
+      if (!id || id.getInt() < 0) {
+        status = function.emitError(
+            "invalid BOSCAME function argument logical value ID");
+        return;
+      }
+      if (!usersAttribute)
+        continue;
+      auto users = dyn_cast<DenseI64ArrayAttr>(usersAttribute);
+      if (!users) {
+        status = function.emitError(
+            "invalid BOSCAME function argument logical value users");
+        return;
+      }
+      if (failed(status = verifyUsers(function, id.getInt(), users)))
+        return;
+    }
+    function.walk([&](Operation *operation) {
+      if (failed(status))
+        return;
+      Attribute idsAttribute = operation->getAttr("bosc_ame.logical_value_ids");
+      Attribute usersAttribute =
+          operation->getAttr("bosc_ame.logical_value_users");
+      if (!idsAttribute && !usersAttribute)
+        return;
+      auto ids = dyn_cast_or_null<DenseI64ArrayAttr>(idsAttribute);
+      if (idsAttribute &&
+          (!ids || llvm::any_of(ids.asArrayRef(),
+                                [](int64_t value) { return value < 0; }))) {
+        status = operation->emitError("invalid BOSCAME logical value IDs");
+        return;
+      }
+      if (!usersAttribute)
+        return;
+      auto users = dyn_cast<ArrayAttr>(usersAttribute);
+      if (!ids || !users || static_cast<size_t>(ids.size()) != users.size()) {
+        status = operation->emitError(
+            "BOSCAME logical_value_users must match logical_value_ids");
+        return;
+      }
+      for (auto [value, userAttribute] : llvm::zip(ids.asArrayRef(), users)) {
+        auto userIds = dyn_cast<DenseI64ArrayAttr>(userAttribute);
+        if (!userIds) {
+          status = operation->emitError(
+              "BOSCAME logical_value_users entry must be an i64 array");
+          return;
+        }
+        if (failed(status = verifyUsers(operation, value, userIds)))
+          return;
+      }
+    });
+  });
+  return status;
 }
+} // namespace buddy::boscame
 
 static bool hasUnresolvedRootMemoryEffect(Operation *operation) {
   if (hasUnknownEffects(operation))
@@ -1886,8 +1999,7 @@ static std::optional<SymbolicByteRows> getSymbolicByteRows(Value value) {
       rowStrideBytes < rowBytes ||
       llvm::MulOverflow(type.getShape()[0] - 1, rowStrideBytes,
                         finalRowOffset) ||
-      llvm::AddOverflow(interval->startBytes, finalRowOffset,
-                        finalRowOffset) ||
+      llvm::AddOverflow(interval->startBytes, finalRowOffset, finalRowOffset) ||
       llvm::AddOverflow(finalRowOffset, rowBytes, finalRowEnd) ||
       interval->startBytes < 0 || finalRowEnd > interval->endBytes)
     return std::nullopt;
@@ -4462,6 +4574,416 @@ static int64_t getStaticTransferCapacity(Value value, int64_t bankCapacity) {
   return capacity;
 }
 
+/// Collect physical roots separately from the sequence of writes into them.
+/// The existing access analysis supplies alias roots, layouts and effects.
+static void collectBufferPlacementFacts(ModuleOp module,
+                                        const KernelFacts &facts,
+                                        DataflowPlan &plan) {
+  DenseMap<Operation *, unsigned> positions;
+  module.walk([&](func::FuncOp function) {
+    unsigned position = 0;
+    function.walk<WalkOrder::PreOrder>([&](Operation *operation) {
+      if (operation != function.getOperation())
+        positions[operation] = position++;
+    });
+  });
+  module.walk([&](Operation *allocation) {
+    if (!isa<memref::AllocOp, memref::AllocaOp>(allocation))
+      return;
+    Value root = allocation->getResult(0);
+    auto type = cast<MemRefType>(root.getType());
+    if (!type.hasStaticShape() || !type.getRank() || spmdma::getSpmBank(type))
+      return;
+    RootStorageFact storage;
+    storage.root = root;
+    storage.views.push_back(root);
+    storage.shape.assign(type.getShape().begin(), type.getShape().end());
+    int64_t ignored;
+    (void)type.getStridesAndOffset(storage.strides, ignored);
+    storage.capacityBytes = getStaticTransferCapacity(root, plan.bankCapacity);
+    if (type.getElementType().isInteger(1))
+      storage.capacityBytes = type.getNumElements();
+    storage.firstPosition = std::numeric_limits<unsigned>::max();
+    storage.aliasProven = true; // A non-escaping allocation is fresh storage.
+    auto function = allocation->getParentOfType<func::FuncOp>();
+    storage.structuredScope =
+        !function || allocation->getParentRegion() != &function.getBody();
+    for (size_t i = 0; i < storage.views.size(); ++i)
+      for (Operation *user : storage.views[i].getUsers()) {
+        if (isStorageViewOperation(user)) {
+          for (Value result : user->getResults())
+            if (isa<MemRefType>(result.getType()) &&
+                !llvm::is_contained(storage.views, result))
+              storage.views.push_back(result);
+        } else if (!isa<linalg::LinalgOp, memref::CopyOp, memref::DeallocOp,
+                        memref::DimOp>(user)) {
+          storage.aliasProven = false;
+        }
+        StringRef name = user->getName().getStringRef();
+        storage.feedsAmeDirectRoute |= user->hasAttr(kDirectAOperandAttr) ||
+                                       user->hasAttr(kDirectBOperandAttr) ||
+                                       user->hasAttr(kDirectCOperandAttr) ||
+                                       user->hasAttr("bosc_ame.direct_ddr") ||
+                                       name.starts_with("bosc_ame.tile.");
+      }
+    size_t rootIndex = plan.rootStorageFacts.size();
+    DenseMap<Operation *, DenseSet<Value>> stagedReads;
+    for (auto [index, access] : llvm::enumerate(facts.bufferAccesses)) {
+      if (access.storageRoot != root || !access.operation ||
+          (access.effect != BufferAccessEffect::Read &&
+           access.effect != BufferAccessEffect::Write))
+        continue;
+      auto position = positions.find(access.operation);
+      if (position == positions.end()) {
+        storage.aliasProven = false;
+        continue;
+      }
+      storage.structuredScope |=
+          !function ||
+          access.operation->getParentRegion() != &function.getBody();
+      storage.firstPosition = std::min(storage.firstPosition, position->second);
+      storage.lastPosition = std::max(storage.lastPosition, position->second);
+      RootStorageAccess use{access.operation, position->second, index};
+      if (access.effect == BufferAccessEffect::Read) {
+        storage.readers.push_back(use);
+        if (access.logicalFootprintBytes && *access.logicalFootprintBytes > 0 &&
+            stagedReads[access.operation].insert(access.accessedValue).second) {
+          uint64_t bytes = *access.logicalFootprintBytes;
+          if (bytes <= std::numeric_limits<uint64_t>::max() -
+                           storage.potentialReadSavingsBytes)
+            storage.potentialReadSavingsBytes += bytes;
+        }
+        continue;
+      }
+      storage.writers.push_back(use);
+      ContentVersion version;
+      version.rootIndex = rootIndex;
+      version.writer = access.operation;
+      version.position = position->second;
+      version.writtenView = access.accessedValue;
+      version.byteOffset = access.effectiveByteOffsetBytes;
+      version.bytes = access.physicalSpanBytes;
+      version.validShape =
+          access.validShape.empty() ? access.shape : access.validShape;
+      if (auto attr = access.operation->getAttrOfType<BoolAttr>(
+              "bosc_ame.rematerializable"))
+        version.rematerializable = attr.getValue();
+      version.paddingInitialization =
+          access.operation->hasAttr("bosc_ame.padding");
+      plan.contentVersions.push_back(std::move(version));
+    }
+    // A read may depend on both a padding fill and a later prefix write.
+    // Stop only when a newer write completely covers the read's byte range.
+    for (const RootStorageAccess &reader : storage.readers) {
+      // Lexical order cannot identify a reaching content version through a
+      // branch or loop. Fixed root reservations need no such version reuse.
+      if (storage.structuredScope)
+        break;
+      const BufferAccessFact &access = facts.bufferAccesses[reader.accessIndex];
+      auto readRange =
+          getCheckedByteInterval(access.effectiveByteOffsetBytes,
+                                 access.physicalSpanBytes.value_or(-1));
+      for (ContentVersion &version : llvm::reverse(plan.contentVersions)) {
+        if (version.rootIndex != rootIndex ||
+            version.position >= reader.position)
+          continue;
+        auto writeRange = getCheckedByteInterval(version.byteOffset,
+                                                 version.bytes.value_or(-1));
+        if (readRange && writeRange &&
+            areByteIntervalsDisjoint(*readRange, *writeRange))
+          continue;
+        if (!llvm::is_contained(version.consumers, reader.operation))
+          version.consumers.push_back(reader.operation);
+        if (readRange && writeRange && writeRange->first <= readRange->first &&
+            writeRange->second >= readRange->second)
+          break;
+      }
+    }
+    plan.rootStorageFacts.push_back(std::move(storage));
+  });
+}
+
+/// Validate a complete prospective module budget. No lifetime reuse is used
+/// for resident roots. Operation-local staging reuses its ordinary immediate-
+/// wait workspace, always above every explicit and resident reservation.
+static LogicalResult
+planPlacementStaging(ModuleOp module, const LinalgToBOSCAMEConfig &config,
+                     const DataflowPlan &trial, ArrayRef<int64_t> reserved,
+                     SmallVectorImpl<TransferPlan> &staging,
+                     std::string &reason) {
+  DenseSet<Value> residentRoots;
+  for (const BufferPlacementDecision &decision : trial.bufferPlacements)
+    if (decision.kind == BufferPlacementKind::SpmResident)
+      residentRoots.insert(trial.rootStorageFacts[decision.rootIndex].root);
+  LogicalResult status = success();
+  ScopedDiagnosticHandler diagnostics(module.getContext(),
+                                      [&](Diagnostic &diagnostic) {
+                                        llvm::raw_string_ostream stream(reason);
+                                        diagnostic.print(stream);
+                                        return success();
+                                      });
+  module.walk([&](linalg::LinalgOp op) {
+    if (failed(status) || !isStageableBufferLinalg(op))
+      return;
+    auto matmul = dyn_cast<linalg::MatmulOp>(op.getOperation());
+    if (matmul && !op->hasAttr(::buddy::boscame::lowering::kLowerToAme))
+      return;
+    SmallVector<TransferPlan, 4> local;
+    for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
+      auto type = dyn_cast<MemRefType>(operand.getType());
+      if (!type || !type.getRank() || spmdma::getSpmBank(type) ||
+          residentRoots.contains(getStorageRoot(operand)) ||
+          isPredicateOnlyInput(op, index) || isPredicateOnlyOutput(op, index))
+        continue;
+      bool write = index >= static_cast<size_t>(op.getNumDpsInputs());
+      if (matmul &&
+          ((!write && index == 0 && op->hasAttr(kDirectAOperandAttr)) ||
+           (!write && index == 1 && op->hasAttr(kDirectBOperandAttr)) ||
+           (write && config.storePolicy == "direct-ddr" &&
+            op->hasAttr(kDirectCOperandAttr))))
+        continue;
+      if (write && isDirectExternalStore(op, config))
+        continue;
+      if (llvm::any_of(local, [&](const TransferPlan &transfer) {
+            return transfer.buffer == operand;
+          }))
+        continue;
+      auto transfer = analyzeBOSCAMEFootprint(operand, TransferRole::Temporary,
+                                              op, trial.target);
+      if (!transfer) {
+        status = failure();
+        if (reason.empty())
+          reason = "missing legal staging for non-scalar operand " +
+                   std::to_string(index);
+        return;
+      }
+      transfer->firstConsumer = op;
+      transfer->lastConsumer = op;
+      transfer->consumerOperations.push_back(op);
+      local.push_back(std::move(*transfer));
+    }
+    ResourceEstimate ignored;
+    auto allocation =
+        chooseBankAllocation(local, reserved, trial.bankCapacity,
+                             trial.target.dma.endpointAlignmentBytes, ignored);
+    if (!allocation) {
+      reason = "resident + explicit windows leave insufficient per-op staging "
+               "capacity for " +
+               op->getName().getStringRef().str();
+      status = failure();
+      return;
+    }
+    for (auto [index, transfer] : llvm::enumerate(local)) {
+      transfer.spmBank = allocation->banks[index];
+      transfer.spmOffset = allocation->offsets[index];
+      transfer.channel = transfer.spmBank;
+      staging.push_back(std::move(transfer));
+    }
+  });
+  return status;
+}
+
+static LogicalResult planBufferPlacements(ModuleOp module,
+                                          const LinalgToBOSCAMEConfig &config,
+                                          DataflowPlan &plan,
+                                          ArrayRef<int64_t> explicitReserved) {
+  DenseMap<Value, size_t> roots;
+  SmallVector<size_t> parents;
+  for (auto [index, storage] : llvm::enumerate(plan.rootStorageFacts)) {
+    roots[storage.root] = index;
+    parents.push_back(index);
+  }
+  auto representative = [&](size_t index) {
+    while (parents[index] != index)
+      index = parents[index];
+    return index;
+  };
+  DenseMap<Value, size_t> connected;
+  module.walk([&](linalg::LinalgOp op) {
+    if (op->hasAttr(kPrefixRangeAttr) || op->hasAttr(kPrefixMaskAuxAttr))
+      return;
+    SmallVector<Value> buffers;
+    std::optional<size_t> first;
+    for (auto [index, operand] : llvm::enumerate(op->getOperands())) {
+      auto type = dyn_cast<MemRefType>(operand.getType());
+      if (!type || !type.getRank() || isPredicateOnlyInput(op, index) ||
+          isPredicateOnlyOutput(op, index))
+        continue;
+      Value root = getStorageRoot(operand);
+      buffers.push_back(root);
+      auto found = roots.find(root);
+      if (found == roots.end())
+        continue;
+      if (!first)
+        first = found->second;
+      else
+        parents[representative(found->second)] = representative(*first);
+    }
+    if (!first)
+      return;
+    for (Value buffer : buffers) {
+      auto [entry, inserted] = connected.try_emplace(buffer, *first);
+      if (!inserted)
+        parents[representative(entry->second)] = representative(*first);
+    }
+  });
+  DenseMap<size_t, int64_t> groupIds;
+  bool hasCalls = false;
+  module.walk([&](CallOpInterface) { hasCalls = true; });
+  for (auto [index, storage] : llvm::enumerate(plan.rootStorageFacts)) {
+    BufferPlacementDecision decision;
+    decision.rootIndex = index;
+    bool auxiliary = true;
+    bool used = false;
+    for (Value view : storage.views)
+      for (Operation *user : view.getUsers())
+        if (auto op = dyn_cast<linalg::LinalgOp>(user)) {
+          used = true;
+          bool predicateUse = true;
+          for (OpOperand &operand : op->getOpOperands())
+            if (operand.get() == view &&
+                !isPredicateOnlyInput(op, operand.getOperandNumber()) &&
+                !isPredicateOnlyOutput(op, operand.getOperandNumber()))
+              predicateUse = false;
+          if (!op->hasAttr(kPrefixRangeAttr) &&
+              !op->hasAttr(kPrefixMaskAuxAttr) && !predicateUse)
+            auxiliary = false;
+        }
+    if (storage.feedsAmeDirectRoute) {
+      decision.reason = BufferPlacementReason::AmeDirectRoute;
+    } else if (!used) {
+      decision.reason = BufferPlacementReason::Unused;
+    } else if (auxiliary) {
+      decision.reason = BufferPlacementReason::Auxiliary;
+    } else {
+      auto [entry, inserted] =
+          groupIds.try_emplace(representative(index), groupIds.size());
+      (void)inserted;
+      decision.group = entry->second;
+      decision.kind = BufferPlacementKind::SpmResident;
+      decision.reason = BufferPlacementReason::Selected;
+    }
+    plan.bufferPlacements.push_back(std::move(decision));
+  }
+  int64_t reserved[2] = {explicitReserved[0], explicitReserved[1]};
+  for (int64_t group = 0; group < static_cast<int64_t>(groupIds.size());
+       ++group) {
+    DataflowPlan trial = plan;
+    for (BufferPlacementDecision &decision : trial.bufferPlacements)
+      if (decision.group > group &&
+          decision.kind == BufferPlacementKind::SpmResident)
+        decision.kind = BufferPlacementKind::Spare;
+    BufferPlacementReason rejection = BufferPlacementReason::Selected;
+    std::string detail;
+    int64_t proposed[2] = {reserved[0], reserved[1]};
+    for (BufferPlacementDecision &decision : trial.bufferPlacements) {
+      if (decision.group != group)
+        continue;
+      const RootStorageFact &storage =
+          trial.rootStorageFacts[decision.rootIndex];
+      auto type = cast<MemRefType>(storage.root.getType());
+      bool serialScope =
+          !hasCalls && hasBOSCAMEPlacementScope(storage.root.getDefiningOp());
+      for (Value view : storage.views)
+        for (Operation *user : view.getUsers())
+          serialScope &= hasBOSCAMEPlacementScope(user);
+      if (!serialScope) {
+        rejection = BufferPlacementReason::ControlFlow;
+        detail = "root placement requires serial single-block if/for/"
+                 "execute_region scopes without calls";
+        break;
+      }
+      if (!storage.aliasProven) {
+        rejection = BufferPlacementReason::UnsupportedUse;
+        detail = "root escapes or has a non-Linalg memory access";
+        break;
+      }
+      auto capacity = spmdma::getContiguousZeroOffsetByteSize(type);
+      if (!capacity || *capacity <= 0 || *capacity % 64 || type.getRank() > 2) {
+        rejection = BufferPlacementReason::UnsupportedLayout;
+        detail = "root needs a static contiguous rank-1/rank-2 aligned vector "
+                 "layout";
+        break;
+      }
+      // Keep each root's window for its whole scope. Only opposite arms of
+      // an if may overlap; iterations and sequential scopes never do. This
+      // needs neither a complete task DAG nor dynamic content-version facts.
+      auto firstOffset = [&](int64_t bank) -> std::optional<int64_t> {
+        int64_t offset = llvm::alignTo(explicitReserved[bank], 64);
+        while (*capacity <= trial.bankCapacity &&
+               offset <= trial.bankCapacity - *capacity) {
+          bool conflict = false;
+          for (const BufferPlacementDecision &other : trial.bufferPlacements) {
+            if (other.rootIndex == decision.rootIndex ||
+                other.kind != BufferPlacementKind::SpmResident ||
+                other.bank != bank)
+              continue;
+            const RootStorageFact &occupied =
+                trial.rootStorageFacts[other.rootIndex];
+            if (haveExclusiveBOSCAMEPlacementScopes(
+                    storage.root.getDefiningOp(),
+                    occupied.root.getDefiningOp()))
+              continue;
+            int64_t end = other.offset + occupied.capacityBytes;
+            if (offset < end && other.offset < offset + *capacity) {
+              offset = llvm::alignTo(end, 64);
+              conflict = true;
+              break;
+            }
+          }
+          if (!conflict)
+            return offset;
+        }
+        return std::nullopt;
+      };
+      auto first = firstOffset(0), second = firstOffset(1);
+      if (!first && !second) {
+        rejection = BufferPlacementReason::Capacity;
+        detail = "resident + explicit windows exceed a bank capacity";
+        break;
+      }
+      int64_t bank = !second || (first && *first <= *second) ? 0 : 1;
+      int64_t offset = bank == 0 ? *first : *second;
+      decision.bank = bank;
+      decision.offset = offset;
+      proposed[bank] = std::max(proposed[bank], offset + *capacity);
+    }
+    SmallVector<TransferPlan, 4> staging;
+    if (rejection == BufferPlacementReason::Selected &&
+        failed(planPlacementStaging(module, config, trial,
+                                    ArrayRef<int64_t>(proposed, 2), staging,
+                                    detail)))
+      rejection = BufferPlacementReason::MissingStaging;
+    if (rejection == BufferPlacementReason::Selected &&
+        failed(preflightBufferPlacements(module, trial, staging, detail)))
+      rejection = BufferPlacementReason::ComputationLegality;
+    for (auto [index, decision] : llvm::enumerate(plan.bufferPlacements)) {
+      if (decision.group != group)
+        continue;
+      if (rejection == BufferPlacementReason::Selected) {
+        decision = trial.bufferPlacements[index];
+      } else {
+        decision.kind = BufferPlacementKind::StagedFallback;
+        decision.reason = rejection;
+        decision.detail = detail;
+        decision.bank = -1;
+      }
+    }
+    if (rejection == BufferPlacementReason::Selected) {
+      reserved[0] = proposed[0];
+      reserved[1] = proposed[1];
+    }
+  }
+  if (!config.enableSpmDma)
+    for (BufferPlacementDecision &decision : plan.bufferPlacements)
+      if (decision.kind == BufferPlacementKind::SpmResident) {
+        decision.kind = BufferPlacementKind::StagedFallback;
+        decision.reason = BufferPlacementReason::MissingStaging;
+        decision.detail = "buffer placement requires enable-spm-dma=true";
+      }
+  return success();
+}
+
 FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
   auto fail = [&](Twine message) -> FailureOr<DataflowPlan> {
     module.emitError() << message;
@@ -4666,6 +5188,34 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
   });
   if (failed(reservationStatus))
     return failure();
+
+  if (config.bufferPlacement) {
+    collectBufferPlacementFacts(module, graphFacts, workspace);
+    if (failed(planBufferPlacements(module, config, workspace,
+                                    ArrayRef<int64_t>(reservedBytes, 2))) ||
+        failed(applyBufferPlacements(module, workspace)) ||
+        failed(verifyCompleteComputeGraphs(module)))
+      return failure();
+    // Allocation replacement changes alias handles, not logical task IDs.
+    // Recollect all placement inputs before the ordinary transfer planner.
+    graphFacts = KernelFacts();
+    graphFacts.launches = workspace.launches;
+    collectKernelComputeFacts(module, graphFacts);
+    collectBufferAccessFacts(module, graphFacts);
+    aliasContext = getBufferAliasContext(module, config.dmaAbi);
+    collectMemoryDependencies(graphFacts, aliasContext);
+    residentCandidates =
+        findResidentCandidates(module, graphFacts, aliasContext);
+    for (const BufferPlacementDecision &decision : workspace.bufferPlacements)
+      if (decision.applied) {
+        int64_t end =
+            decision.offset +
+            workspace.rootStorageFacts[decision.rootIndex].capacityBytes;
+        reservedBytes[decision.bank] =
+            std::max(reservedBytes[decision.bank], end);
+        workspace.usedBytes[decision.bank] = reservedBytes[decision.bank];
+      }
+  }
 
   SmallVector<FunctionArgumentResidencyDecision, 4> argumentStrategies;
   SmallVector<size_t, 4> trafficBeneficialStrategies;
@@ -5251,6 +5801,16 @@ FailureOr<DataflowPlan> BOSCAMEPlanner::plan(ModuleOp module) const {
     bool usesFixedSpm = llvm::any_of(op->getOperandTypes(), [](Type type) {
       return spmdma::getSpmBank(type).has_value();
     });
+    if (config.bufferPlacement && usesFixedSpm)
+      if (auto boundary = planResidentBoundaryTransfer(op, workspace.target)) {
+        if (failed(verifySerialExecution(op))) {
+          status = failure();
+          return;
+        }
+        workspace.transfers.push_back(std::move(*boundary));
+        workspaceFunctions.insert(op->getParentOfType<func::FuncOp>());
+        return;
+      }
     bool directExternalStore = isDirectExternalStore(op, config);
     SmallVector<Value> directDestinations;
     if (directExternalStore) {

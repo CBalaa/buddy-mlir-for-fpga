@@ -7,6 +7,7 @@
 
 add_mlir_library(BuddyTritonToLinalgExperimental
   TritonToLinalgExperimentalPass.cpp
+  BOSCAMETileSpecialization.cpp
   ReconcilePtrCastsPass.cpp
   TritonToPtrPass.cpp
   CollapseShape.cpp

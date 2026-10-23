@@ -18,6 +18,7 @@ namespace buddy::boscame {
 struct LinalgToBOSCAMEConfig {
   bool enableSpmDma = false;
   bool enableAME = false;
+  bool bufferPlacement = false;
   /// Policy used for stores whose destination is external DDR.  Direct DDR
   /// stores are the default; `spm-dma` is an explicit compatibility mode for
   /// kernels that still require the historical SPM staging path.

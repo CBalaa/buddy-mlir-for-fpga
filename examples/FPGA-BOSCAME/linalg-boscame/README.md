@@ -49,8 +49,8 @@ and invalid-root returns. It does not execute AME on the host.
 
 The frontend functional check covers every output: all 16384 GEMM i32 values
 match independent int64 products with explicit i32 wrapping and nonzero initial
-C; all 151296 LayerNorm values are bit-identical to the padded ordered-f32
-oracle. Programs run in reverse order with persistent poisoned SPM. Input,
+C; all 151296 LayerNorm values are checked against the padded ordered-f32
+oracle with `atol=rtol=2e-5`. Programs run in reverse order with persistent poisoned SPM. Input,
 output and excluded-region guards and exact user DDR access ranges are checked;
 `--quick` limits LayerNorm to rows 196, 0 and 1.
 
@@ -108,7 +108,7 @@ or per LayerNorm row in the generated BOSCAME IR:
 | Real frontend GEMM | 4 / 262144 | 4 / 262144 | 12 / 655360 | 20 / 1179648 | 131072 / 131072 bytes | 262144 bytes in four aligned arrays |
 | Real frontend LayerNorm | 4 / 12288 | 4 / 12288 | 25 / 98304 | 33 / 122880 | 4096 / 4096 bytes | Five 4096-byte arrays and two scalar f32 values |
 | Saved buffer GEMM | 4 / 262144 | 0 / 0 | 0 / 0 | 4 / 262144 | 131072 / 98304 bytes | None |
-| Saved buffer LayerNorm | 4 / 12288 | 4 / 12288 | 17 / 65536 | 25 / 90112 | 8192 / 8192 bytes | Six 4096-byte arrays and one scalar f32 value |
+| Saved buffer LayerNorm | 4 / 12288 | 4 / 12288 | 17 / 65536 | 25 / 90112 | 8192 / 8192 bytes | Six 4096-byte arrays |
 
 Both GEMM paths emit 32 tile MMA operations per program. These are artifact
 and functional-model facts; board measurements are recorded separately in
@@ -317,13 +317,13 @@ python3 examples/FPGA-BOSCAME/linalg-boscame/simcheck_layernorm.py
 
 The checker compares the ordinary buffer Linalg execution and the BOSCAME
 execution with an independent sequential-f32 oracle; `--quick` runs three rows.
-The complete 197-row simulation passes: all 151296 outputs are bit-identical
-to both references, with persistent SPM, the last row and DDR guards checked.
+The complete 197-row simulation checks all 151296 outputs against both
+references with `atol=rtol=2e-5`, with persistent SPM, the last row and DDR guards checked.
 The four user-buffer transfers are three 3072-byte reads and one 3072-byte
 write. The current lowering adds four SPM-to-SPM requests totaling 12288
 bytes, and 17 ordinary scratch requests totaling 65536 bytes: 25 requests
 and 90112 bytes per row in total. It uses 8192 SPM bytes per bank, six ordinary
-4096-byte scratch buffers and one ordinary f32 sum. Copies use exact valid
+4096-byte scratch buffers; the scalar sum stays in SSA. Copies use exact valid
 subviews and leave the masked padding initialized by the fills.
 
 The saved LayerNorm image with SPM-to-SPM DMA passed two full launches on NR

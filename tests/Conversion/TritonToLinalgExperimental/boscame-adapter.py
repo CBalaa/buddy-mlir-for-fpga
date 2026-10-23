@@ -45,6 +45,16 @@ def main():
             (2, 16, 1),
         ),
         (
+            "tiled-gemm",
+            "matmul-tiled-i8.ttir",
+            "triton_matmul_i8_196x768x768",
+            ["--adapter", "experimental-boscame"],
+            [196 * 768, 768 * 768, 196 * 768],
+            [1, 1, 4],
+            [(196, 768), (768, 768), (196, 768)],
+            (7, 6, 1),
+        ),
+        (
             "layernorm",
             "layernorm.ttir",
             "triton_layernorm_197x768",
@@ -64,11 +74,22 @@ def main():
             input_path = specialize_full_gemm(
                 input_path, work / "gemm.static.ttir"
             )
+        pipeline = experimental_pipeline(store_policy="spm-dma")
+        if name == "tiled-gemm":
+            contract = run(
+                [
+                    sys.executable,
+                    REPO / "examples/FPGA-BOSCAME" / entry / "build.py",
+                    "--launch-grid",
+                ]
+            ).strip()
+            assert contract == symbol + ":7,6,1"
+            pipeline[0] += " bm=32 bn=128 bk=128 launch-grid=" + contract
         run(
             [
                 opt,
                 input_path,
-                *experimental_pipeline(store_policy="spm-dma"),
+                *pipeline,
                 "-o",
                 module,
             ]
@@ -134,9 +155,6 @@ def main():
             "MemRef2 *" if len(shape) == 2 else "Descriptor *"
             for shape in shapes
         )
-        if name == "gemm":
-            args += ", 0"
-            decl += ", void *"
         probe = work / (name + ".probe.c")
         probe.write_text(f"""#include <stdint.h>
 typedef struct {{ void *allocated, *aligned; int64_t offset, size, stride; }} Descriptor;

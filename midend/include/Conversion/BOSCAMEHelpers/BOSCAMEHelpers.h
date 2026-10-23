@@ -13,6 +13,8 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include <array>
 
 namespace buddy::boscame::lowering {
@@ -62,7 +64,35 @@ mlir::LogicalResult lowerStore(mlir::OpBuilder &builder,
 inline constexpr llvm::StringLiteral kLowerToAme = "bosc_ame.lower_to_ame";
 mlir::LogicalResult lowerMarkedMatmuls(mlir::ModuleOp module);
 mlir::LogicalResult planSpmComputationBuffers(mlir::ModuleOp module);
-mlir::LogicalResult lowerSpmComputations(mlir::ModuleOp module);
+/// Check the exact operand placement accepted by SPM computation lowering.
+/// This is a pure legality query: it does not rewrite the operation. Callers
+/// may use a detached clone to model resident and operation-local buffers.
+mlir::LogicalResult checkSpmComputation(mlir::Operation *operation);
+/// Positional generic inputs whose private fill buffers can stay in registers.
+/// Null entries retain ordinary buffer loads. A buffer may have successive
+/// fills: each reader receives the broadcast from its latest dominating fill.
+using SpmBroadcastMap =
+    llvm::DenseMap<mlir::Operation *, llvm::SmallVector<mlir::Value>>;
+/// Replace private, disjoint SPM fill materializations with register
+/// broadcasts. Readers keep their buffer operands until computation lowering
+/// consumes the map. Preserve fill task IDs and logical dependencies when
+/// verifying graphs.
+mlir::LogicalResult forwardSpmBroadcasts(
+    mlir::ModuleOp module, SpmBroadcastMap &broadcasts,
+    llvm::function_ref<mlir::LogicalResult(mlir::ModuleOp)> verifyGraph =
+        nullptr);
+/// When supplied, preserve each computation's graph metadata on its unique
+/// completion operation and verify the graph after each lowering rewrite.
+/// Static-prefix selects drop their mask dependencies before dead private
+/// mask tasks are removed and the explicit graph user tables are refreshed.
+mlir::LogicalResult lowerSpmComputations(
+    mlir::ModuleOp module,
+    llvm::function_ref<mlir::LogicalResult(mlir::ModuleOp)> verifyGraph =
+        nullptr);
+/// Forward private rank-zero scalar storage to SSA, preserving task anchors.
+void promotePrivateScalarBuffers(mlir::ModuleOp module);
+/// Remove trivially dead lowering artifacts without erasing graph tasks.
+void eraseDeadSpmComputationArtifacts(mlir::ModuleOp module);
 mlir::LogicalResult verifyExit(mlir::ModuleOp module);
 
 } // namespace buddy::boscame::lowering

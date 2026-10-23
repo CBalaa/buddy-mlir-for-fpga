@@ -105,10 +105,10 @@ def main():
     result = run(command, SOURCE)
     assert result.returncode == 0, result.stdout + result.stderr
     text = result.stdout
-    assert "vector.reduction" not in text, text
-    assert text.count("vector.extract ") == 2, text
-    assert text.count("arith.addf ") == 2, text
-    assert len(re.findall(r"vector.load .*vector<1xf32>", text)) == 2, text
+    assert text.count("vector.reduction <add>") == 2, text
+    assert "vector.extract " not in text, text
+    assert "arith.addf " not in text, text
+    assert "vector<1xf32>" not in text, text
     assert "iter_args" in text
     assert "vector<16xf32>" in text and "vector<16xi32>" in text
     assert not re.search(r"vector<\d+x\d+x", text)
@@ -124,9 +124,16 @@ def main():
         [opt.with_name("buddy-translate"), "--buddy-to-llvmir"], lowered.stdout
     )
     assert llvm.returncode == 0, llvm.stdout + llvm.stderr
-    assert "@llvm.vector.reduce.fadd" not in llvm.stdout, llvm.stdout
-    assert llvm.stdout.count("extractelement <1 x float>") == 2, llvm.stdout
-    assert len(re.findall(r"\bfadd float\b", llvm.stdout)) == 2, llvm.stdout
+    assert (
+        len(
+            re.findall(
+                r"call float @llvm\.vector\.reduce\.fadd\.v16f32", llvm.stdout
+            )
+        )
+        == 2
+    ), llvm.stdout
+    assert "extractelement <1 x float>" not in llvm.stdout, llvm.stdout
+    assert not re.search(r"\bfadd float\b", llvm.stdout), llvm.stdout
     assert not re.search(r"\b(?:reassoc|fast)\b", llvm.stdout)
     llc = REPO / "llvm/build/bin/llc"
     if not llc.is_file():
@@ -145,18 +152,17 @@ def main():
         llvm.stdout,
     )
     assert asm.returncode == 0, asm.stdout + asm.stderr
-    assert "vfredosum.vs" not in asm.stdout, asm.stdout
+    assert asm.stdout.count("vfredosum.vs") == 2, asm.stdout
     assert "vfredusum.vs" not in asm.stdout, asm.stdout
-    assert len(re.findall(r"\bfadd\.s\b", asm.stdout)) == 2, asm.stdout
+    assert not re.search(r"\bfadd\.s\b", asm.stdout), asm.stdout
     assert not re.search(r"\b(?:vslidedown|vslideup|vrgather)\.", asm.stdout)
     ordered_asm = asm.stdout.split("ordered_sum:", 1)[1].split(".Lfunc_end", 1)[
         0
     ]
     assert "vle32.v" in ordered_asm, ordered_asm
-    # The only scalar memory source in this argument-free function is its
-    # ordinary rank-zero stack accumulator. Track stack-derived registers so
-    # legal scalar accesses through a saved frame pointer are accepted, while
-    # an SPM read scalarized by LLVM is rejected.
+    # This incomplete-graph fixture has descriptors on the scalar allocation,
+    # so conservative promotion retains its stack storage. Track stack-derived
+    # registers to reject scalarized SPM reads while allowing that fallback.
     stack_registers = {"sp"}
     for instruction in ordered_asm.splitlines():
         fields = instruction.split("#", 1)[0].strip().split(None, 1)
@@ -222,9 +228,9 @@ def main():
     print(
         "PASS SPM compute: rank-1/rank-2 arithmetic, vector fill/copy and no scalar SPM accesses"
     )
-    # CHECK: PASS ordered reduction: single-lane SPM vector reads and source-order scalar f32 additions
+    # CHECK: PASS ordered reduction: 16-lane SPM vector reads and vfredosum.vs without reassociation
     print(
-        "PASS ordered reduction: single-lane SPM vector reads and source-order scalar f32 additions"
+        "PASS ordered reduction: 16-lane SPM vector reads and vfredosum.vs without reassociation"
     )
     # CHECK: PASS rejection: short vector tails, runtime math and reassociated sum fail nonzero
     print(

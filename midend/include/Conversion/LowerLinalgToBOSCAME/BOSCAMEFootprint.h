@@ -67,6 +67,15 @@ struct TransferPlan {
   /// legacy first/last pointers remain the emitter's insertion boundaries.
   llvm::SmallVector<mlir::Operation *, 4> consumerOperations;
   bool crossTaskResident = false;
+  /// A planned external boundary copy uses an existing resident window.
+  /// Packet offsets remain relative to the endpoint descriptors; spmOffset
+  /// and spmCapacity describe the fixed root reservation for accounting.
+  bool directExternalBoundary = false;
+  mlir::Value residentBuffer;
+  mlir::Value source;
+  mlir::Value target;
+  mlir::Operation *provider = nullptr;
+  mlir::Operation *completionOperation = nullptr;
 };
 
 enum class ComputeGraphStatus { Unavailable, Incomplete, Complete };
@@ -125,6 +134,74 @@ struct BufferRequirement {
 };
 
 enum class BufferAccessEffect { Read, Write, Allocate, Free, Unknown };
+
+struct RootStorageAccess {
+  mlir::Operation *operation = nullptr;
+  unsigned position = 0;
+  size_t accessIndex = 0;
+};
+
+/// Physical storage identity is independent of the contents written into it.
+/// Positions are lexical preorder positions, not dynamic execution order.
+/// Structured scopes use fixed windows, without content-version lifetime reuse.
+struct RootStorageFact {
+  mlir::Value root;
+  llvm::SmallVector<mlir::Value> views;
+  llvm::SmallVector<int64_t> shape;
+  llvm::SmallVector<int64_t> strides;
+  int64_t capacityBytes = 0;
+  llvm::SmallVector<RootStorageAccess> readers;
+  llvm::SmallVector<RootStorageAccess> writers;
+  /// Read traffic avoided relative to independent staging of each descriptor
+  /// at each operation, before the older narrow residency search.
+  uint64_t potentialReadSavingsBytes = 0;
+  unsigned firstPosition = 0;
+  unsigned lastPosition = 0;
+  bool aliasProven = false;
+  bool feedsAmeDirectRoute = false;
+  bool structuredScope = false;
+};
+
+/// One write's content, including partial initialization of padded storage.
+/// A physical root may hold several unrelated logical values in sequence.
+struct ContentVersion {
+  size_t rootIndex = 0;
+  mlir::Operation *writer = nullptr;
+  unsigned position = 0;
+  mlir::Value writtenView;
+  std::optional<int64_t> byteOffset;
+  std::optional<int64_t> bytes;
+  llvm::SmallVector<int64_t> validShape;
+  llvm::SmallVector<mlir::Operation *> consumers;
+  bool rematerializable = false;
+  bool paddingInitialization = false;
+};
+
+enum class BufferPlacementKind { Spare, SpmResident, StagedFallback };
+enum class BufferPlacementReason {
+  Selected,
+  AmeDirectRoute,
+  Auxiliary,
+  Unused,
+  UnsupportedLayout,
+  UnsupportedUse,
+  ControlFlow,
+  AliasUnknown,
+  MissingStaging,
+  Capacity,
+  ComputationLegality
+};
+
+struct BufferPlacementDecision {
+  size_t rootIndex = 0;
+  int64_t group = -1;
+  BufferPlacementKind kind = BufferPlacementKind::Spare;
+  BufferPlacementReason reason = BufferPlacementReason::Unused;
+  std::string detail;
+  int64_t bank = -1;
+  int64_t offset = 0;
+  bool applied = false;
+};
 
 /// A buffer access at the current analysis point. The final plan report uses
 /// surviving post-planning IR; pre-placement facts also guard residency.
@@ -343,6 +420,9 @@ struct DataflowPlan : KernelFacts {
   llvm::SmallVector<FunctionArgumentResidencyDecision, 4>
       functionArgumentResidency;
   llvm::SmallVector<ProducerOutputResidencyDecision, 4> producerOutputResidency;
+  llvm::SmallVector<RootStorageFact, 0> rootStorageFacts;
+  llvm::SmallVector<ContentVersion, 0> contentVersions;
+  llvm::SmallVector<BufferPlacementDecision> bufferPlacements;
   bool functionArgumentResidencySearchBounded = false;
   bool producerOutputResidencySearchBounded = false;
   ResourceEstimate resources;

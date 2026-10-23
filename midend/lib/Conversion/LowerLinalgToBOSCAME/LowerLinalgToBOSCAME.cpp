@@ -774,12 +774,23 @@ static LogicalResult lowerMatmulLike(Operation *anchor,
 /// legacy pass does not install this pattern and therefore retains its old
 /// matrix instruction behaviour byte for byte.
 static LogicalResult lowerOrdinaryLinalg(linalg::LinalgOp op,
-                                         PatternRewriter &rewriter) {
+                                         PatternRewriter &rewriter,
+                                         bool preserveGraph = false) {
   if (!op.hasPureBufferSemantics() ||
       op->hasAttr(::buddy::boscame::lowering::kLowerToAme))
     return failure();
+  Operation *previous = op->getPrevNode();
   if (failed(linalg::linalgOpToLoops(rewriter, op)))
     return failure();
+  if (preserveGraph) {
+    Operation *completion = op->getPrevNode();
+    if (!completion || completion == previous)
+      return op.emitError(
+          "BOSCAME task lowering produced no completion operation");
+    for (NamedAttribute attribute : op->getAttrs())
+      if (attribute.getName().getValue().starts_with("bosc_ame."))
+        completion->setAttr(attribute.getName(), attribute.getValue());
+  }
   rewriter.eraseOp(op);
   return success();
 }
@@ -1283,6 +1294,16 @@ static LogicalResult verifyStandaloneSurface(ModuleOp module,
   return failure(result.wasInterrupted());
 }
 
+} // namespace
+
+namespace buddy::boscame {
+LogicalResult verifyBOSCAMEPlanningSurface(ModuleOp module) {
+  return verifyStandaloneSurface(module);
+}
+} // namespace buddy::boscame
+
+namespace {
+
 static LogicalResult promoteStaticTemporaries(ModuleOp module) {
   SmallVector<memref::AllocOp> allocations;
   module.walk([&](memref::AllocOp alloc) {
@@ -1619,6 +1640,90 @@ static void printBOSCAMEPlanReport(ModuleOp module,
   stream << "  linalg-facts: scope=post-planning\n";
   printLinalgComputationFacts(workspace.linalg, stream, "    ");
 
+  if (config.bufferPlacement && !workspace.bufferPlacements.empty()) {
+    auto kindName = [](BufferPlacementKind kind) -> StringRef {
+      switch (kind) {
+      case BufferPlacementKind::Spare:
+        return "Spare";
+      case BufferPlacementKind::SpmResident:
+        return "SpmResident";
+      case BufferPlacementKind::StagedFallback:
+        return "StagedFallback";
+      }
+      llvm_unreachable("unknown placement kind");
+    };
+    auto reasonName = [](BufferPlacementReason reason) -> StringRef {
+      switch (reason) {
+      case BufferPlacementReason::Selected:
+        return "group-legality-and-capacity";
+      case BufferPlacementReason::AmeDirectRoute:
+        return "ame-direct-route";
+      case BufferPlacementReason::Auxiliary:
+        return "predicate-auxiliary";
+      case BufferPlacementReason::Unused:
+        return "no-computation-use";
+      case BufferPlacementReason::UnsupportedLayout:
+        return "unsupported-layout";
+      case BufferPlacementReason::UnsupportedUse:
+        return "unsupported-use";
+      case BufferPlacementReason::ControlFlow:
+        return "control-flow-or-call";
+      case BufferPlacementReason::AliasUnknown:
+        return "alias-unknown";
+      case BufferPlacementReason::MissingStaging:
+        return "missing-staging-capacity";
+      case BufferPlacementReason::Capacity:
+        return "spm-capacity";
+      case BufferPlacementReason::ComputationLegality:
+        return "computation-legality";
+      }
+      llvm_unreachable("unknown placement reason");
+    };
+    size_t resident = 0, fallback = 0;
+    bool applied = false;
+    for (const BufferPlacementDecision &decision : workspace.bufferPlacements) {
+      resident += decision.kind == BufferPlacementKind::SpmResident;
+      fallback += decision.kind == BufferPlacementKind::StagedFallback;
+      applied |= decision.applied;
+    }
+    stream << "  buffer-placement: resident=" << resident << " ddr=" << fallback
+           << " applied=" << (applied ? "true" : "false")
+           << " scope=serial-scf fixed-windows=true interval-reuse=false"
+              " exclusive-branch-reuse=true\n";
+    for (const BufferPlacementDecision &decision : workspace.bufferPlacements) {
+      const RootStorageFact &root =
+          workspace.rootStorageFacts[decision.rootIndex];
+      stream << "  root[" << decision.rootIndex
+             << "]: kind=" << kindName(decision.kind)
+             << " bytes=" << root.capacityBytes << " bank=" << decision.bank
+             << " offset=" << decision.offset << " group=" << decision.group
+             << " reason=" << reasonName(decision.reason)
+             << " applied=" << (decision.applied ? "true" : "false")
+             << " lexical-range=" << root.firstPosition << ".."
+             << root.lastPosition << " potential-read-savings-bytes="
+             << root.potentialReadSavingsBytes << " structured-scope="
+             << (root.structuredScope ? "true" : "false");
+      if (!decision.detail.empty())
+        stream << " detail=" << decision.detail;
+      stream << '\n';
+    }
+    for (auto [index, version] : llvm::enumerate(workspace.contentVersions)) {
+      stream << "  content-version[" << index << "]: root=" << version.rootIndex
+             << " writer=" << version.writer->getName()
+             << " position=" << version.position << " validShape=";
+      printPlanShape(stream, version.validShape);
+      stream << " padding="
+             << (version.paddingInitialization ? "true" : "false")
+             << " rematerializable="
+             << (version.rematerializable ? "true" : "false") << " consumers=";
+      if (workspace.rootStorageFacts[version.rootIndex].structuredScope)
+        stream << "unknown";
+      else
+        stream << version.consumers.size();
+      stream << '\n';
+    }
+  }
+
   for (auto [index, transfer] : llvm::enumerate(workspace.transfers)) {
     stream << "  transfer[" << index << "]: consumer=";
     if (transfer.firstConsumer)
@@ -1654,6 +1759,18 @@ static void printBOSCAMEPlanReport(ModuleOp module,
     if (transfer.guardedPrefix)
       stream << " guarded-prefix=true packet-count=upper-bound extent="
              << transfer.validElements;
+    if (transfer.directExternalBoundary) {
+      stream << " boundary=external source=" << transfer.source
+             << " target=" << transfer.target
+             << " provider=" << transfer.provider->getName()
+             << " completion=wait-at-provider offsets-and-bytes=[";
+      llvm::interleaveComma(
+          transfer.packets, stream, [&](const DmaPacket &packet) {
+            stream << '{' << packet.ddrOffsetBytes << ','
+                   << packet.spmOffsetBytes << ',' << packet.bytes << '}';
+          });
+      stream << ']';
+    }
     stream << " read=" << (transfer.read ? "true" : "false")
            << " write=" << (transfer.write ? "true" : "false") << '\n';
   }
@@ -2206,8 +2323,16 @@ static void printBOSCAMEPlanReport(ModuleOp module,
   if (!reportedStoreDecision)
     stream << "  provenance-marked stores/direct decisions: none proven\n";
 
-  stream << "  limits: calibrated cost search, general cross-op residency, and "
-            "cross-program reuse are not modeled.\n";
+  if (config.bufferPlacement && !workspace.bufferPlacements.empty())
+    stream << "  limits: interval reuse, spill search, general control-flow "
+              "memory ordering, "
+              "materialization "
+              "elimination, register budgeting, and cross-program reuse are "
+              "not modeled.\n";
+  else
+    stream
+        << "  limits: calibrated cost search, general cross-op residency, and "
+           "cross-program reuse are not modeled.\n";
 }
 
 template <bool Independent>
@@ -2262,6 +2387,11 @@ public:
       *this, "plan-report",
       llvm::cl::desc("print the planned BOSCAME workspace to stderr"),
       llvm::cl::init(false)};
+  Option<bool> bufferPlacement{
+      *this, "buffer-placement",
+      llvm::cl::desc(
+          "place connected static buffer roots in fixed SPM windows"),
+      llvm::cl::init(false)};
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<BOSCAMEDialect>();
@@ -2308,7 +2438,7 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
   // The planner is opt-in.  Keeping this boundary explicit preserves the
   // historical --lower-linalg-to-boscame output for existing users while
   // making the new buffer-form contract fail early and diagnostically.
-  if (Independent || enableSpmDma || enableAME ||
+  if (Independent || enableSpmDma || enableAME || bufferPlacement ||
       storePolicy.getNumOccurrences() || storePolicyOverride ||
       !target.empty() || module->hasAttr("bosc_ame.enable_spm_dma") ||
       module->hasAttr("bosc_ame.enable_ame") ||
@@ -2427,6 +2557,7 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
     ::buddy::boscame::LinalgToBOSCAMEConfig config;
     config.enableSpmDma = enableSpmDma;
     config.enableAME = enableAME;
+    config.bufferPlacement = bufferPlacement;
     config.storePolicy = storePolicy;
     config.dmaAbi = dmaAbi;
     config.target = target;
@@ -2460,22 +2591,64 @@ void LowerLinalgToBOSCAMEPass<Independent>::runOnOperation() {
     }
     if (planReport)
       printBOSCAMEPlanReport(module, config, *workspace);
+    bool preserveGraph =
+        llvm::any_of(workspace->bufferPlacements,
+                     [](const BufferPlacementDecision &decision) {
+                       return decision.applied;
+                     });
+    if (config.bufferPlacement)
+      module.walk([&](Operation *op) {
+        if (op->hasAttr("bosc_ame.compute_id") &&
+            llvm::any_of(op->getOperandTypes(), [](Type type) {
+              return ::buddy::boscame::spmdma::getSpmBank(type).has_value();
+            }))
+          preserveGraph = true;
+      });
+    auto verifyGraph = [&](ModuleOp current) {
+      return preserveGraph
+                 ? ::buddy::boscame::verifyCompleteComputeGraphs(current)
+                 : success();
+    };
     if (failed(verifyStandaloneSurface(module)) ||
         failed(
             ::buddy::boscame::verifyBOSCAMEAmeConsumers(module, *workspace)) ||
         failed(::buddy::boscame::emitBOSCAMEDmaTransfers(module, *workspace)) ||
-        failed(::buddy::boscame::lowerBOSCAMEAmeConsumers(module, config,
-                                                          *workspace)) ||
-        failed(::buddy::boscame::emitBOSCAMEDmaCopies(module,
-                                                      workspace->target)) ||
-        failed(::buddy::boscame::lowering::lowerSpmComputations(module))) {
+        failed(::buddy::boscame::lowerBOSCAMEAmeConsumers(
+            module, config, *workspace, preserveGraph)) ||
+        failed(::buddy::boscame::emitBOSCAMEDmaCopies(module, workspace->target,
+                                                      preserveGraph)) ||
+        failed(::buddy::boscame::lowering::lowerSpmComputations(
+            module, preserveGraph ? llvm::function_ref<LogicalResult(ModuleOp)>(
+                                        verifyGraph)
+                                  : nullptr))) {
       signalPassFailure();
       return;
     }
-    RewritePatternSet ordinary(context);
-    ordinary.add<OrdinaryLinalgToLoops>(context);
-    if (failed(applyPatternsGreedily(module, std::move(ordinary))) ||
-        failed(promoteStaticTemporaries(module)) ||
+    LogicalResult ordinaryStatus = success();
+    if (preserveGraph) {
+      SmallVector<linalg::LinalgOp> operations;
+      module.walk([&](linalg::LinalgOp op) { operations.push_back(op); });
+      PatternRewriter rewriter(context);
+      for (linalg::LinalgOp op : operations) {
+        rewriter.setInsertionPoint(op);
+        if (failed(lowerOrdinaryLinalg(op, rewriter, true)) ||
+            failed(::buddy::boscame::verifyCompleteComputeGraphs(module))) {
+          ordinaryStatus = failure();
+          break;
+        }
+      }
+    } else {
+      RewritePatternSet ordinary(context);
+      ordinary.add<OrdinaryLinalgToLoops>(context);
+      ordinaryStatus = applyPatternsGreedily(module, std::move(ordinary));
+    }
+    if (succeeded(ordinaryStatus)) {
+      ::buddy::boscame::lowering::promotePrivateScalarBuffers(module);
+      ::buddy::boscame::lowering::eraseDeadSpmComputationArtifacts(module);
+      if (preserveGraph)
+        ordinaryStatus = ::buddy::boscame::verifyCompleteComputeGraphs(module);
+    }
+    if (failed(ordinaryStatus) || failed(promoteStaticTemporaries(module)) ||
         failed(verifyStandaloneSurface(module)) ||
         failed(::buddy::boscame::lowering::verifyExit(module)) ||
         failed(::buddy::boscame::verifySpmDmaContract(module)))
