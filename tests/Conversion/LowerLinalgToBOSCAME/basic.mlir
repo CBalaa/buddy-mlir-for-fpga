@@ -3,7 +3,7 @@
 
 // The opt-in backend consumes buffer-form Linalg directly.  Ordinary matmul
 // remains a memory/arithmetic loop, while the explicitly marked signed i8
-// operation gets typed SPM windows, paired DMA requests and AME tile ops.
+// operation gets direct DDR AME tile ops under its explicit caller promise.
 module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   func.func @ordinary(%a: memref<2x3xf32>, %b: memref<3x4xf32>,
                       %c: memref<2x4xf32>) {
@@ -30,9 +30,8 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
 // CHECK: arith.mulf
 // CHECK-NOT: linalg.matmul
 // CHECK: func.func @marked
-// CHECK: bosc_ame.spm.view
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
+// CHECK-NOT: bosc_ame.spm.view
+// CHECK-NOT: bosc_ame.dma.start
 // CHECK: bosc_ame.tile.load_a
 // CHECK: bosc_ame.tile.load_b
 // CHECK: bosc_ame.tile.mma

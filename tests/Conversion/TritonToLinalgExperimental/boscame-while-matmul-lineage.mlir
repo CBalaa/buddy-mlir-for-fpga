@@ -1,9 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.facts.mlir 2> %t.facts
-// RUN: FileCheck %s --check-prefix=FACTS --implicit-check-not='a_origin_id=' --implicit-check-not='b_origin_id=' < %t.facts
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t.plain.mlir 2> %t.plain.err
-// RUN: test ! -s %t.plain.err
-// RUN: diff %t.facts.mlir %t.plain.mlir
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: while_matmul_lineage = incomplete
 module {
   tt.func public @while_matmul_lineage(%a_ptr: !tt.ptr<i8>,
       %b_ptr: !tt.ptr<i8>, %replacement_ptr: !tt.ptr<i8>,
@@ -67,5 +65,3 @@ module {
 // The condition forwarding permutes the first two while slots. Their
 // after-region yields restore each recurrence; the third keeps an opaque init
 // path alongside its known replacement load.
-// FACTS: compute op#{{[0-9]+}} linalg.matmul {{.*}} a_source_load_origin_ids=array<i64: 1> a_source_lineage_complete=true b_source_load_origin_ids=array<i64: 0> b_source_lineage_complete=true
-// FACTS: compute op#{{[0-9]+}} linalg.matmul {{.*}} a_source_load_origin_ids=array<i64: 1> a_source_lineage_complete=true b_source_load_origin_ids=array<i64: 2> b_source_lineage_complete=false

@@ -76,19 +76,21 @@ class TritonArithToLinalgPass
         for (unsigned axis = 0; axis < LAUNCH_GRID_RANK; ++axis) {
           NamedAttrList numProgramsAttrs(
               newArgAttrs[origInputTypes.size() + axis]);
-          numProgramsAttrs.set("bosc_ame.program_role",
-                               b.getStringAttr("num_programs"));
-          numProgramsAttrs.set("bosc_ame.program_axis",
-                               b.getI32IntegerAttr(axis));
+          numProgramsAttrs.set(
+              "contract.program",
+              b.getDictionaryAttr(
+                  {b.getNamedAttr("role", b.getStringAttr("num_programs")),
+                   b.getNamedAttr("axis", b.getI32IntegerAttr(axis))}));
           newArgAttrs[origInputTypes.size() + axis] =
               numProgramsAttrs.getDictionary(b.getContext());
 
           NamedAttrList programIdAttrs(
               newArgAttrs[origInputTypes.size() + LAUNCH_GRID_RANK + axis]);
-          programIdAttrs.set("bosc_ame.program_role",
-                             b.getStringAttr("program_id"));
-          programIdAttrs.set("bosc_ame.program_axis",
-                             b.getI32IntegerAttr(axis));
+          programIdAttrs.set(
+              "contract.program",
+              b.getDictionaryAttr(
+                  {b.getNamedAttr("role", b.getStringAttr("program_id")),
+                   b.getNamedAttr("axis", b.getI32IntegerAttr(axis))}));
           newArgAttrs[origInputTypes.size() + LAUNCH_GRID_RANK + axis] =
               programIdAttrs.getDictionary(b.getContext());
         }
@@ -123,12 +125,12 @@ public:
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
-    if (config.enableBOSCAME) {
+    if (config.emitContract) {
       WalkResult remainingMemory = moduleOp.walk([&](Operation *op) {
         if (!isa<triton::LoadOp, triton::StoreOp>(op))
           return WalkResult::advance();
-        op->emitError("BOSCAME unstructured/scalar memory access is "
-                      "unsupported; cannot bypass DMA");
+        op->emitError("neutral contract unstructured/scalar memory access is "
+                      "unsupported in contract v1");
         return WalkResult::interrupt();
       });
       if (remainingMemory.wasInterrupted()) {
@@ -226,7 +228,7 @@ public:
 
     if (pidsToFuncArgs) {
       for (auto func : getOperation().getOps<triton::FuncOp>()) {
-        addProgramInfo(func, config.enableBOSCAME);
+        addProgramInfo(func, config.emitContract);
       }
     }
 
@@ -255,7 +257,7 @@ public:
         funcFunc.setVisibility(func.getVisibility());
         funcFunc.setAllArgAttrs(argAttrs);
         funcFunc.setAllResultAttrs(resAttrs);
-        if (config.enableBOSCAME)
+        if (config.emitContract)
           for (NamedAttribute attr : func->getAttrs())
             if (attr.getName() != SymbolTable::getSymbolAttrName() &&
                 attr.getName() != "function_type" &&

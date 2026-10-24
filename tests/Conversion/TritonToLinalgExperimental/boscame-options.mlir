@@ -1,22 +1,25 @@
 // RUN: buddy-opt %s --triton-to-linalg-experimental -o %t.default
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=false' -o %t.false
+// RUN: buddy-opt %s --triton-to-linalg-experimental='contract=false' -o %t.false
 // RUN: diff %t.default %t.false
-// RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true' 2>&1 | FileCheck %s --check-prefix=MISSING
-// RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=unknown' 2>&1 | FileCheck %s --check-prefix=INVALID
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack | FileCheck %s --check-prefix=UNMASKED --implicit-check-not=vector.load --implicit-check-not=vector.store
-// MISSING: boscame=true requires dma-abi=args_aligned64_nonalias
-// INVALID: invalid dma-abi: unknown
-// UNMASKED-LABEL: func.func @copy
-// UNMASKED: %[[LOAD_IN:.*]] = bosc_ame.dma.start
-// UNMASKED-NEXT: bosc_ame.dma.wait %[[LOAD_IN]]
-// The logical snapshot resides in one SPM window, so only the external load
-// and terminal writeback remain; no bridge copies need their own staging.
-// UNMASKED: %[[STORE_OUT:.*]] = bosc_ame.dma.start {{.*}} : (memref<16xf32, strided<[1], offset: ?>, #bosc_ame.spm<0>>, memref<16xf32, strided<[1], offset: ?>>, index)
-// UNMASKED-NEXT: bosc_ame.dma.wait %[[STORE_OUT]]
-// UNMASKED-NOT: bosc_ame.dma.start
-// UNMASKED-NOT: memref.alloc(
-// UNMASKED-NOT: memref.copy
-// UNMASKED-NOT: bufferization.
+// RUN: buddy-opt %s --triton-to-linalg-experimental='contract=true' | FileCheck %s --check-prefix=CONTRACT --implicit-check-not=bosc_ame. --implicit-check-not=plan. --implicit-check-not='tensor<' --implicit-check-not=bufferization.
+// RUN: buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=args_aligned64_nonalias' | FileCheck %s --check-prefix=ABI
+// RUN: not buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=unknown' 2>&1 | FileCheck %s --check-prefix=INVALID
+// RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true' 2>&1 | FileCheck %s --check-prefix=OLD-MODE
+// RUN: not buddy-opt %s --triton-to-linalg-experimental='contract=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=OLD-ABI
+// CONTRACT: contract.producer = "triton-riscv"
+// CONTRACT-SAME: contract.version = 1 : i32
+// CONTRACT-LABEL: func.func @copy
+// CONTRACT: contract.compute_graph
+// CONTRACT: memref.alloc
+// CONTRACT: memref.copy
+// CONTRACT-SAME: contract.access = {boundary = "external_ddr", kind = "load"
+// CONTRACT-SAME: contract.task
+// CONTRACT: memref.copy
+// CONTRACT-SAME: contract.access = {boundary = "external_ddr", kind = "store"
+// ABI: contract.abi = {args_aligned_bytes = 64 : i64, args_disjoint = true}
+// INVALID: invalid caller-contract: unknown
+// OLD-MODE: no such option boscame
+// OLD-ABI: no such option dma-abi
 
 module {
   tt.func public @copy(%src: !tt.ptr<f32>, %dst: !tt.ptr<f32>) {

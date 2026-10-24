@@ -1,10 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-// RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null
+// RUN: not buddy-opt %s '--linalg-to-boscame=buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s
 
-// A pitched SPM copy needs two packets. Its final wait represents completion
-// of the whole event and retains exactly one original compute task, including
-// predecessor references and reverse logical users. No packet duplicates IDs.
+// V1 boundary recipes require one external endpoint; the original
+// internal SPM-to-SPM copy is unsupported. Typed DMA completion and graph
+// metadata are checked by physical-adapter.py and the BOSCAME dialect tests.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @pitched_copy_graph(
       %input: memref<64xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -52,18 +50,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// CHECK: bosc_ame.compute_graph_node_count = 2 : i64
-// CHECK: bosc_ame.compute_id = 0 : i64
-// CHECK: bosc_ame.dma.start
-// CHECK-NOT: bosc_ame.compute_id
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.compute_id
-// CHECK: bosc_ame.dma.start
-// CHECK-NOT: bosc_ame.compute_id
-// CHECK: bosc_ame.dma.wait
-// CHECK-SAME: bosc_ame.compute_id = 1 : i64
-// CHECK-SAME: bosc_ame.compute_input_values = array<i64: 11>
-// CHECK-SAME: bosc_ame.compute_output_values = array<i64: 12>
-// CHECK-SAME: bosc_ame.compute_predecessors = array<i64: 0>
-// CHECK-SAME: bosc_ame.logical_value_users = [array<i64>]
-// CHECK-NOT: bosc_ame.compute_id
+// CHECK: v1 planned copy requires exactly one external DDR endpoint

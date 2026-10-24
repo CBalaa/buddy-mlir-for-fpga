@@ -1,19 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame | FileCheck %s
-// RUN: buddy-opt %s --linalg-to-boscame --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
+// RUN: not buddy-opt %s --linalg-to-boscame -o /dev/null 2>&1 | FileCheck %s
 
-// Static padded physical storage must become an identity stack allocation
-// with the exact descriptor, including its nonzero element offset, restored.
-// This also covers buffers larger than the generic promotion pass's 1 KiB
-// default threshold and removes deallocation of the promoted temporary.
-// CHECK-LABEL: func.func @temporary
-// CHECK: memref.alloca() alignment = 64 : memref<16511xf32>
-// CHECK: memref.reinterpret_cast {{.*}} offset: [64], sizes: [128, 64], strides: [129, 1]
-// CHECK-NOT: memref.dealloc
-// CHECK-NOT: memref.alloc(
-// LLVM-NOT: @malloc
-// LLVM-NOT: @aligned_alloc
-// LLVM-NOT: @free
-// LLVM: alloca
+// The original temporary is read without initialization. Content validation
+// rejects that read before placement, so no stack-promotion result is assumed.
 module {
   func.func @temporary(%out: memref<128x64xf32>) {
     %local = memref.alloc() alignment = 64 : memref<128x64xf32, strided<[129, 1], offset: 64>>
@@ -22,3 +10,5 @@ module {
     return
   }
 }
+
+// CHECK: kernel contract V22/V23: read or partial inheritance has no initialized content version

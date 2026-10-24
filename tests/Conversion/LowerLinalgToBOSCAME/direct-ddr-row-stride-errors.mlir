@@ -4,6 +4,8 @@
 
 // A direct vector store advances by the physical row stride.  65 f32 values
 // per row put the second row at byte offset 260, which is not a cache line.
+// The identity copy is rejected at the V1 DDR-to-DDR boundary. The AME
+// case reaches route selection and rejects the unaligned physical rows.
 //--- vector.mlir
 module {
   func.func @copy(%src: memref<64x64xf32>,
@@ -16,8 +18,6 @@ module {
     return
   }
 }
-
-// VECTOR: BOSCAME DMA physical row address is not 64 B aligned
 
 // A direct AME accumulator uses the same physical row-pitch contract for
 // msce32.m.  The byte stride here is 65 * sizeof(i32) = 260 bytes.
@@ -34,4 +34,5 @@ module {
   }
 }
 
-// AME: BOSCAME DMA physical row address is not 64 B aligned
+// VECTOR: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// AME: no legal direct or staging route: external operand requires aligned endpoints, complete cache lines, and a DMA-compatible physical layout

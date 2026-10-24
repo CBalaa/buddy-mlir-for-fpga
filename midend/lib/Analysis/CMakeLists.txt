@@ -1,3 +1,21 @@
+add_mlir_library(BuddyKernelContract
+  KernelContract.cpp
+
+  PARTIAL_SOURCES_INTENDED
+
+  LINK_LIBS PUBLIC
+  MLIRAnalysis
+  MLIRArithDialect
+  MLIRFuncDialect
+  MLIRIR
+  MLIRLinalgDialect
+  MLIRMemRefDialect
+  MLIRPass
+  MLIRSCFDialect
+  MLIRSideEffectInterfaces
+  MLIRViewLikeInterface
+)
+
 # Analyses and helpers used by the TTIR -> Linalg conversion (conversion
 # patterns and the experimental pipeline stages).
 #

@@ -1,6 +1,7 @@
 # RUN: %PYTHON %s buddy-opt %S/buffer-placement-ame-metadata.mlir
-"""Validate logical value descriptors only for explicitly complete graphs."""
+"""Rebuild legacy logical metadata; never let stale reverse users override IR."""
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -42,19 +43,18 @@ def descriptor(source, values="array<i64: 13>", users="[array<i64>]"):
     )
 
 
-def check(binary, label, source, diagnostic=None):
+def check(binary, label, source):
     result = subprocess.run(
-        [binary, "-", OPTIONS, "-o", "/dev/null"],
+        [binary, "-", OPTIONS, "-o", "-"],
         input=source,
         text=True,
         capture_output=True,
-        check=False,
     )
-    if diagnostic is None:
-        assert result.returncode == 0, (label, result.stderr)
-    else:
-        assert result.returncode != 0, (label, "unexpected success")
-        assert diagnostic in result.stderr, (label, diagnostic, result.stderr)
+    assert result.returncode == 0, (label, result.stderr)
+    assert "bosc_ame.logical_value" not in result.stdout, (label, result.stdout)
+    assert "bosc_ame.compute_id" not in result.stdout, (label, result.stdout)
+    assert "contract.compute_graph = {complete = true" in result.stdout, label
+    return result.stdout
 
 
 def main():
@@ -64,151 +64,104 @@ def main():
         for line in Path(sys.argv[2]).read_text().splitlines()
         if not line.lstrip().startswith("//")
     )
-
-    # Optional reverse lists and inputs without descriptors remain supported.
-    check(binary, "valid descriptors", source)
-    omitted_users = source.replace(
-        ",\n        bosc_ame.logical_value_users = array<i64: 1>", ""
-    ).replace("      bosc_ame.logical_value_users = [array<i64>],\n", "")
-    assert "bosc_ame.logical_value_users" not in omitted_users
-    check(binary, "omitted reverse lists", omitted_users)
-    check(
-        binary,
-        "input without a producer or descriptor",
-        replace_once(
-            source,
-            "bosc_ame.compute_input_values = array<i64: 10, 11, 12>",
-            "bosc_ame.compute_input_values = array<i64: 10, 11, 12, 999>",
-        ),
+    baseline = check(binary, "valid legacy descriptors", source)
+    omitted = re.sub(
+        r",\s*bosc_ame.logical_value_users = array<i64[^>]*>", "", source
     )
-    check(
-        binary,
-        "reverse lists are sets",
-        argument(source, users="array<i64: 1, 1>"),
+    omitted = re.sub(
+        r"\s*bosc_ame.logical_value_users = \[array<i64[^>]*>\],", "", omitted
     )
-    check(
-        binary,
-        "incomplete functions skip logical validation",
-        descriptor(
-            argument(
-                replace_once(
-                    source,
-                    "bosc_ame.compute_graph_complete = true",
-                    "bosc_ame.compute_graph_complete = false",
-                ),
-                users="array<i64: 999>",
+    assert "bosc_ame.logical_value_users" not in omitted
+    cases = [
+        ("omitted reverse users", omitted),
+        (
+            "unknown input value",
+            replace_once(
+                source,
+                "bosc_ame.compute_input_values = array<i64: 10, 11, 12>",
+                "bosc_ame.compute_input_values = array<i64: 10, 11, 12, 999>",
             ),
-            values='"invalid"',
         ),
-    )
-
-    for label, users, diagnostic in [
+        ("duplicate reverse users", argument(source, users="array<i64: 1, 1>")),
         (
-            "unresolved argument user",
-            "array<i64: 999>",
-            "unresolved BOSCAME logical value user 999 for value 10",
+            "incomplete graph claim",
+            replace_once(
+                source,
+                "bosc_ame.compute_graph_complete = true",
+                "bosc_ame.compute_graph_complete = false",
+            ),
         ),
-        (
-            "argument user does not read value",
-            "array<i64: 0>",
-            "BOSCAME logical value user 0 does not read value 10",
-        ),
-        (
-            "argument reverse list omits reader",
-            "array<i64>",
-            "BOSCAME logical value users mismatch for value 10",
-        ),
-        (
-            "invalid argument users type",
-            "[array<i64: 1>]",
-            "invalid BOSCAME function argument logical value users",
-        ),
-    ]:
-        check(binary, label, argument(source, users=users), diagnostic)
-
-    for value in ['"invalid"', "-1 : i64"]:
-        check(
-            binary,
-            f"invalid argument value ID {value}",
-            argument(source, value=value),
-            "invalid BOSCAME function argument logical value ID",
+    ]
+    for users in (
+        "array<i64: 999>",
+        "array<i64: 0>",
+        "array<i64>",
+        "[array<i64: 1>]",
+    ):
+        cases.append(
+            (
+                "stale/malformed argument users " + users,
+                argument(source, users=users),
+            )
         )
-
-    for values, users in [
+    for value in ('"invalid"', "-1 : i64"):
+        cases.append(
+            ("malformed legacy value " + value, argument(source, value=value))
+        )
+    for values, users in (
         ("array<i64: 13>", '"invalid"'),
         ("array<i64: 13>", "array<i64>"),
         ("array<i64: 13, 15>", "[array<i64>]"),
-    ]:
-        check(
-            binary,
-            f"invalid operation users shape {values} {users}",
-            descriptor(source, values=values, users=users),
-            "BOSCAME logical_value_users must match logical_value_ids",
+        ("array<i64: 13>", "[0 : i64]"),
+        ("array<i64: 13>", "[array<i32: 0>]"),
+        ('"invalid"', "[array<i64>]"),
+        ("array<i64: -1>", "[array<i64>]"),
+        ("array<i64: 13>", "[array<i64: 999>]"),
+    ):
+        cases.append(
+            (
+                "stale/malformed operation descriptor " + values + users,
+                descriptor(source, values, users),
+            )
         )
-    for users in ["[0 : i64]", "[array<i32: 0>]"]:
-        check(
-            binary,
-            f"invalid operation users entry {users}",
-            descriptor(source, users=users),
-            "BOSCAME logical_value_users entry must be an i64 array",
-        )
-    for values in ['"invalid"', "array<i64: -1>"]:
-        check(
-            binary,
-            f"invalid operation value IDs {values}",
-            descriptor(source, values=values),
-            "invalid BOSCAME logical value IDs",
-        )
-    for field, before, after in [
+    for field, before, after in (
         ("input", "array<i64: 10, 11, 12>", "array<i64: 10, 11, -1>"),
         ("output", "array<i64: 13>", "array<i64: -1>"),
-    ]:
-        attribute = f"bosc_ame.compute_{field}_values"
-        check(
-            binary,
-            f"negative task {field} value",
-            replace_once(
-                source, f"{attribute} = {before}", f"{attribute} = {after}"
-            ),
-            f"negative BOSCAME logical value ID in {attribute}",
+    ):
+        key = f"bosc_ame.compute_{field}_values"
+        cases.append(
+            (
+                "negative task " + field,
+                replace_once(source, key + " = " + before, key + " = " + after),
+            )
         )
-    check(
-        binary,
-        "unresolved operation descriptor user",
-        descriptor(source, users="[array<i64: 999>]"),
-        "unresolved BOSCAME logical value user 999 for value 13",
-    )
+    # Legacy task/value annotations are derived facts. Even a complete-graph
+    # claim cannot make stale IDs override actual standard-IR reads and writes.
+    # Neutral contract corruption is rejected by compute-graph-fusion.py.
+    for label, variant in cases:
+        assert check(binary, label, variant) == baseline, label
 
-    # Task IDs are module-wide, but reverse references resolve in one function.
-    other_function = """
-  func.func @other_graph(%out: memref<16xf32>)
-      attributes {bosc_ame.compute_graph_complete = true,
-                  bosc_ame.compute_graph_node_count = 1 : i64} {
+    other = """
+  func.func @other_graph() attributes {
+      bosc_ame.compute_graph_complete = true,
+      bosc_ame.compute_graph_node_count = 1 : i64} {
+    %out = memref.alloc() alignment = 64 : memref<16xf32>
     %zero = arith.constant 0.0 : f32
-    linalg.fill {
-      bosc_ame.compute_barrier_after = false,
-      bosc_ame.compute_id = 2 : i64,
+    linalg.fill {bosc_ame.compute_id = 2 : i64,
       bosc_ame.compute_input_values = array<i64: 10>,
-      bosc_ame.compute_kind = "fill",
-      bosc_ame.compute_output_values = array<i64: 20>,
-      bosc_ame.compute_predecessors = array<i64>,
-      bosc_ame.compute_stage = 0 : i64,
-      bosc_ame.rematerializable = true}
+      bosc_ame.compute_output_values = array<i64: 20>}
       ins(%zero : f32) outs(%out : memref<16xf32>)
     return
   }
 """
-    check(
-        binary,
-        "cross-function logical user",
-        replace_once(
-            argument(source, users="array<i64: 2>"),
-            "\n  }\n}",
-            "\n  }\n" + other_function + "}",
-        ),
-        "unresolved BOSCAME logical value user 2 for value 10",
+    two = (
+        argument(source, users="array<i64: 2>").rsplit("}", 1)[0] + other + "}"
     )
-    print("PASS complete graph logical value descriptors and reverse users")
+    rebuilt = check(binary, "cross-function legacy reverse users", two)
+    assert rebuilt.count("contract.task =") == 3, rebuilt
+    print(
+        "PASS legacy logical descriptors and reverse users are rebuilt from actual IR"
+    )
 
 
 if __name__ == "__main__":

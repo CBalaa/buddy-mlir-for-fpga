@@ -1,8 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
 
-// memref.view shifts the base pointer in bytes.  The DMA endpoint must keep
-// the view as its source so lowering observes that shift; it is not a
-// descriptor-element offset that may be folded away.
+// Preserve the byte-shifted memref.view input. Its identity generic becomes
+// a DDR-to-DDR copy, rejected before endpoint address lowering.
+// Typed endpoint offset proofs are covered by PlanEmitValidation.py.
 module {
   func.func @view_shift(%input: memref<1024xi8>, %out: memref<16xf32>) {
     %c64 = arith.constant 64 : index
@@ -18,7 +18,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @view_shift
-// CHECK: %[[VIEW:.*]] = memref.view %{{.*}}[%{{.*}}][] : memref<1024xi8> to memref<16xf32>
-// CHECK: memref.reinterpret_cast %[[VIEW]] to offset:
-// CHECK: bosc_ame.dma.start %{{.*}},
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

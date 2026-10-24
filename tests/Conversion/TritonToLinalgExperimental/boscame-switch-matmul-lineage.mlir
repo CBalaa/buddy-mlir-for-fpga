@@ -1,9 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.facts.mlir 2> %t.facts
-// RUN: FileCheck %s --check-prefix=FACTS --implicit-check-not='a_origin_id=' < %t.facts
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t.plain.mlir 2> %t.plain.err
-// RUN: test ! -s %t.plain.err
-// RUN: diff %t.facts.mlir %t.plain.mlir
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: switch_matmul_lineage = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
 module {
   tt.func public @switch_matmul_lineage(
       %a_case_ptr: !tt.ptr<i8>, %a_default_ptr: !tt.ptr<i8>,
@@ -58,5 +56,3 @@ module {
     tt.return %result : tensor<16x16xi32>
   }
 }
-
-// FACTS: compute op#{{[0-9]+}} linalg.matmul {{.*}} a_source_load_origin_ids=array<i64: 0, 1> a_source_lineage_complete=true b_source_load_origin_ids=array<i64: 2> b_source_lineage_complete=true

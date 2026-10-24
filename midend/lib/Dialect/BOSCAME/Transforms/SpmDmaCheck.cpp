@@ -741,10 +741,10 @@ private:
         !isa<SpmViewOp, DmaStartOp, TileLoadAOp, TileLoadBOp, TileLoadAccOp,
              TileStoreAccOp, vector::LoadOp, vector::StoreOp, memref::CastOp,
              memref::CollapseShapeOp, memref::ExpandShapeOp,
-             memref::ExtractStridedMetadataOp, memref::MemorySpaceCastOp,
-             memref::ReinterpretCastOp, memref::SubViewOp, memref::ViewOp,
-             memref::DimOp, memref::LoadOp, memref::StoreOp, memref::CopyOp,
-             linalg::LinalgOp>(op))
+             memref::TransposeOp, memref::ExtractStridedMetadataOp,
+             memref::MemorySpaceCastOp, memref::ReinterpretCastOp,
+             memref::SubViewOp, memref::ViewOp, memref::DimOp, memref::LoadOp,
+             memref::StoreOp, memref::CopyOp, linalg::LinalgOp>(op))
       return op.emitOpError(
           "unknown operation uses SPM memory; only typed vector, AME tile, "
           "DMA endpoint and explicit view operations may access SPM");

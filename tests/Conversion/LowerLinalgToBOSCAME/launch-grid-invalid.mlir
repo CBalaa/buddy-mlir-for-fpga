@@ -1,12 +1,7 @@
-// RUN: split-file %s %t
-// RUN: not buddy-opt %t/nonpositive.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s --check-prefix=CHECK-EXTENT
-// RUN: not buddy-opt %t/wrong-rank.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s --check-prefix=CHECK-RANK
-// RUN: not buddy-opt %t/wrong-type.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s --check-prefix=CHECK-TYPE
-// RUN: not buddy-opt %t/nonpositive.mlir --lower-linalg-to-boscame -o /dev/null 2>&1 | FileCheck %s --check-prefix=CHECK-EXTENT
-
-// CHECK-EXTENT: invalid gpu.known_grid_size contract; expected three positive i32 extents
-// CHECK-RANK: gpu.known_grid_size must contain exactly 3 elements
-// CHECK-TYPE: gpu.known_grid_size must be a dense i32 array
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 //--- nonpositive.mlir
 module {

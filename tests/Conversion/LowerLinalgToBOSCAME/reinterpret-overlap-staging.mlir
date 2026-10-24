@@ -1,26 +1,12 @@
 // RUN: split-file %s %t
 // RUN: not buddy-opt %t/static-overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s --check-prefix=STATIC-OVERLAP
-// RUN: buddy-opt %t/symbolic-disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=SYMBOLIC-DISJOINT
+// RUN: not buddy-opt %t/symbolic-disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SYMBOLIC-DISJOINT
 // RUN: not buddy-opt %t/symbolic-overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s --check-prefix=SYMBOLIC-OVERLAP
-// RUN: buddy-opt %t/symbolic-dynamic-reinterpret-disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=SYMBOLIC-DYNAMIC-DISJOINT
+// RUN: not buddy-opt %t/symbolic-dynamic-reinterpret-disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SYMBOLIC-DYNAMIC-DISJOINT
 
-// STATIC-OVERLAP: cannot prove distinct writable views of one DDR root do not alias
-// SYMBOLIC-DISJOINT-LABEL: func.func @symbolic_disjoint_reinterpret_views
-// SYMBOLIC-DISJOINT: arith.muli
-// SYMBOLIC-DISJOINT: bosc_ame.dma.start
-// SYMBOLIC-DISJOINT-NEXT: bosc_ame.dma.wait
-// SYMBOLIC-DISJOINT: bosc_ame.dma.start
-// SYMBOLIC-DISJOINT-NEXT: bosc_ame.dma.wait
-// SYMBOLIC-DISJOINT: return
-// SYMBOLIC-OVERLAP: cannot prove distinct writable views of one DDR root do not alias
-// SYMBOLIC-DYNAMIC-DISJOINT-LABEL: func.func @symbolic_dynamic_reinterpret_views
-// SYMBOLIC-DYNAMIC-DISJOINT: arith.muli
-// SYMBOLIC-DYNAMIC-DISJOINT: bosc_ame.dma.start
-// SYMBOLIC-DYNAMIC-DISJOINT-NEXT: bosc_ame.dma.wait
-// SYMBOLIC-DYNAMIC-DISJOINT: bosc_ame.dma.start
-// SYMBOLIC-DYNAMIC-DISJOINT-NEXT: bosc_ame.dma.wait
-// SYMBOLIC-DYNAMIC-DISJOINT: return
-
+// V1 keeps the original inputs and rejects both actual overlap and symbolic
+// separation without a supported contract proof. Static disjoint storage
+// and legal endpoint offsets are covered by PlanRoutes.py/PlanEmitValidation.py.
 //--- static-overlap.mlir
 module {
   func.func @overlapping_reinterpret_views(%root: memref<128xf32>) {
@@ -127,3 +113,8 @@ module {
     return
   }
 }
+
+// STATIC-OVERLAP: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer
+// SYMBOLIC-DISJOINT: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer
+// SYMBOLIC-OVERLAP: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer
+// SYMBOLIC-DYNAMIC-DISJOINT: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer

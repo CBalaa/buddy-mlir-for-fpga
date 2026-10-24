@@ -1,26 +1,27 @@
 // RUN: split-file %s %t
 // RUN: buddy-opt %t/success.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/success.out 2>%t/success.plan
 // RUN: FileCheck %s --check-prefix=SUCCESS < %t/success.plan
-// RUN: buddy-opt %t/group-capacity.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/capacity.out 2>%t/capacity.plan
+// RUN: not buddy-opt %t/group-capacity.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/capacity.out 2>%t/capacity.plan
 // RUN: FileCheck %s --check-prefix=CAPACITY < %t/capacity.plan
 // RUN: buddy-opt %t/staging-capacity.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/staging.out 2>%t/staging.plan
 // RUN: FileCheck %s --check-prefix=STAGING < %t/staging.plan
-// RUN: buddy-opt %t/computation-legality.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/legality.out 2>%t/legality.plan
+// RUN: not buddy-opt %t/computation-legality.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/legality.out 2>%t/legality.plan
 // RUN: FileCheck %s --check-prefix=LEGALITY < %t/legality.plan
 
-// SUCCESS: buffer-placement: resident=2 ddr=0 applied=true
-// SUCCESS-COUNT-2: kind=SpmResident bytes=64
-// SUCCESS: resources: transfers=0 dma-packets=0 read-bytes=0 write-bytes=0
+// SUCCESS-COUNT-2: memref.alloc plan.buffer=
+// SUCCESS: high_water = array<i64: 64, 64>
+// SUCCESS-NOT: plan.transfer
 
-// CAPACITY: buffer-placement: resident=0 ddr=5 applied=false
-// CAPACITY-COUNT-5: kind=StagedFallback bytes=65536{{.*}}group=0 reason=spm-capacity applied=false
+// Capacity uses actual reserved windows. V1 does not invent private DDR
+// staging when the five roots exceed both banks.
+// CAPACITY: SPM workspace capacity exceeded after legal direct/staging alternatives
 
-// STAGING: buffer-placement: resident=0 ddr=2 applied=false
-// STAGING-COUNT-2: kind=StagedFallback bytes=65536{{.*}}group=0 reason=missing-staging-capacity applied=false
-// STAGING-SAME: detail=resident + explicit windows leave insufficient per-op staging capacity
+// Existing DDR vector operands use direct RVV reads and need no staging
+// windows. Two 64 KiB roots plus the preserved arithmetic intermediate fit.
+// STAGING: high_water = array<i64: 131072, 65536>
+// STAGING-NOT: plan.transfer
 
-// LEGALITY: buffer-placement: resident=0 ddr=2 applied=false
-// LEGALITY-COUNT-2: kind=StagedFallback{{.*}}group=0 reason=computation-legality applied=false
+// LEGALITY: pointwise plan requires equal-shaped, same-type contiguous
 
 //--- success.mlir
 module {
@@ -34,7 +35,8 @@ module {
       iterator_types = ["parallel"]}
       ins(%a : memref<16xf32>) outs(%b : memref<16xf32>) {
     ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+      %negated = arith.negf %in : f32
+      linalg.yield %negated : f32
     }
     return
   }
@@ -63,8 +65,7 @@ module {
 }
 
 //--- group-capacity.mlir
-// Five fixed windows exceed the two banks. Each individual pair still fits
-// the original per-op staging, so the connected group must fall back intact.
+// Five private windows exceed both banks. No v1 private DDR fallback exists.
 module {
   func.func @resident_group_exceeds_capacity() {
     %zero = arith.constant 0.0 : f32
@@ -79,37 +80,40 @@ module {
       iterator_types = ["parallel"]}
       ins(%a : memref<16384xf32>) outs(%b : memref<16384xf32>) {
     ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+      %negated = arith.negf %in : f32
+      linalg.yield %negated : f32
     }
     linalg.generic {
       indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
       iterator_types = ["parallel"]}
       ins(%b : memref<16384xf32>) outs(%c : memref<16384xf32>) {
     ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+      %negated = arith.negf %in : f32
+      linalg.yield %negated : f32
     }
     linalg.generic {
       indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
       iterator_types = ["parallel"]}
       ins(%c : memref<16384xf32>) outs(%d : memref<16384xf32>) {
     ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+      %negated = arith.negf %in : f32
+      linalg.yield %negated : f32
     }
     linalg.generic {
       indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
       iterator_types = ["parallel"]}
       ins(%d : memref<16384xf32>) outs(%e : memref<16384xf32>) {
     ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+      %negated = arith.negf %in : f32
+      linalg.yield %negated : f32
     }
     return
   }
 }
 
 //--- staging-capacity.mlir
-// The two resident roots need only 128 KiB, but all three external operands
-// of the last op also need 192 KiB staging. The original last op fits exactly
-// in two banks, so failed prospective placement must retain that valid path.
+// External RVV inputs remain in DDR. The original arithmetic order is kept
+// through an additional private intermediate, with no external staging.
 module {
   func.func @staging_in_same_budget(%x: memref<16384xf32>,
       %y: memref<16384xf32>, %z: memref<16384xf32>) {
@@ -122,7 +126,8 @@ module {
       iterator_types = ["parallel"]}
       ins(%a : memref<16384xf32>) outs(%b : memref<16384xf32>) {
     ^bb0(%in: f32, %out: f32):
-      linalg.yield %in : f32
+      %negated = arith.negf %in : f32
+      linalg.yield %negated : f32
     }
     linalg.generic {
       indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>,

@@ -37,8 +37,10 @@ def main():
     assert "bosc_ame.tile." not in text
     assert text.count("vector.reduction <add>") == 2
     assert "vector<1xf32>" not in text
-    assert not re.search(r"memref\.alloca?[^\n]*: memref<f32>", text)
-    assert not re.search(r"memref\.(?:load|store|copy)\b", text)
+    # The shared plan gives the serial reductions one private host scalar.
+    # Tensor data still uses fixed SPM and external transfers remain DMA.
+    assert len(re.findall(r"memref\.alloca?[^\n]*: memref<f32>", text)) == 1
+    assert "memref.copy" not in text
     for line in text.splitlines():
         if re.search(r"\bmemref\.(?:load|store|copy)\b", line):
             assert "#bosc_ame.spm" not in line, line

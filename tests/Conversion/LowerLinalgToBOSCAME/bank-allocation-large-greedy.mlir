@@ -1,9 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
+// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
+// Preserve the original thirteen-input arithmetic chain. This generic is
+// outside the V1 single-arithmetic recipe, so no bank-search result is claimed.
+// Supported multi-task physical capacity is covered by PlanRoutes.mlir/py.
 module {
   func.func @large_greedy(
       %x0: memref<16xf32>, %x1: memref<16xf32>,
@@ -51,7 +50,4 @@ module {
   }
 }
 
-// PLAN: resources: transfers=14 dma-packets=14 read-bytes=832 write-bytes=64 totals-exact=true latency=uncalibrated
-// PLAN: bank-allocation-search: scope=operation-local groups=1 exact-assignments=0 exact-rejected-assignments=0 bounded-groups=1 repair-groups=0 repair-search-nodes=0 repair-rejected-placements=0 objective=minimize-bank-high-water status=bounded latency=uncalibrated
-// PLAN: bank[0]: high-water=448/131072 bytes
-// PLAN: bank[1]: high-water=448/131072 bytes
+// CHECK: kernel contract V25: generic requires one pure arithmetic operation

@@ -278,12 +278,14 @@ LogicalResult DmaStartOp::verify() {
     return failure();
 
   // A DDR base address is not a compile-time constant.  The module-level ABI
-  // assertion records that the caller handed us 64 B aligned, pairwise
-  // non-overlapping buffers, which is what makes the DDR-side alignment and
-  // aliasing guarantees available to the compiler.
+  // assertion records 64 B aligned arguments. Only the stronger nonalias
+  // assertion supplies pairwise disjointness to the lifetime checker.
+  auto abi =
+      getOperation()->getParentOfType<ModuleOp>()->getAttrOfType<StringAttr>(
+          kDmaAbiAttrName);
   if ((!src->isSpm() || !dst->isSpm()) &&
-      getOperation()->getParentOfType<ModuleOp>()->getAttr(kDmaAbiAttrName) !=
-          StringAttr::get(getContext(), kDmaAbiAlignedNonAliasing))
+      (!abi || (abi.getValue() != kDmaAbiAlignedNonAliasing &&
+                abi.getValue() != kDmaAbiAligned)))
     return emitOpError()
            << "a DDR endpoint cannot be proven aligned and non-overlapping; "
               "annotate the module with `"

@@ -10,7 +10,7 @@ sys.path.insert(0, str(TOOLS))
 from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
 
 OPT = buddy_opt_path()
-MODE = "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias"
+MODE = "--triton-to-linalg-experimental=contract=true caller-contract=args_aligned64_nonalias"
 
 
 def copy_kernel(size=16, prefix="", mask=False, gather=False, scatter=False):
@@ -58,27 +58,28 @@ def main():
             assert result.returncode == 0, (name, result.stderr)
         return result.stdout
 
-    invoke(
+    missing = invoke(
         "missing",
         "module {}",
-        ("--triton-to-linalg-experimental=boscame=true",),
-        "requires dma-abi",
+        ("--triton-to-linalg-experimental=contract=true",),
     )
+    assert "contract.version" in missing and "contract.abi" not in missing
     invoke(
-        "conflict",
+        "old-backend-contract",
         'module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {}',
-        ("--triton-to-linalg-experimental=boscame=true dma-abi=other",),
-        "conflicts with the module contract",
+        ("--triton-to-linalg-experimental=contract=true",),
+        "target attributes are forbidden in the neutral contract",
     )
-    invoke(
+    inherited = invoke(
         "inherited",
-        'module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {}',
-        ("--triton-to-linalg-experimental=boscame=true",),
+        "module attributes {contract.abi = {args_aligned_bytes = 64 : i64, args_disjoint = true}} {}",
+        ("--triton-to-linalg-experimental=contract=true",),
     )
+    assert "args_aligned_bytes = 64" in inherited
     invoke(
         "short-store",
         copy_kernel(mask=True),
-        expect="positive 64-byte range",
+        expect="no legal DMA route: cache-line length/pitch constraint",
     )
     unaligned = copy_kernel(
         prefix="%one = arith.constant dense<1> : tensor<16xi32>\n%shift = arith.addi %r, %one : tensor<16xi32>"
@@ -86,7 +87,7 @@ def main():
     invoke(
         "unaligned",
         unaligned,
-        expect="effective address cannot be proven 64 B aligned",
+        expect="no legal DMA route: endpoint alignment",
     )
     invoke(
         "capacity",
@@ -98,26 +99,26 @@ def main():
         ("scatter", {"scatter": True}),
     ):
         invoke(name, copy_kernel(**options), expect="unsupported")
-    # An unmarked integer matmul deliberately retains ordinary loop semantics.
+    # Typed signed matmul selection no longer requires a backend source marker.
     ordinary = invoke(
         "unmarked",
         """module {
-      func.func @target(%a: memref<16x64xi8>, %b: memref<64x16xi8>, %c: memref<16x16xi32>) {
-        linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%a, %b : memref<16x64xi8>, memref<64x16xi8>) outs(%c : memref<16x16xi32>)
+      func.func @target(%a: memref<16x64xi8>, %b: memref<64x16xi8, strided<[1, 64]>>, %c: memref<16x16xi32>) {
+        linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%a, %b : memref<16x64xi8>, memref<64x16xi8, strided<[1, 64]>>) outs(%c : memref<16x16xi32>)
         return
       }
     }""",
     )
-    assert "linalg.matmul" not in ordinary and "arith.muli" in ordinary
+    assert "linalg.matmul" not in ordinary and "bosc_ame.tile.mma" in ordinary
     invoke(
         "dynamic-target",
         """module {
-      func.func @target(%a: memref<?x64xi8>, %b: memref<64x16xi8>, %c: memref<?x16xi32>) {
-        linalg.matmul {cast = #linalg.type_fn<cast_signed>, bosc_ame.lower_to_ame} ins(%a, %b : memref<?x64xi8>, memref<64x16xi8>) outs(%c : memref<?x16xi32>)
+      func.func @target(%a: memref<?x64xi8>, %b: memref<64x16xi8, strided<[1, 64]>>, %c: memref<?x16xi32>) {
+        linalg.matmul {cast = #linalg.type_fn<cast_signed>} ins(%a, %b : memref<?x64xi8>, memref<64x16xi8, strided<[1, 64]>>) outs(%c : memref<?x16xi32>)
         return
       }
     }""",
-        expect="transfer shape must be static",
+        expect="matmul planning requires positive static rank-two buffers",
     )
     attrs = invoke(
         "attrs",
@@ -152,13 +153,13 @@ def main():
         args=(MODE,),
     )
     assert "linalg.matmul" in floating and "bosc_ame.tile.mma" not in floating
-    # CHECK: PASS failures: ABI, alignment, short store, gather/scatter, SPM capacity, marked integer target
+    # CHECK: PASS failures: old backend metadata, alignment, short store, gather/scatter, SPM capacity, dynamic target
     print(
-        "PASS failures: ABI, alignment, short store, gather/scatter, SPM capacity, marked integer target"
+        "PASS failures: old backend metadata, alignment, short store, gather/scatter, SPM capacity, dynamic target"
     )
-    # CHECK: PASS defaults: inherited contract, function/argument/result attributes, single program-ID conversion, floating dot
+    # CHECK: PASS defaults: optional neutral ABI, function/argument/result attributes, single program-ID conversion, floating dot
     print(
-        "PASS defaults: inherited contract, function/argument/result attributes, single program-ID conversion, floating dot"
+        "PASS defaults: optional neutral ABI, function/argument/result attributes, single program-ID conversion, floating dot"
     )
 
 

@@ -1,9 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: cmp %t.default %t.reported
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
+// The retained identity generic normalizes to an independent DDR-to-DDR
+// copy, which V1 rejects before scheduling or physical placement.
+// Supported direct/staged routes and capacity proofs are covered by
+// PlanRoutes.mlir/py and PlanTerminalStore.py.
 module {
   func.func @two_large_transfers(%src: memref<24576xf32>,
                                  %dst: memref<24576xf32>) {
@@ -18,8 +18,4 @@ module {
   }
 }
 
-// PLAN: transfer[0]: consumer=linalg.generic residency=operation-local consumers=[linalg.generic] role=input-a shape=[24576] strides=[1] validShape=[24576] bank=0 offset=0 capacity=98304 effective-byte-offset-bytes=0 endpoint-alignment-proven=true packets=1 read=true write=false
-// PLAN: transfer[1]: consumer=linalg.generic residency=operation-local consumers=[linalg.generic] role=output-c shape=[24576] strides=[1] validShape=[24576] bank=1 offset=0 capacity=98304 effective-byte-offset-bytes=0 endpoint-alignment-proven=true packets=1 read=false write=true
-// PLAN: bank-allocation-search: scope=operation-local groups=1 exact-assignments=4 exact-rejected-assignments=2 bounded-groups=0 repair-groups=0 repair-search-nodes=0 repair-rejected-placements=0 objective=minimize-bank-high-water status=exact latency=uncalibrated
-// PLAN: bank[0]: high-water=98304/131072 bytes
-// PLAN: bank[1]: high-water=98304/131072 bytes
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

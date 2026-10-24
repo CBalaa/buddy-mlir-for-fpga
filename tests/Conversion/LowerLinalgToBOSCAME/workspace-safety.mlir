@@ -1,20 +1,21 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/spm-input.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM
-// RUN: not buddy-opt %t/spm-result.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM
-// RUN: not buddy-opt %t/parallel.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=CONTEXT
-// RUN: not buddy-opt %t/forall.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=CONTEXT
-// RUN: not buddy-opt %t/async.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=CONTEXT
-// RUN: not buddy-opt %t/parallel-call.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=CALL
-// RUN: buddy-opt %t/serial.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' | FileCheck %s --check-prefix=SERIAL
+// RUN: not buddy-opt %t/spm-input.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM-INPUT
+// RUN: not buddy-opt %t/spm-result.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM-RESULT
+// RUN: not buddy-opt %t/parallel.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/forall.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/async.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=ASYNC
+// RUN: not buddy-opt %t/parallel-call.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/serial.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
 
-// Fixed SPM windows are local to a serial invocation. A preexisting SPM
-// argument could alias a newly allocated window, and concurrent consumers
-// could overwrite each other's staging buffers despite valid DMA waits.
-// SPM: function signatures cannot contain SPM memrefs
-// CONTEXT: fixed SPM workspace requires serial execution
-// CALL: fixed SPM workspace requires serial execution
-// CALL-SAME: scf.parallel
-// CALL: func.call
+// Preserve each original source. Physical SPM formals/results do not have
+// neutral private-root ownership, async tokens are outside the contract,
+// and external fills have no independent V1 recipe even in a serial loop.
+// Concurrent private workspace and serial acceptance are covered by
+// PlanWorkspaceScopes.py; interprocedural ownership by PlanWorkspaceCalls.py.
+// SPM-INPUT: target memory must be rooted in a verified SPM window
+// SPM-RESULT: kernel contract V14: target attributes are forbidden in the neutral contract
+// ASYNC: compatibility input contains a non-neutral dialect or bridge operation
+// FILL: unplanned external fill
 
 //--- spm-input.mlir
 module {
@@ -98,13 +99,6 @@ module {
   }
 }
 
-// SERIAL-LABEL: func.func @serial
-// SERIAL: scf.for
-// SERIAL: bosc_ame.spm.view
-// SERIAL: vector.store
-// SERIAL: bosc_ame.dma.start
-// SERIAL: bosc_ame.dma.wait
-// SERIAL: return
 
 //--- parallel-call.mlir
 module {

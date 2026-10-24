@@ -1,14 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=false enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=buffer-placement=false enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s '--linalg-to-boscame=buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s
 
-// The ordinary path permits this strided affine input access. The SPM vector
-// island requires identity maps and matching shapes, so both connected roots
-// must retain their ordinary placement before any resident storage is changed.
-// CHECK: buffer-placement: resident=0 ddr=2 applied=false
-// CHECK-COUNT-2: kind=StagedFallback bytes={{128|64}}{{.*}}group=0 reason=computation-legality applied=false
-// CHECK-SAME: SPM generic requires matching shapes, element byte widths and identity indexing maps
-
+// The original affine access is outside the V1 identity-indexed pointwise
+// recipe. The physical-placement debug override cannot change that semantic
+// boundary or restore the removed ordinary fallback compiler.
 module {
   func.func @unsupported_vector_layout() {
     %one = arith.constant 1.0 : f32
@@ -25,3 +20,5 @@ module {
     return
   }
 }
+
+// CHECK: kernel contract V25: pointwise update requires parallel identity indexing

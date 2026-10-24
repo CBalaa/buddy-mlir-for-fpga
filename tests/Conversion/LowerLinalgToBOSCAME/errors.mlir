@@ -1,4 +1,7 @@
-// RUN: not buddy-opt %s --lower-linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // A one-byte store cannot become a legal typed DMA packet by rounding its
 // length up: doing so would write addresses outside the original operation.
@@ -14,5 +17,3 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
     return
   }
 }
-
-// CHECK: every BOSCAME DMA packet must be a positive 64-byte range

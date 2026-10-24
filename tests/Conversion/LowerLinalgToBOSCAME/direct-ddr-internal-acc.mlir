@@ -1,8 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --implicit-check-not=bosc_ame.dma.start
 
-// An AME C operand backed by a compiler allocation is an internal temporary;
-// direct-ddr applies only to external function arguments.  It therefore keeps
-// the SPM accumulator and its write-back DMA.
+// A private accumulator remains in SPM while external A/B use direct DDR.
+// Its lifetime has no external output boundary, so no write-back DMA is needed.
 module {
   func.func @gemm(%a: memref<64x64xi8>,
                   %b: memref<64x64xi8, strided<[1, 64]>>) {
@@ -18,6 +17,9 @@ module {
   }
 }
 
-// CHECK: bosc_ame.tile.load_acc {{.*}} : memref<64x64xi32, strided<[64, 1]>, #bosc_ame.spm<
-// CHECK: bosc_ame.tile.store_acc {{.*}} : vector<64x64xi32>, memref<64x64xi32, strided<[64, 1]>, #bosc_ame.spm<
-// CHECK: bosc_ame.dma.start
+// CHECK: bosc_ame.spm.view {{.*}} : memref<64x64xi32, #bosc_ame.spm<0>>
+// CHECK: vector.store
+// CHECK: bosc_ame.tile.load_acc {{.*}} : memref<64x64xi32, strided<[64, 1]>, #bosc_ame.spm<0>>
+// CHECK: bosc_ame.tile.load_a {{.*}} {bosc_ame.direct_ddr}
+// CHECK: bosc_ame.tile.load_b {{.*}} {bosc_ame.direct_ddr}
+// CHECK: bosc_ame.tile.store_acc {{.*}} : vector<64x64xi32>, memref<64x64xi32, strided<[64, 1]>, #bosc_ame.spm<0>>

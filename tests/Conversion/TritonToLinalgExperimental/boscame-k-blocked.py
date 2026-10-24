@@ -143,7 +143,7 @@ def main():
         text=True,
     )
     assert rejected.returncode != 0
-    assert "dynamic provenance copies support rank one only" in rejected.stderr
+    assert "kernel contract V4: static valid shape" in rejected.stderr
     sentinel = np.full((64, 64), 0x3B6A8D0F, dtype=np.int32)
     for chunks in (2, 0, 3, 4):
         # Specialize a supported static rectangular extent while retaining the

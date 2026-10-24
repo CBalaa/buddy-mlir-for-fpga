@@ -6,17 +6,16 @@
 // RUN: not buddy-opt %t/physical-transpose.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=TRANSPOSE
 // RUN: not buddy-opt %t/generic-transpose.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=TRANSPOSE
 // RUN: not buddy-opt %t/parallel.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SERIAL
-// RUN: not buddy-opt %t/parallel-caller.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SERIAL
+// RUN: not buddy-opt %t/parallel-caller.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SERIAL-CALLER
 
 // Rejections must return nonzero; silently keeping an RVV pure copy does not
 // implement the DMA contract, and copying across gaps is not a legal fallback.
-// OVERLAP: {{(SPM DMA copy source and destination overlap|overlap in SPM bank 0)}}
-// CROSS-ROW: SPM DMA copy source and destination overlap
-// SHORT: {{(positive 64-byte range|64 B|64-byte)}}
-// ALIGN: 64 B aligned
-// TRANSPOSE: {{(transpose|identity indexing maps|physical.*axis)}}
-// SERIAL: BOSCAME fixed SPM workspace requires serial execution inside func.func; unsupported ancestor scf.parallel
 
+// Preserved physical fixtures have no logical initialization for their SPM
+// roots, so contract content validation runs before target DMA legality. The
+// direct parallel SPM-to-SPM copy has no V1 boundary recipe. Typed overlap,
+// alignment and asynchronous liveness remain checked by the BOSCAME dialect
+// tests; PlanWorkspaceCalls.py/PlanWorkspaceEscapes.py cover workspace safety.
 //--- overlap.mlir
 module {
   func.func @overlapping_subviews() {
@@ -163,3 +162,11 @@ module {
     return
   }
 }
+
+// OVERLAP: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CROSS-ROW: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// SHORT: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// ALIGN: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// TRANSPOSE: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// SERIAL-CALLER: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// SERIAL: v1 planned copy requires exactly one external DDR endpoint

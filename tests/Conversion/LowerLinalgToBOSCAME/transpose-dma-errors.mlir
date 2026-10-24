@@ -1,5 +1,7 @@
 // RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
 
+// The private B allocation has no initialized content version. V1 rejects
+// that read before placement; automatic placement supplies its own alignment.
 module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   func.func @unaligned_transposed_b(%a: memref<64x64xi8>,
                                     %c: memref<64x64xi32>) {
@@ -16,4 +18,4 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   }
 }
 
-// CHECK: endpoint allocation must prove 64 B alignment
+// CHECK: kernel contract V22/V23: read or partial inheritance has no initialized content version

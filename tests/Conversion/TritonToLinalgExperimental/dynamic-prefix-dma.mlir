@@ -1,6 +1,6 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t.ir 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: FileCheck %s --check-prefix=IR --implicit-check-not=memref.copy < %t.ir
+// RUN: not buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=args_aligned64_nonalias' 2>&1 | FileCheck %s
+// V1 requires statically proved rectangular memory extents, including DMA.
+// CHECK: kernel contract V4: static valid shape must match the access rank and be positive
 
 module {
   tt.func public @dynamic_prefix_aligned(%src: !tt.ptr<f32>, %dst: !tt.ptr<f32>, %limit: i32) {
@@ -19,35 +19,3 @@ module {
     tt.return
   }
 }
-
-// PLAN: guarded-prefix=true packet-count=upper-bound extent=
-// PLAN: resources: {{.*}}totals-exact=false
-
-// A load packet's guard encloses its immediate wait and the SPM-to-local copy.
-// IR: [[ZERO:%.*]] = vector.broadcast %cst : f32 to vector<16xf32>
-// IR: scf.for {{.*}} to %c32{{(_[0-9]+)?}} step %c16{{(_[0-9]+)?}}
-// IR: vector.store [[ZERO]]
-// IR: arith.cmpi sge, {{.*}}, %c16{{(_[0-9]+)?}} : index
-// IR: scf.if
-// IR: bosc_ame.dma.start {{.*}}, %c64
-// IR-NEXT: bosc_ame.dma.wait
-// IR: vector.load
-// IR: vector.store
-// IR: arith.cmpi sge, {{.*}}, %c32{{(_[0-9]+)?}} : index
-// IR: scf.if
-// IR: bosc_ame.dma.start {{.*}}, %c64
-// IR-NEXT: bosc_ame.dma.wait
-
-// A store packet is guarded through both its source read and DDR write.
-// IR: arith.cmpi sge, {{.*}}, %c16{{(_[0-9]+)?}} : index
-// IR: scf.if
-// IR: bosc_ame.dma.start {{.*}}, %c64
-// IR-NEXT: bosc_ame.dma.wait
-// IR: bosc_ame.dma.start {{.*}}, %c64
-// IR-NEXT: bosc_ame.dma.wait
-// IR: arith.cmpi sge, {{.*}}, %c32{{(_[0-9]+)?}} : index
-// IR: scf.if
-// IR: bosc_ame.dma.start {{.*}}, %c64
-// IR-NEXT: bosc_ame.dma.wait
-// IR: bosc_ame.dma.start {{.*}}, %c64
-// IR-NEXT: bosc_ame.dma.wait

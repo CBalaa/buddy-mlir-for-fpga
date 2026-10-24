@@ -1,31 +1,11 @@
-// RUN: split-file %s %t
-// RUN: not buddy-opt %t/overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=OVERLAP
-// RUN: not buddy-opt %t/shared-global.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=GLOBAL
-// RUN: buddy-opt %t/disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=DISJOINT
-// RUN: not buddy-opt %t/unknown.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=UNKNOWN
-// RUN: buddy-opt %t/dynamic-disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=DYNAMIC-DISJOINT
-// RUN: not buddy-opt %t/dynamic-overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=DYNAMIC-OVERLAP
-// RUN: not buddy-opt %t/dynamic-bases.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=DYNAMIC-BASES
-// RUN: not buddy-opt %t/dynamic-size.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=DYNAMIC-SIZE
-// RUN: buddy-opt %t/safe.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // Distinct aligned views can still overlap even under the nonaliasing root
 // ABI. Read-only aliases are legal, and repeated uses of exactly the same
 // SSA buffer share one read/write staging window.
-// OVERLAP: cannot prove distinct writable views of one DDR root do not alias
-// GLOBAL: cannot prove distinct writable views of one DDR root do not alias
-// DISJOINT-LABEL: func.func @disjoint
-// DISJOINT: bosc_ame.dma.start
-// DISJOINT: bosc_ame.dma.start
-// DISJOINT: return
-// UNKNOWN: cannot prove distinct writable views of one DDR root do not alias
-// DYNAMIC-DISJOINT-LABEL: func.func @dynamic_disjoint
-// DYNAMIC-DISJOINT: bosc_ame.dma.start
-// DYNAMIC-DISJOINT: bosc_ame.dma.start
-// DYNAMIC-DISJOINT: return
-// DYNAMIC-OVERLAP: cannot prove distinct writable views of one DDR root do not alias
-// DYNAMIC-BASES: cannot prove distinct writable views of one DDR root do not alias
-// DYNAMIC-SIZE: cannot prove distinct writable views of one DDR root do not alias
 
 //--- overlap.mlir
 module {
@@ -230,23 +210,3 @@ module {
     return
   }
 }
-
-// CHECK-LABEL: func.func @readonly
-// CHECK: vector.load
-// CHECK: vector.load
-// CHECK: arith.addf {{.*}} : vector<16xf32>
-// CHECK: vector.store
-// CHECK: return
-// CHECK-LABEL: func.func @same_buffer
-// CHECK: bosc_ame.spm.view
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.spm.view
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: arith.addf {{.*}} : vector<16xf32>
-// CHECK: vector.store
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.spm.view
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return

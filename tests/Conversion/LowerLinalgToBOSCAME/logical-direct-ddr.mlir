@@ -27,14 +27,14 @@ module attributes {
 
 // IR-NOT: bosc_ame.dma.start
 // IR-NOT: memref.alloc
-// IR: bosc_ame.tile.load_acc {{.*}} {bosc_ame.direct_ddr}
-// IR: bosc_ame.tile.load_a {{.*}} {bosc_ame.direct_ddr}
-// IR: bosc_ame.tile.load_b {{.*}} {bosc_ame.direct_ddr}
+// IR: bosc_ame.tile.load_acc {{.*}} {bosc_ame.direct_ddr{{.*}}}
+// IR: bosc_ame.tile.load_a {{.*}} {bosc_ame.direct_ddr{{.*}}}
+// IR: bosc_ame.tile.load_b {{.*}} {bosc_ame.direct_ddr{{.*}}}
 // IR: bosc_ame.tile.mma
-// IR: bosc_ame.tile.load_a {{.*}} {bosc_ame.direct_ddr}
-// IR: bosc_ame.tile.load_b {{.*}} {bosc_ame.direct_ddr}
+// IR: bosc_ame.tile.load_a {{.*}} {bosc_ame.direct_ddr{{.*}}}
+// IR: bosc_ame.tile.load_b {{.*}} {bosc_ame.direct_ddr{{.*}}}
 // IR: bosc_ame.tile.mma
-// IR: bosc_ame.tile.store_acc {{.*}} {bosc_ame.direct_ddr}
+// IR: bosc_ame.tile.store_acc {{.*}} {bosc_ame.direct_ddr{{.*}}}
 // LLVM-NOT: llvm.call @bosc_ame_dma_start
 // LLVM: "bosc_ame.intr.mlce32.m"
 // LLVM: "bosc_ame.intr.mlae8.m"

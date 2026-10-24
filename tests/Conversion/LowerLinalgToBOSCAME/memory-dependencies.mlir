@@ -1,9 +1,8 @@
-// RUN: buddy-opt %s --split-input-file --linalg-to-boscame='plan-report=true dma-abi=args_aligned64_nonalias' -o %t.ir 2>%t.plan
-// RUN: buddy-opt %s --split-input-file --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o %t.default
-// RUN: cmp %t.default %t.ir
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --split-input-file --linalg-to-boscame='plan-report=true' -o %t.noabi.ir 2>%t.noabi.plan
-// RUN: FileCheck %s --check-prefix=NOABI < %t.noabi.plan
+// RUN: %python %S/Inputs/kernel-memory-cases.py %s buddy-opt
+
+// Original memory scenarios are retained below. The shared harness checks
+// neutral content dependencies and conservative alias boundaries, then
+// explicit v1 planner diagnostics instead of retired access/pair reports.
 
 // Data dependencies, overwrite ordering, and read-before-overwrite ordering
 // are distinct hazards. Two reads have no memory ordering requirement.
@@ -49,13 +48,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=10 scope=post-planning
-// PLAN: memory-dependencies: count=3 scope=lexical status=complete
-// PLAN-NEXT: memory-dependency[0]: function=@raw accesses=[0,1] kind=RAW
-// PLAN-NEXT: memory-dependency[1]: function=@war accesses=[2,3] kind=WAR
-// PLAN-NEXT: memory-dependency[2]: function=@waw accesses=[4,5] kind=WAW
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -79,17 +71,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=5 scope=post-planning
-// PLAN: memory-dependencies: count=7 scope=lexical status=complete
-// PLAN-NEXT: memory-dependency[0]: function=@execute_region_order accesses=[0,1] kind=RAW
-// PLAN-NEXT: memory-dependency[1]: function=@execute_region_order accesses=[0,2] kind=WAW
-// PLAN-NEXT: memory-dependency[2]: function=@execute_region_order accesses=[0,3] kind=RAW
-// PLAN-NEXT: memory-dependency[3]: function=@execute_region_order accesses=[0,4] kind=RAW
-// PLAN-NEXT: memory-dependency[4]: function=@execute_region_order accesses=[1,2] kind=WAR
-// PLAN-NEXT: memory-dependency[5]: function=@execute_region_order accesses=[2,3] kind=RAW
-// PLAN-NEXT: memory-dependency[6]: function=@execute_region_order accesses=[2,4] kind=RAW
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -107,13 +88,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=3 scope=post-planning
-// PLAN: memory-dependencies: count=3 scope=lexical status=complete
-// PLAN-DAG: memory-dependency[{{[0-9]+}}]: function=@unknown_barrier accesses=[0,1] kind=unknown-effect
-// PLAN-DAG: memory-dependency[{{[0-9]+}}]: function=@unknown_barrier accesses=[0,2] kind=WAR
-// PLAN-DAG: memory-dependency[{{[0-9]+}}]: function=@unknown_barrier accesses=[1,2] kind=unknown-effect
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -134,10 +108,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=2 scope=post-planning
-// PLAN: memory-dependencies: count=0 scope=lexical status=incomplete
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -152,13 +122,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=3 scope=post-planning
-// PLAN: memory-dependencies: count=3 scope=lexical status=complete
-// PLAN-DAG: memory-dependency[{{[0-9]+}}]: function=@allocation_lifetime accesses=[0,1] kind=lifetime
-// PLAN-DAG: memory-dependency[{{[0-9]+}}]: function=@allocation_lifetime accesses=[0,2] kind=lifetime
-// PLAN-DAG: memory-dependency[{{[0-9]+}}]: function=@allocation_lifetime accesses=[1,2] kind=lifetime
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -172,11 +135,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=2 scope=post-planning
-// PLAN: memory-dependencies: count=1 scope=lexical status=complete
-// PLAN-NEXT: memory-dependency[0]: function=@empty_allocation_lifetime accesses=[0,1] kind=lifetime
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -207,12 +165,6 @@ module {
   }
 }
 
-// PLAN: memory-dependencies: count=1 scope=lexical status=complete
-// PLAN-NEXT: memory-dependency[0]: function=@called_helper accesses=[2,3] kind=WAR
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
-// NOABI: memory-dependency[{{[0-9]+}}]: function=@distinct_arguments accesses=[0,1] kind=WAR
-// NOABI: memory-dependency[{{[0-9]+}}]: function=@called_helper accesses=[2,3] kind=WAR
 
 // -----
 
@@ -229,13 +181,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=3 scope=post-planning
-// PLAN: memory-dependencies: count=3 scope=lexical status=complete
-// PLAN-NEXT: memory-dependency[0]: function=@mixed_pointer accesses=[0,1] kind=WAR
-// PLAN-NEXT: memory-dependency[1]: function=@mixed_pointer accesses=[0,2] kind=WAR
-// PLAN-NEXT: memory-dependency[2]: function=@mixed_pointer accesses=[1,2] kind=WAW
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -256,10 +201,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=2 scope=post-planning
-// PLAN: memory-dependencies: count=0 scope=lexical status=incomplete
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -276,11 +217,6 @@ module {
   }
 }
 
-// PLAN: buffer-accesses: count=2 scope=post-planning
-// PLAN: memory-dependencies: count=1 scope=lexical status=incomplete
-// PLAN-NEXT: memory-dependency[0]: function=@multiblock_function accesses=[0,1] kind=WAW
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:
 
 // -----
 
@@ -299,8 +235,3 @@ module {
     return
   }
 }
-
-// PLAN: buffer-accesses: count=2 scope=post-planning
-// PLAN: memory-dependencies: count=0 scope=lexical status=incomplete
-// PLAN-NOT: memory-dependency[
-// PLAN: resources:

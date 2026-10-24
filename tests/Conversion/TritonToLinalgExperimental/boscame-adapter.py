@@ -84,7 +84,7 @@ def main():
                 ]
             ).strip()
             assert contract == symbol + ":7,6,1"
-            pipeline[0] += " bm=32 bn=128 bk=128 launch-grid=" + contract
+            pipeline[0] += " launch-grid=" + contract
         run(
             [
                 opt,

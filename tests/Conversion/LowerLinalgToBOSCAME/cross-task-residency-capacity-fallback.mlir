@@ -1,12 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// Retaining %shared in one entry function would leave room for only one of
-// the other function's two 96 KiB windows. Reloading it at its consumers lets
-// that function use both banks.
+// The retained identity generic normalizes to an independent DDR-to-DDR
+// copy, which V1 rejects before scheduling or physical placement.
+// Supported direct/staged routes and capacity proofs are covered by
+// PlanRoutes.mlir/py and PlanTerminalStore.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @capacity_fallback(
       %shared: memref<24576xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -76,7 +73,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN: transfer[{{[0-9]+}}]: consumer=linalg.generic residency=operation-local consumers=[linalg.generic] role=input-a
-// PLAN: resources: transfers=6 dma-packets=6 read-bytes=294912 write-bytes=294912 totals-exact=true latency=uncalibrated
-// PLAN: function-argument-residency-search: candidates=1 selected=0 rejected-capacity=1 objective=minimize-read-bytes-then-packets status=exact latency=uncalibrated
-// PLAN-NEXT: argument-residency[0]: function=@capacity_fallback arg#0 consumers=2 capacity=98304 resident-read-bytes=98304 resident-packets=1 reload-read-bytes=196608 reload-packets=2 decision=reload reason=spm-capacity
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

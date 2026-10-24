@@ -98,12 +98,16 @@ inline constexpr llvm::StringLiteral kDmaWaitHelperName = "bosc_ame_dma_wait";
 /// explicit statement that every pointer argument is 64-byte aligned and that
 /// distinct pointer arguments do not overlap.
 ///
-/// Without this module attribute a transfer whose non-SPM endpoint cannot be
-/// proven aligned, or whose DDR ranges cannot be proven disjoint, is rejected
-/// instead of being optimistically accepted.
+/// `args_aligned64` asserts only the alignment. Potentially overlapping DDR
+/// ranges still require ordering or a separate disjointness proof. Without
+/// either assertion, an unproven DDR endpoint alignment is rejected.
 inline constexpr llvm::StringLiteral kDmaAbiAttrName = "bosc_ame.dma.abi";
 inline constexpr llvm::StringLiteral kDmaAbiAlignedNonAliasing =
     "args_aligned64_nonalias";
+/// Alignment alone suffices for a synchronous DDR/SPM boundary. This does
+/// not establish disjointness between DDR arguments; the lifetime checker
+/// continues treating those roots as potentially aliasing.
+inline constexpr llvm::StringLiteral kDmaAbiAligned = "args_aligned64";
 
 //===----------------------------------------------------------------------===//
 // Type queries

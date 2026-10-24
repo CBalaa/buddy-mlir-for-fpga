@@ -1,8 +1,7 @@
-// RUN: split-file %S/Inputs/matmul-example-golden.mlir %t
-// RUN: buddy-opt %t/kernel.bufferized.mlir --linalg-to-boscame -o %t/default.mlir
-// RUN: cmp %t/kernel.boscame.mlir %t/default.mlir
-// RUN: buddy-opt %t/kernel.bufferized.mlir '--linalg-to-boscame=buffer-placement=true' -o %t/resident.mlir
-// RUN: cmp %t/kernel.boscame.mlir %t/resident.mlir
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // Exact pass output from the clean, reproducible matmul_i8_128x1024x128
 // example build. The AME direct routes and accumulator fusion leave no

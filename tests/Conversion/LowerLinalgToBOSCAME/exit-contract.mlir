@@ -1,21 +1,10 @@
-// RUN: split-file %s %t
-// RUN: not buddy-opt %t/triton.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=BRIDGE
-// RUN: not buddy-opt %t/structured.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=BRIDGE
-// RUN: not buddy-opt %t/clone.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=BRIDGE
-// RUN: not buddy-opt %t/gather.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=IRREGULAR
-// RUN: not buddy-opt %t/scatter.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=IRREGULAR
-// RUN: not buddy-opt %t/global.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=GLOBAL
-// RUN: buddy-opt %t/ordinary.mlir --linalg-to-boscame | FileCheck %s --check-prefix=ORDINARY
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // Unsupported scalar operations and unused declarations must fail even when
 // there is no tensor SSA or staged Linalg operation to trigger the planner.
-// BRIDGE: incomplete BOSCAME lowering: residual Triton or bufferization bridge operation
-// IRREGULAR: unsupported BOSCAME gather/scatter memory access
-// GLOBAL: BOSCAME SPM globals are unsupported
-// ORDINARY-LABEL: func.func @ordinary
-// ORDINARY: scf.for
-// ORDINARY: memref.store
-// ORDINARY-NOT: linalg.
 
 //--- triton.mlir
 module {

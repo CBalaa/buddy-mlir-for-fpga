@@ -1,10 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-// RUN: buddy-opt %t --lower-bosc-ame -o /dev/null
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s
 
-// The caller's explicit bank-0 window stays live across the call. Staging in
-// the helper must reserve this existing range even though its view occurs in
-// another function, and must not overwrite the vector saved by the caller.
+// The called helper's formals have no entry disjointness guarantee, so V1
+// rejects the potentially overlapping copy before routing. Live caller/callee
+// SPM clobbering is separately rejected by PlanWorkspaceCalls.py, including
+// calls with no memref operands.
 module {
   func.func @helper(%input: memref<16xf32>, %out: memref<16xf32>) {
     linalg.generic {indexing_maps = [affine_map<(i) -> (i)>,
@@ -34,19 +33,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @helper
-// CHECK: bosc_ame.spm.view {bank = 1 : i32, offset = 0 : i64}
-// CHECK: bosc_ame.spm.view {bank = 0 : i32, offset = 64 : i64}
-// CHECK: %[[COPY:.*]] = bosc_ame.dma.start
-// CHECK-SAME: (memref<16xf32, {{.*}}#bosc_ame.spm<1>>, memref<16xf32, {{.*}}#bosc_ame.spm<0>>, index)
-// CHECK-NEXT: bosc_ame.dma.wait %[[COPY]]
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
-// CHECK-LABEL: func.func @caller
-// CHECK: %[[SAVED:.*]] = bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64}
-// CHECK: vector.store {{.*}}, %[[SAVED]]
-// CHECK: call @helper
-// CHECK: vector.load %[[SAVED]]
-// CHECK: return
+// CHECK: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer

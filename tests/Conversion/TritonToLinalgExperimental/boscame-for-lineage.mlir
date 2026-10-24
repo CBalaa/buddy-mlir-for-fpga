@@ -1,6 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: for_lineage = complete
 module {
   tt.func public @for_lineage(
       %initial_ptr: !tt.ptr<f32>, %body_ptr: !tt.ptr<f32>,
@@ -26,19 +27,3 @@ module {
     tt.return
   }
 }
-
-// CHECK: bosc_ame.compute_graph_complete = false
-// CHECK: bosc_ame.source_lineage_complete = false
-// CHECK: bosc_ame.compute_predecessors = array<i64: 0, 1>
-// CHECK: bosc_ame.logical_value_ids = array<i64: 7>, bosc_ame.loop_carried_slots = [{
-// CHECK-SAME: backedge_producer_compute_ids = array<i64: 2>
-// CHECK-SAME: exit_consumer_compute_ids = array<i64: 3>
-// CHECK-SAME: init_producer_compute_ids = array<i64: 0>
-// CHECK-SAME: init_value_id = 2 : i64
-// CHECK-SAME: iter_arg_consumer_compute_ids = array<i64: 2>
-// CHECK-SAME: iter_arg_value_id = 10 : i64
-// CHECK-SAME: result_value_id = 7 : i64
-// CHECK-SAME: slot = 0 : i64
-// CHECK-SAME: yielded_value_id = 6 : i64
-// CHECK: bosc_ame.memory = {destination = "external_ddr", event_kind = "store", kind = "store"
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 0, 1>

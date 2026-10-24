@@ -1,5 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
-"""Check actual optimized AME assembly, including a shorter final K tile."""
+"""Check actual optimized AME assembly, including frontend-padded K tiles."""
 
 import re
 import subprocess
@@ -92,7 +92,24 @@ def main():
     original = (
         REPO / "examples/FPGA-BOSCAME/linalg-boscame/gemm.bufferized.mlir"
     ).read_text()
-    for inner in (160, 1024):
+    # Keep the historical raw K tail as an explicit boundary test. Frontends
+    # pad that logical K=160 to 192 before this v1 backend boundary.
+    tail = work / "raw-k160.mlir"
+    tail.write_text(original.replace("1024", "160"))
+    rejected = subprocess.run(
+        [
+            str(opt),
+            str(tail),
+            "--linalg-to-boscame=dma-abi=args_aligned64_nonalias",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode != 0
+    assert "AME plan requires frontend tiling/padding" in rejected.stderr, (
+        rejected.stderr
+    )
+    for inner in (192, 1024):
         prefix = work / f"k{inner}"
         module = prefix.with_suffix(".mlir")
         module.write_text(original.replace("1024", str(inner)))
@@ -104,8 +121,7 @@ def main():
                 opt,
                 module,
                 "--linalg-to-boscame=enable-spm-dma=true enable-ame=true "
-                "dma-abi=args_aligned64_nonalias target=nr-fpga "
-                f"bm=64 bn=128 bk={inner}",
+                "dma-abi=args_aligned64_nonalias target=nr-fpga",
                 "--lower-bosc-ame",
                 "-o",
                 lowered,
@@ -133,9 +149,9 @@ def main():
             ]
         )
         check_assembly(assembly.read_text(), inner)
-    # CHECK: PASS ordered AME: optimized full/tail K configuration and live registers
+    # CHECK: PASS ordered AME: optimized full/padded K configuration and live registers
     print(
-        "PASS ordered AME: optimized full/tail K configuration and live registers"
+        "PASS ordered AME: optimized full/padded K configuration and live registers"
     )
 
 

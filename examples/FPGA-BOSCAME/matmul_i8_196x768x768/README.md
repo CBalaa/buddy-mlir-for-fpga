@@ -14,8 +14,9 @@ and six-iteration K loop.
 The only lowering route in this directory is:
 
 ```text
-TTIR -> triton-to-linalg-experimental -> one-shot bufferize
-     -> linalg-to-boscame -> lower-bosc-ame -> LLVM IR -> AME assembly -> ELF
+TTIR -> triton-to-linalg-experimental (contract=true; includes bufferization)
+     -> neutral contract IR -> bosc-ame-plan -> verified planned IR
+     -> bosc-ame-emit -> lower-bosc-ame -> LLVM IR -> AME assembly -> ELF
 ```
 
 ## Quick start
@@ -57,8 +58,9 @@ The kernel masks the rows past `M` in the final M program (and the K lanes past
 elements outside the logical 196 rows.  The accumulator is initialized from C
 itself with `tl.load` and stored back once after the reduction. A compact
 SPM C buffer carries the accumulator through all six K iterations. Each
-iteration loads A/B from DDR directly into their SPM windows, loads C and A/B subtiles into AME registers, accumulates directly into C,
-and writes the accumulator back to the same C SPM window. Each K iteration
+iteration stages A through DMA, reads B directly from DDR, loads the C and
+A/B subtiles into AME registers, accumulates directly into C, and writes the
+accumulator back to the same C SPM window. Each K iteration
 finishes its accumulator store before the next DMA; registers do not stay live
 across runtime calls.
 The launcher owns the logical
@@ -67,34 +69,36 @@ only.
 
 All effective copy extents are static after specialization. Both branches
 have full N/K extents; only the tail branch initializes invalid A/C rows.
-B is physically K-contiguous in both branches. Graph annotation runs after
-the rewrite and cleanup, producing 12 distinct tasks and two marked matmuls;
-the control-flow graph remains conservatively incomplete.
+B is physically K-contiguous in both branches. The frontend contract has 12
+tasks and two matmuls; the planner folds the two B load snapshots into their
+matmuls, leaving 10 tasks. The five modeled scopes are complete.
 
-The three main buffers have 64-byte alignment and total **36864 B**:
+The planner keeps two physical SPM windows, totaling **20480 B**:
 
 | Buffer | Logical shape | DDR strides (elements) | SPM strides | Bytes | Bank / byte offset |
 | --- | --- | --- | --- | ---: | --- |
 | A | `[32,128]` i8 | `[768,1]` | `[128,1]` | 4096 | 1 / 0 |
-| B | `[128,128]` i8 | `[1,768]` | `[1,128]` | 16384 | 1 / 4096 |
-| C / running sum | `[32,128]` i32 | `[768,1]` | identity `[128,1]` | 16384 | 0 / 0 |
+| B | `[128,128]` i8 | `[1,768]` | direct DDR | 0 | no window |
+| C / running sum | `[32,128]` i32 | `[768,1]` | `[128,1]` | 16384 | 0 / 0 |
 
-Logical private buffers are placed automatically; `buffer-placement` is a
-physical placement debug override. C stays live through the K loop. A/B reuse the same fixed
-windows on every iteration; `spm.view` denotes an address and does not allocate
-stack memory. Identity C lets bufferization send the same buffer to the final
-store. The two branches share these windows because their private roots cannot
-escape and the branches are mutually exclusive. Bank high-water marks are
-16384 B and 20480 B. Every DMA waits before computation or window reuse.
-DDR and SPM addresses use their own descriptors, and 64-wide hardware subtiles
-keep their parent byte pitches: 128 for A/B and 512 for C.
+A is reused by both N subtiles, so DMA stages it once per K iteration. B has
+identical external traffic through direct and staged routes; direct avoids
+its 16 KiB window and DMA descriptors. Private C remains in SPM across the K
+loop. There is no separate product P or RVV product addition. The mutually
+exclusive full/tail arms share the two windows; four static `spm.view` ops
+therefore describe two physical windows. Their bank high-water marks are
+16384 B and 4096 B. Every DMA waits before computation or window reuse.
+AME subtiles retain parent byte pitches: 128 for SPM A, 768 for DDR B and
+512 for SPM C. The tail fills invalid A/C rows, moves only four valid rows,
+and writes only those rows back to DDR. Each program reads and writes external
+C once around all six K iterations.
 
-The final default ELF uses **2256 B** at its deepest stack point, including
-boot, launcher, adapter, MLIR wrapper, alignment, spills, DMA runtime and
-the AME encoder's transient register saves. **63280 B** remain in the existing
-64 KiB E6 stack. The four major ordinary DDR temporaries and their repeated
-staging copies are gone. See the [validation record](../../../docs/validation/boscame-accumulator-routing/README.md)
-and its reproducible ELF audit; the linker configuration is unchanged.
+The regenerated ELF's complete E6 call-chain stack bound is **1216 B**, leaving
+64320 B in the unchanged 64 KiB stack. This includes boot, launcher, adapter,
+MLIR wrapper, kernel spills, the AME encoder's temporary saves, DMA runtime,
+both DMA failure hooks and the trap path. The corresponding reconstructed
+baseline uses 2256 B. See the [validation record](../../../docs/BOSCAMEKernelContractValidation.md)
+for hashes, assumptions and the reproducible linked-ELF audit.
 
 ## Pipeline
 
@@ -102,30 +106,34 @@ The conversion commands used by `make boscame llvm` are:
 
 ```bash
 buddy-opt build/matmul_i8_196x768x768/kernel.ttir \
-  --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias bm=32 bn=128 bk=128 launch-grid=triton_matmul_i8_196x768x768:7,6,1" \
+  --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_matmul_i8_196x768x768:7,6,1" \
   -o build/matmul_i8_196x768x768/kernel.frontend.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.frontend.mlir \
-  --empty-tensor-to-alloc-tensor \
-  --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" \
-  --canonicalize --cse \
-  -o build/matmul_i8_196x768x768/kernel.bufferized.mlir
+  --kernel-contract-verify -o build/matmul_i8_196x768x768/kernel.bufferized.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.bufferized.mlir \
-  --linalg-to-boscame \
-  -o build/matmul_i8_196x768x768/kernel.boscame.mlir
+  --bosc-ame-plan --bosc-ame-plan-verify \
+  -o build/matmul_i8_196x768x768/kernel.planned.mlir
+buddy-opt build/matmul_i8_196x768x768/kernel.planned.mlir \
+  --bosc-ame-emit -o build/matmul_i8_196x768x768/kernel.boscame.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.boscame.mlir \
   --lower-bosc-ame -o build/matmul_i8_196x768x768/kernel.llvm.mlir
 buddy-translate build/matmul_i8_196x768x768/kernel.llvm.mlir \
   --buddy-to-llvmir -o build/matmul_i8_196x768x768/kernel.ll
 ```
 
-`--triton-to-linalg-experimental` keeps the Triton source and program-axis
-facts as `bosc_ame.*` attributes and saves the `bm/bn/bk` tile contract on the
-module; `--linalg-to-boscame` reads those facts, analyzes the Linalg
-computation and its memory facts, plans placement/transfer decisions, and
-emits the BOSCAME dialect; `--lower-bosc-ame` then lowers the tile/DMA/SPM
-operations to `bosc_ame.intr.*` and the surrounding LLVM dialect.  See
-[the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md) for
-the fact and plan reports, the DMA ABI and the supported accesses.
+Contract mode performs integer normalization, static mask specialization and
+safe bufferization inside the frontend. `kernel.frontend.mlir` already contains
+standard buffer-form Linalg/MemRef/SCF and target-neutral `contract.*` facts;
+`kernel.bufferized.mlir` is its verified copy, retained as a familiar artifact
+name. No second bufferization is needed. The planner binds actual operands,
+selects each DDR/SPM route, rebuilds content versions and dependencies, and
+records concrete `plan.*` decisions in `kernel.planned.mlir`. Emission verifies
+that plan and expands it mechanically. There is no global storage-policy option.
+
+The contract can be produced by another frontend without Triton or BOSCAME
+dialect dependencies. See the [pipeline guide](../../../docs/BOSCAMEKernelContractPipeline.md)
+and [regenerated-example validation](../../../docs/BOSCAMEKernelContractValidation.md)
+for the interface, resource counts and artifact hashes.
 
 ## ABI and image memory
 
@@ -236,4 +244,4 @@ shared with the other FPGA examples and is not part of the validation claim.
 | `../tools/restrict_fpga_assembly.py` | Restricted/fenced NR instruction stream |
 | `../tools/check_nr_elf.py` | Complete-ELF instruction audit |
 
-See [the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md).
+See [the pipeline guide](../../../docs/BOSCAMEKernelContractPipeline.md).

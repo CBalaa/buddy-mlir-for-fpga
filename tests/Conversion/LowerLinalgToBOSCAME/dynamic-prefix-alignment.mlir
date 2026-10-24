@@ -1,15 +1,7 @@
-// RUN: split-file %s %t
-// RUN: buddy-opt %t/aligned-mask.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=ALIGNED
-// RUN: buddy-opt %t/reversed-clamp.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=ALIGNED
-// RUN: buddy-opt %t/selected-clamp.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=ALIGNED
-// RUN: not buddy-opt %t/unaligned-mask.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=UNALIGNED
-// RUN: not buddy-opt %t/wrong-upper-bound.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=BAD-BOUND
-// RUN: not buddy-opt %t/selected-wrong-upper-bound.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=SELECT-BAD-BOUND
-
-// ALIGNED: bosc_ame.dma.start
-// UNALIGNED: dynamic BOSCAME prefix extent must be clamped to the static maximum and provably divisible by a DMA packet
-// BAD-BOUND: dynamic BOSCAME prefix extent must be clamped to the static maximum and provably divisible by a DMA packet
-// SELECT-BAD-BOUND: dynamic BOSCAME prefix extent must be clamped to the static maximum and provably divisible by a DMA packet
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 //--- aligned-mask.mlir
 module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {

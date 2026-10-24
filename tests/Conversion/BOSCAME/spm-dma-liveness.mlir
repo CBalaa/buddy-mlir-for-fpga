@@ -8,7 +8,7 @@
 // RUN: buddy-opt -verify-diagnostics %t/loop-duplicate-init.mlir --bosc-ame-spm-dma-check
 // RUN: buddy-opt %t/stored-branches.mlir --bosc-ame-spm-dma-check -o /dev/null
 // RUN: not buddy-opt %t/call-helper.mlir --bosc-ame-spm-dma-check 2>&1 | FileCheck %s --check-prefix=CALL
-// RUN: not buddy-opt %t/call-helper.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=CALL
+// RUN: not buddy-opt %t/call-helper.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=ADAPTER
 // RUN: buddy-opt -verify-diagnostics %t/call-external.mlir --bosc-ame-spm-dma-check
 // RUN: buddy-opt -verify-diagnostics %t/call-indirect.mlir --bosc-ame-spm-dma-check
 // RUN: buddy-opt -verify-diagnostics %t/call-llvm.mlir --bosc-ame-spm-dma-check
@@ -17,6 +17,9 @@
 // RUN: buddy-opt %t/calls-after-store.mlir --bosc-ame-spm-dma-check -o /dev/null
 
 // CALL: cannot call code while an AME accumulator is live
+// The compatibility adapter accepts storage inputs before target computation
+// emission. The dedicated checker above still verifies live-accumulator calls.
+// ADAPTER: target compatibility accepts SPM windows and synchronous DMA only; already emitted instructions cannot be replanned
 
 //--- unknown-user.mlir
 module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {

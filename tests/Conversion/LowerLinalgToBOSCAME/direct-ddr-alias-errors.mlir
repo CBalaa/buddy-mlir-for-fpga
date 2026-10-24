@@ -1,7 +1,7 @@
 // RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s
 
-// A direct destination that is also a Linalg input has no write barrier in
-// the direct vector path.  Definite root aliasing is rejected up front.
+// A self-copy has identical addresses, so the contract accepts its aliasing.
+// The retained DDR-to-DDR boundary has no independent V1 copy recipe.
 module {
   func.func @in_place(%root: memref<64xf32>) {
     memref.copy %root, %root {
@@ -13,4 +13,4 @@ module {
   }
 }
 
-// CHECK: SPM DMA copy source and destination overlap
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

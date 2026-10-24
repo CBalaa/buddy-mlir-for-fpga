@@ -9,7 +9,6 @@
 
 #include "Analysis/OpFoldResultUtils.h"
 #include "Conversion/StructuredToMemref/StructuredToMemref.h"
-#include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
 #include "mlir/IR/AffineMap.h"
@@ -1739,18 +1738,7 @@ static Value getMemRefRoot(Value value) {
 }
 
 static StringRef classifyStoreDestination(Value value) {
-  // Storage-space attributes are authoritative.  In particular, do not infer
-  // SPM merely because the producer is a temporary tensor: an ordinary
-  // bufferization temporary remains DDR until the backend stages it.
-  if (buddy::boscame::spmdma::getSpmBank(value.getType()).has_value())
-    return "spm";
-
   Value root = getMemRefRoot(value);
-  if (buddy::boscame::spmdma::getSpmBank(root.getType()).has_value())
-    return "spm";
-  if (Operation *def = root.getDefiningOp())
-    if (def->getName().getStringRef() == "bosc_ame.spm.view")
-      return "spm";
   if (isa<BlockArgument>(root))
     return "external_ddr";
   if (Operation *def = root.getDefiningOp()) {
@@ -1776,46 +1764,68 @@ static DictionaryAttr memoryProvenance(OpBuilder &builder, StringRef kind,
   NamedAttrList attrs;
   attrs.set("kind", builder.getStringAttr(kind));
   if (sourceEvent) {
-    if (Attribute id = sourceEvent->getAttr("bosc_ame.origin_id"))
+    if (Attribute id = sourceEvent->getAttr("contract.origin_id"))
       attrs.set("origin_id", id);
-    if (Attribute eventKind = sourceEvent->getAttr("bosc_ame.event_kind"))
-      attrs.set("event_kind", eventKind);
   }
+  attrs.set("boundary",
+            builder.getStringAttr(kind == "store" && destination
+                                      ? classifyStoreDestination(destination)
+                                      : "external_ddr"));
   attrs.set("logical_shape",
             builder.getDenseI64ArrayAttr(logicalType.getShape()));
-  SmallVector<int64_t> validShape(logicalType.getShape());
-  for (auto [i, extent] : llvm::enumerate(mask))
-    validShape[i] = getConstantIntValue(extent).value_or(ShapedType::kDynamic);
-  attrs.set("valid_shape", builder.getDenseI64ArrayAttr(validShape));
-  attrs.set("masked", builder.getBoolAttr(!mask.empty()));
-  if (kind == "store" && destination)
-    attrs.set("destination",
-              builder.getStringAttr(classifyStoreDestination(destination)));
+  NamedAttrList maskAttrs;
+  maskAttrs.set("kind",
+                builder.getStringAttr(mask.empty() ? "none" : "rectangular"));
+  if (!mask.empty()) {
+    SmallVector<int64_t> validShape(logicalType.getShape());
+    for (auto [i, extent] : llvm::enumerate(mask))
+      validShape[i] =
+          getConstantIntValue(extent).value_or(ShapedType::kDynamic);
+    maskAttrs.set("valid_shape", builder.getDenseI64ArrayAttr(validShape));
+  }
+  attrs.set("mask", maskAttrs.getDictionary(builder.getContext()));
   if (other)
     if (auto constant = other.getDefiningOp<arith::ConstantOp>())
       attrs.set("other", constant.getValue());
   return attrs.getDictionary(builder.getContext());
 }
 
+static IntegerAttr getSnapshotAlignment(Operation *op, Builder &builder) {
+  auto module = op->getParentOfType<ModuleOp>();
+  auto abi = module->getAttrOfType<DictionaryAttr>("contract.abi");
+  if (abi)
+    if (auto alignment = abi.getAs<IntegerAttr>("args_aligned_bytes"))
+      return builder.getI64IntegerAttr(alignment.getInt());
+  return {};
+}
+
 struct LoadConverter : public OpConversionPattern<tts::LoadOp> {
-  bool enableBOSCAME;
+  bool emitContract;
 
 private:
   bool enableTensorFirstVectorCpu;
 
   LogicalResult
-  rewriteBOSCAMELogicalLoad(tts::LoadOp op, Value ptr,
-                            ConversionPatternRewriter &rewriter) const {
+  rewriteContractLogicalLoad(tts::LoadOp op, Value ptr,
+                             ConversionPatternRewriter &rewriter) const {
     auto tensorType = cast<RankedTensorType>(op.getType());
+    if (op.hasMask()) {
+      auto other = op.getOther()
+                       ? op.getOther().getDefiningOp<arith::ConstantOp>()
+                       : arith::ConstantOp();
+      if (!other || other.getType() != tensorType.getElementType())
+        return op.emitError("neutral contract masked load requires a scalar "
+                            "constant other in contract v1");
+    }
     if (!tensorType.hasStaticShape() || getWraparoundCast(ptr))
       return op.emitError(
-          "BOSCAME load requires a static rectangular DDR view; "
+          "neutral contract load requires a static rectangular DDR view; "
           "split/wrapping pointers are unsupported");
     auto ranked =
         ensureRankedMemRef(ptr, tensorType.getRank(),
                            tensorType.getElementType(), op.getLoc(), rewriter);
     if (failed(ranked))
-      return op.emitError("BOSCAME load requires a ranked DDR view");
+      return op.emitError("neutral contract load requires a ranked DDR view");
     ptr = *ranked;
     SmallVector<int64_t> strides;
     int64_t offset;
@@ -1825,33 +1835,6 @@ private:
           return ShapedType::isDynamic(stride) || stride <= 0;
         }))
       strides.clear();
-
-    // A dense, unmasked i8 load from an external rank-2 DDR view is already a
-    // legal AME A/B operand.  Keep it as a logical tensor view so placement
-    // can choose DDR -> TR at the consumer.  The old snapshot path remains
-    // the fallback for masks, `other`, compiler-owned allocations, dynamic
-    // layouts and all non-i8 values.  Restricting this fast path to i8 also
-    // keeps ordinary f32/i32 loads on the established bufferization path.
-    auto ptrMemref = dyn_cast<MemRefType>(ptr.getType());
-    bool directLogical =
-        !op.hasMask() && !op.getOther() && tensorType.getRank() == 2 &&
-        tensorType.getElementType().isInteger(8) && ptrMemref &&
-        ptrMemref.hasStaticShape() && !strides.empty() &&
-        classifyStoreDestination(ptr) == "external_ddr";
-    if (directLogical) {
-      auto logical = rewriter.create<bufferization::ToTensorOp>(
-          op.getLoc(), tensorType, ptr, true /*restrict*/, false /*writable*/);
-      logical->setAttr("bosc_ame.logical",
-                       memoryProvenance(rewriter, "load", tensorType,
-                                        /*mask=*/{}, /*destination=*/{},
-                                        op.getOther(), op));
-      if (Attribute id = op->getAttr("bosc_ame.origin_id"))
-        logical->setAttr("bosc_ame.origin_id", id);
-      if (Attribute eventKind = op->getAttr("bosc_ame.event_kind"))
-        logical->setAttr("bosc_ame.event_kind", eventKind);
-      rewriter.replaceOp(op, logical.getResult());
-      return success();
-    }
 
     // Preserve the physical contiguous axis, not the DDR pitch. A snapshot
     // owns exactly one logical tile, including padding for a masked load.
@@ -1864,17 +1847,17 @@ private:
         rowMajor = true;
       else if (strides[0] != 1 || strides[1] < tensorType.getDimSize(0))
         return op.emitError(
-            "BOSCAME load requires a non-overlapping rectangular "
+            "neutral contract load requires a non-overlapping rectangular "
             "layout with a static unit-stride axis");
     } else {
       return op.emitError(
-          "BOSCAME load snapshot requires a rank-one or rank-two "
+          "neutral contract load snapshot requires a rank-one or rank-two "
           "rectangular layout with a static unit-stride axis");
     }
     int64_t elements = 1;
     for (int64_t dim : tensorType.getShape()) {
       if (dim <= 0 || llvm::MulOverflow(elements, dim, elements))
-        return op.emitError("BOSCAME load snapshot size overflows");
+        return op.emitError("neutral contract load snapshot size overflows");
     }
     Value snapshot;
     memref::AllocOp alloc;
@@ -1882,7 +1865,7 @@ private:
       alloc = rewriter.create<memref::AllocOp>(
           op.getLoc(),
           MemRefType::get(tensorType.getShape(), tensorType.getElementType()),
-          rewriter.getI64IntegerAttr(64));
+          getSnapshotAlignment(op, rewriter));
       snapshot = alloc;
     } else {
       // LLVM allocations need identity layouts. Represent column-major B as
@@ -1893,17 +1876,25 @@ private:
           StridedLayoutAttr::get(rewriter.getContext(), 0, compactStrides));
       alloc = rewriter.create<memref::AllocOp>(
           op.getLoc(), MemRefType::get({elements}, tensorType.getElementType()),
-          rewriter.getI64IntegerAttr(64));
+          getSnapshotAlignment(op, rewriter));
       snapshot = rewriter.create<memref::ReinterpretCastOp>(
           op.getLoc(), bufferType, alloc, 0, tensorType.getShape(),
           compactStrides);
     }
-    alloc->setAttr("bosc_ame.logical_shape",
-                   rewriter.getDenseI64ArrayAttr(tensorType.getShape()));
+    alloc->setAttr(
+        "contract.buffer",
+        rewriter.getDictionaryAttr(
+            {rewriter.getNamedAttr("role", rewriter.getStringAttr("tile")),
+             rewriter.getNamedAttr("kind", rewriter.getStringAttr("temporary")),
+             rewriter.getNamedAttr(
+                 "logical_shape",
+                 rewriter.getDenseI64ArrayAttr(tensorType.getShape()))}));
     if (op.hasMask() && op.getOther()) {
       auto fill = rewriter.create<linalg::FillOp>(
           op.getLoc(), ValueRange{op.getOther()}, ValueRange{snapshot});
-      fill->setAttr("bosc_ame.padding", rewriter.getUnitAttr());
+      fill->setAttr("contract.fill",
+                    rewriter.getDictionaryAttr({rewriter.getNamedAttr(
+                        "padding", rewriter.getBoolAttr(true))}));
     }
     SmallVector<OpFoldResult> mask =
         op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{};
@@ -1917,7 +1908,7 @@ private:
     }
     auto copy =
         rewriter.create<memref::CopyOp>(op.getLoc(), source, destination);
-    copy->setAttr("bosc_ame.memory",
+    copy->setAttr("contract.access",
                   memoryProvenance(rewriter, "load", tensorType, mask,
                                    /*destination=*/{}, op.getOther(), op));
     Value tensor = rewriter.create<bufferization::ToTensorOp>(
@@ -2689,7 +2680,7 @@ public:
                 bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
                 MLIRContext *context)
       : OpConversionPattern<tts::LoadOp>(typeConverter, context),
-        enableBOSCAME(config.enableBOSCAME),
+        emitContract(config.emitContract),
         enableTensorFirstVectorCpu(enableTensorFirstVectorCpu) {}
 
   LogicalResult
@@ -2698,9 +2689,9 @@ public:
     auto originalPtr = op.getPtr();
     if (auto gatherScatterPtr =
             originalPtr.getDefiningOp<tts::MakeGatherScatterTensorPtrOp>()) {
-      if (enableBOSCAME)
-        return op.emitError(
-            "BOSCAME gather/scatter load is unsupported; cannot bypass DMA");
+      if (emitContract)
+        return op.emitError("neutral contract gather/scatter load is "
+                            "unsupported in contract v1");
       FailureOr<Value> memRefPtr = materializeGatherScatterBaseMemRef(
           gatherScatterPtr, op.getLoc(), rewriter);
       if (failed(memRefPtr)) {
@@ -2729,8 +2720,8 @@ public:
     }
 
     LogicalResult result = failure();
-    if (enableBOSCAME) {
-      result = rewriteBOSCAMELogicalLoad(op, ptr, rewriter);
+    if (emitContract) {
+      result = rewriteContractLogicalLoad(op, ptr, rewriter);
     } else if (isTensorFirstFastPathCandidate(op, ptr)) {
       result = op.hasMask() ? rewriteTensorFirstMaskedLoad(op, ptr, rewriter)
                             : rewriteTensorFirstUnmaskedLoad(op, ptr, rewriter);
@@ -2748,7 +2739,7 @@ public:
 };
 
 struct StoreConverter : public OpConversionPattern<tts::StoreOp> {
-  bool enableBOSCAME;
+  bool emitContract;
 
 private:
   bool enableTensorFirstVectorCpu;
@@ -3039,7 +3030,7 @@ public:
                  bool enableTensorFirstVectorCpu, TritonLoweringConfig config,
                  MLIRContext *context)
       : OpConversionPattern<tts::StoreOp>(typeConverter, context),
-        enableBOSCAME(config.enableBOSCAME),
+        emitContract(config.emitContract),
         enableTensorFirstVectorCpu(enableTensorFirstVectorCpu) {}
 
   LogicalResult
@@ -3050,9 +3041,9 @@ public:
     auto originalPtr = op.getPtr();
     if (auto gatherScatterPtr =
             originalPtr.getDefiningOp<tts::MakeGatherScatterTensorPtrOp>()) {
-      if (enableBOSCAME)
-        return op.emitError(
-            "BOSCAME gather/scatter store is unsupported; cannot bypass DMA");
+      if (emitContract)
+        return op.emitError("neutral contract gather/scatter store is "
+                            "unsupported in contract v1");
       FailureOr<Value> memRefPtr = materializeGatherScatterBaseMemRef(
           gatherScatterPtr, op.getLoc(), rewriter);
       if (failed(memRefPtr)) {
@@ -3081,19 +3072,21 @@ public:
       ptr = *materialized;
     }
 
-    if (enableBOSCAME) {
+    if (emitContract) {
       auto tensorType = cast<RankedTensorType>(adaptor.getValue().getType());
       if (!tensorType.hasStaticShape() || getWraparoundCast(ptr))
-        return op.emitError("BOSCAME store requires a static rectangular DDR "
-                            "view; split/wrapping pointers are unsupported");
+        return op.emitError(
+            "neutral contract store requires a static rectangular DDR "
+            "view; split/wrapping pointers are unsupported");
       auto ranked =
           ensureRankedMemRef(ptr, tensorType.getRank(),
                              tensorType.getElementType(), loc, rewriter);
       if (failed(ranked))
-        return op.emitError("BOSCAME store requires a ranked DDR view");
+        return op.emitError(
+            "neutral contract store requires a ranked DDR view");
       ptr = *ranked;
       // The bridge exposes the ordinary logical producer. Bufferization
-      // resolves it before the backend chooses a DMA/SPM staging plan.
+      // resolves it before the independent planner chooses a physical route.
       auto bufferType =
           MemRefType::get(tensorType.getShape(), tensorType.getElementType());
       bufferization::BufferizationOptions options;
@@ -3115,7 +3108,7 @@ public:
             getSubview(tensorType.getRank(), mask, ptr, loc, rewriter);
       }
       auto copy = rewriter.create<memref::CopyOp>(loc, source, destination);
-      copy->setAttr("bosc_ame.memory",
+      copy->setAttr("contract.access",
                     memoryProvenance(rewriter, "store", tensorType, mask, ptr,
                                      /*other=*/{}, op));
       rewriter.eraseOp(op);

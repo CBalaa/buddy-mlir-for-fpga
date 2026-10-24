@@ -1,6 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: if_lineage = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
 module {
   tt.func public @if_lineage(
       %condition: i1, %lhs: !tt.ptr<f32>, %rhs: !tt.ptr<f32>,
@@ -24,10 +25,3 @@ module {
     tt.return
   }
 }
-
-// CHECK: bosc_ame.compute_graph_complete = false
-// CHECK: bosc_ame.source_lineage_complete = false
-// CHECK: bosc_ame.source_load_origin_ids = array<i64: 0, 1>
-// CHECK: kind = "store"
-// CHECK-SAME: origin_id = 2 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 0, 1>

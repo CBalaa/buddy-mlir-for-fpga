@@ -1,6 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: hidden_memory_effect = reject: kernel contract V25: generic requires one pure arithmetic operation
 module {
   memref.global "private" @side_effect : memref<16xf32> = uninitialized
 
@@ -19,7 +20,3 @@ module {
     return
   }
 }
-
-// CHECK: func.func @hidden_memory_effect
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false

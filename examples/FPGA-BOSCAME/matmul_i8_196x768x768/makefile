@@ -2,10 +2,11 @@
 #
 #     kernels.py (Triton)                      [make ttir]
 #       -> kernel.ttir
-#     kernel.ttir --triton-to-linalg-experimental=boscame=true
-#       -> kernel.frontend.mlir -> explicit one-shot bufferization
-#       -> kernel.bufferized.mlir --linalg-to-boscame       [make boscame]
-#       -> kernel.boscame.mlir                 (BOSCAME dialect: analysis/plan/emit)
+#     kernel.ttir --triton-to-linalg-experimental=contract=true
+#       -> kernel.frontend.mlir (neutral buffer contract)
+#       -> kernel.bufferized.mlir --bosc-ame-plan
+#       -> kernel.planned.mlir --bosc-ame-emit             [make boscame]
+#       -> kernel.boscame.mlir
 #     --lower-bosc-ame + --buddy-to-llvmir     [make llvm]
 #       -> kernel.llvm.mlir + kernel.ll
 #     llc -> AME fixed-register/fence post     [make asm]
@@ -94,11 +95,10 @@ V_DIR := $(OUT)$(if $(VARIANT),/$(VARIANT))
 V_NAME := $(NAME)$(if $(VARIANT),.$(VARIANT),)
 V_CFLAGS := $(if $(filter debug,$(VAR)),-DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=16) \
   $(if $(filter boardcheck,$(VAR)),-DMATMUL_I8_BOARD_CHECK=1 -DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=196)
-# The BOSCAME tile contract is saved on the module and inherited by
-# --linalg-to-boscame; the numbers must match kernels.py (build.py derives the
-# ABI from the same constants) and the reference example
-# ../matmul_i8_128x1024x128.
-V_AME := boscame=true dma-abi=args_aligned64_nonalias bm=32 bn=128 bk=128
+# The frontend records target-independent dot shapes and caller ABI facts.
+# The planner derives AME tiles from those shapes; kernels.py and build.py
+# supply the same problem dimensions and launch grid.
+V_AME := contract=true caller-contract=args_aligned64_nonalias
 # ABI bridge: three typed unranked descriptors + six grid scalars.
 ADAPTER := experimental-boscame
 ADAPTER_C := $(SCRATCH)/adapter.c
@@ -137,10 +137,9 @@ $(OUT)/kernel.ttir: $(ROOT)/kernels.py $(ROOT)/build.py $(BUILD_MAKEFILE) | $(OU
 ttir: $(OUT)/kernel.ttir
 
 # --- 2. TTIR -> BOSCAME -------------------------------------------------
-# The pass analyzes the buffer-form Linalg and its memory facts, plans direct
-# DDR or SPM/DMA placement, then emits the BOSCAME DMA/SPM/AME operations.
-# The module carries the explicit aligned/nonalias DMA ABI contract and the
-# bm/bn/bk tile contract saved for the standalone backend.
+# The frontend emits buffer-form Linalg with neutral contract facts. Separate
+# plan and emit stages choose DDR/SPM routes and expand the target operations.
+# contract.abi records the caller's aligned, nonalias entry arguments.
 $(V_DIR)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(V_DIR)
 	@set -eu; \
 	grid="$$($(PYTHON) -B $(ROOT)/build.py --launch-grid)"; \
@@ -148,10 +147,13 @@ $(V_DIR)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $
 	$(BUDDY_OPT) $< --triton-to-linalg-experimental="$(V_AME) launch-grid=$$grid" -o $@
 
 $(V_DIR)/kernel.bufferized.mlir: $(V_DIR)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
-	$(BUDDY_OPT) $< --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" --canonicalize --cse -o $@
+	$(BUDDY_OPT) $< --kernel-contract-verify -o $@
 
-$(V_DIR)/kernel.boscame.mlir: $(V_DIR)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
-	$(BUDDY_OPT) $< --linalg-to-boscame -o $@
+$(V_DIR)/kernel.planned.mlir: $(V_DIR)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --bosc-ame-plan --bosc-ame-plan-verify -o $@
+
+$(V_DIR)/kernel.boscame.mlir: $(V_DIR)/kernel.planned.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --bosc-ame-emit -o $@
 
 boscame: $(V_DIR)/kernel.boscame.mlir
 

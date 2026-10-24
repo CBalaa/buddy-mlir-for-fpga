@@ -1,5 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
-"""Bound memory-order analysis even when it produces no dependency edges."""
+"""Large write/read chains retain complete content-order proofs without truncation."""
 
 import re
 import subprocess
@@ -23,44 +23,51 @@ def check_bounds(work, name, operations, expected_edges):
     path = work / f"{name}.mlir"
     path.write_text(source)
     result = subprocess.run(
-        [buddy_opt_path(), str(path), "--linalg-to-boscame=plan-report=true"],
+        [
+            buddy_opt_path(),
+            str(path),
+            "--kernel-contract-annotate",
+            "--kernel-contract-verify",
+        ],
         capture_output=True,
         text=True,
         check=True,
     )
-    header = re.search(
-        r"memory-dependencies: count=(\d+) scope=lexical status=(\w+)",
-        result.stderr,
-    )
-    assert header, result.stderr
-    assert header.groups() == (str(expected_edges), "bounded"), header.group(0)
-    edges = re.findall(
-        r"memory-dependency\[(\d+)\]: function=@bounded "
-        r"accesses=\[(\d+),(\d+)\] kind=(\S+)",
-        result.stderr,
-    )
+    assert "contract.compute_graph = {complete = true" in result.stdout
+    tasks = re.findall(r"contract\.task = \{([^{}]*)\}", result.stdout)
+    assert len(tasks) == len(operations), (len(tasks), len(operations))
+    edges = []
+    for index, task in enumerate(tasks):
+        assert f"id = {index} : i64" in task, task
+        predecessors = re.search(
+            r"predecessors = array<i64(?:: ([^>]+))?>", task
+        )
+        actual = (
+            [int(value) for value in predecessors[1].split(",")]
+            if predecessors[1]
+            else []
+        )
+        # A WAW chain orders all stores transitively. Read/read needs no edge.
+        assert actual == ([index - 1] if expected_edges and index else []), task
+        edges.extend((predecessor, index) for predecessor in actual)
     assert len(edges) == expected_edges, (len(edges), expected_edges)
-    for index, (edge_index, before, after, kind) in enumerate(edges):
-        assert int(edge_index) == index
-        assert 0 <= int(before) < int(after) < len(operations), (before, after)
-        assert kind == "WAW", kind
 
 
 work = Path(sys.argv[1])
 work.mkdir(parents=True, exist_ok=True)
 
-# 130 stores produce more than 8192 conflicts: retain a deterministic bounded
-# prefix and expose that full coverage has not been established.
+# The retired pairwise report truncated more than 8192 conflicts. The neutral
+# graph keeps the equivalent transitive WAW chain and verifies every task.
 check_bounds(
     work,
     "stores",
     ["    memref.store %value, %root[%c0] : memref<16xf32>"] * 130,
-    8192,
+    129,
 )
-print("memory dependency edge limit: bounded at 8192")
+print("complete memory dependency stress: 130 stores, 129 WAW edges")
 
-# 365 reads have 66430 pairs. Read/read pruning must not bypass the analysis
-# work budget merely because the retained dependency set remains empty.
+# Keep the original read-only stress size (66430 pairs in the old analysis).
+# Every read must retain its captured version without false read/read hazards.
 check_bounds(
     work,
     "reads",
@@ -70,7 +77,7 @@ check_bounds(
     ],
     0,
 )
-print("memory dependency comparison limit: bounded with zero edges")
+print("complete memory dependency stress: 365 reads, zero read/read edges")
 
-# CHECK: memory dependency edge limit: bounded at 8192
-# CHECK: memory dependency comparison limit: bounded with zero edges
+# CHECK: complete memory dependency stress: 130 stores, 129 WAW edges
+# CHECK: complete memory dependency stress: 365 reads, zero read/read edges

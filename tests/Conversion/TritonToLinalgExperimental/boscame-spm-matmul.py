@@ -10,7 +10,23 @@ import numpy as np
 TOOLS = Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools"
 sys.path.insert(0, str(TOOLS))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
+from boscame_check import buddy_opt_path  # noqa: E402
+
+
+def physical_pipeline():
+    # Explicitly placed buffer-form IR uses the backend compatibility entry.
+    # It cannot cross the neutral frontend contract boundary.
+    return [
+        "--triton-to-linalg-experimental=structured-ldst-mode=tensor-first-vector-cpu",
+        "--empty-tensor-to-alloc-tensor",
+        "--one-shot-bufferize=bufferize-function-boundaries=true buffer-alignment=64",
+        "--canonicalize",
+        "--cse",
+        "--linalg-to-boscame=enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias",
+        "--promote-buffers-to-stack",
+        "--canonicalize",
+        "--cse",
+    ]
 
 
 def source_for(m, n, k, row_major_b, spm_c):
@@ -99,7 +115,7 @@ def floating_source(row_major_b):
 
 
 def check_floating(work, opt, rng):
-    mode = experimental_pipeline()
+    mode = physical_pipeline()
     for row_major_b in (True, False):
         name = "floating-row-b" if row_major_b else "floating-column-b"
         source = work / (name + ".ttir")
@@ -238,7 +254,7 @@ def main():
             [
                 opt,
                 str(original),
-                *experimental_pipeline(),
+                *physical_pipeline(),
                 "-o",
                 str(lowered),
             ],
@@ -247,8 +263,18 @@ def main():
         )
         if row_b:
             assert result.returncode != 0
-            assert "unsupported staged B layout" in result.stderr
+            assert (
+                "AME tile addresses or parent pitch are not legal"
+                in result.stderr
+            )
             print("PASS row-b: reject unsupported physical B layout")
+            continue
+        if name == "partial-k":
+            assert result.returncode != 0
+            assert "K divisible by 64" in result.stderr
+            print(
+                "PASS partial-k: retain source and diagnose v1 frontend padding requirement"
+            )
             continue
         assert result.returncode == 0, result.stderr
         text = lowered.read_text()
@@ -326,8 +352,9 @@ def main():
                 assert machine.spm[1][end : end + 256] == bytes([0x5A]) * 256
         print(f"PASS {name}: exact signed i8/i32 wrap, initial C and guards")
 
-    # Direct AME partial tiles need the exact 464-byte physical span, with no
-    # vector packing or widening to a rounded 512-byte backing allocation.
+    # Retain the exact 464-byte physical span fixture. V1 requires initialized
+    # logical input content; an undersized physical backing must fail the
+    # address proof before that content limitation is considered.
     source, _, _ = source_for(4, 16, 80, False, False)
     source = "\n".join(
         line
@@ -342,24 +369,26 @@ def main():
         [
             opt,
             str(negative),
-            *experimental_pipeline(),
+            *physical_pipeline(),
         ],
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
-    assert "vector.load" not in result.stdout
-    assert "memref<480xi8" in result.stdout
+    assert result.returncode != 0
+    assert (
+        "read or partial inheritance has no initialized content version"
+        in result.stderr
+    )
     negative.write_text(source.replace("memref<480xi8", "memref<448xi8"))
     result = subprocess.run(
-        [opt, str(negative), *experimental_pipeline()],
+        [opt, str(negative), *physical_pipeline()],
         capture_output=True,
         text=True,
     )
     assert result.returncode != 0
     assert "SPM" in result.stderr
     print(
-        "PASS bounded vector packing: exact partial tiles and short backing rejection"
+        "PASS bounded vector packing: v1 content boundary and short backing rejection"
     )
 
     source, _, _ = source_for(16, 16, 64, False, False)
@@ -379,7 +408,7 @@ def main():
         [
             opt,
             str(negative),
-            *experimental_pipeline(),
+            *physical_pipeline(),
         ],
         capture_output=True,
         text=True,

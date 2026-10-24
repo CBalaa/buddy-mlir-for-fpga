@@ -1,20 +1,30 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: caller = incomplete
+// CONTRACT-CASE: custom_space_entry = reject: kernel contract V3/V14: target memory spaces are forbidden in the neutral contract
+// CONTRACT-CASE: entry = complete
+// CONTRACT-CASE: fresh_local_helper = complete
+// CONTRACT-CASE: private_helper = reject: kernel contract V23/V24: v1 does not support reading an external region after its terminal write
+// CONTRACT-CASE: public_helper = complete
+// CONTRACT-CASE: readonly_helper = complete
+// CONTRACT-CASE: tensor_bridge_helper = complete
+// CONTRACT-CASE: tensor_helper = complete
+// CONTRACT-CASE: unranked_helper = complete
 // The module entry ABI does not promise that a helper's distinct formals are
 // disjoint. Preserve known same-root edges without inventing alias lineage.
 module {
   func.func private @private_helper(%src: memref<4xf32>,
       %left: memref<4xf32>, %right: memref<4xf32>, %dst: memref<4xf32>) {
     memref.copy %src, %left {
-      bosc_ame.memory = {kind = "load", origin_id = 10 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 10 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %right, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 20 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 20 : i64}
     } : memref<4xf32> to memref<4xf32>
     // This read has a definite same-root writer regardless of aliases.
     memref.copy %left, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 30 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 30 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -22,10 +32,10 @@ module {
   func.func @public_helper(%src: memref<4xf32>,
       %left: memref<4xf32>, %right: memref<4xf32>, %dst: memref<4xf32>) {
     memref.copy %src, %left {
-      bosc_ame.memory = {kind = "load", origin_id = 40 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 40 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %right, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 50 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 50 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -35,10 +45,10 @@ module {
     %left_view = memref.cast %left : memref<*xf32> to memref<4xf32>
     %right_view = memref.cast %right : memref<*xf32> to memref<4xf32>
     memref.copy %src, %left_view {
-      bosc_ame.memory = {kind = "load", origin_id = 60 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 60 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %right_view, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 70 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 70 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -59,7 +69,7 @@ module {
   // disjoint, so existing complete entry graphs remain complete.
   func.func @entry(%src: memref<4xf32>, %dst: memref<4xf32>) {
     memref.copy %src, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 80 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 80 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -67,10 +77,10 @@ module {
   func.func private @fresh_local_helper(%src: memref<4xf32>) {
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %src, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 90 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 90 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %buffer, %src {
-      bosc_ame.memory = {kind = "store", origin_id = 100 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 100 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -113,10 +123,10 @@ module {
       %right: memref<4xf32>) -> f32 {
     %c0 = arith.constant 0 : index
     %lhs = memref.load %left[%c0] {
-      bosc_ame.memory = {kind = "load", origin_id = 110 : i64}
+      contract.provenance = {origin_id = 110 : i64}
     } : memref<4xf32>
     %rhs = memref.load %right[%c0] {
-      bosc_ame.memory = {kind = "load", origin_id = 120 : i64}
+      contract.provenance = {origin_id = 120 : i64}
     } : memref<4xf32>
     %sum = arith.addf %lhs, %rhs : f32
     return %sum : f32
@@ -126,49 +136,8 @@ module {
   func.func @custom_space_entry(%src: memref<4xf32, 3>,
       %dst: memref<4xf32, 3>) {
     memref.copy %src, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 130 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 130 : i64}
     } : memref<4xf32, 3> to memref<4xf32, 3>
     return
   }
 }
-
-// CHECK-LABEL: func.func private @private_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 20 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 30 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 10>
-// CHECK-LABEL: func.func @public_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 50 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64>
-// CHECK-LABEL: func.func private @unranked_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 70 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64>
-// CHECK-LABEL: func.func @caller
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK-LABEL: func.func @entry
-// CHECK-SAME: bosc_ame.compute_graph_complete = true
-// CHECK-SAME: bosc_ame.source_lineage_complete = true
-// CHECK-LABEL: func.func private @fresh_local_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = true
-// CHECK-SAME: bosc_ame.source_lineage_complete = true
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 100 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 90>
-// CHECK-LABEL: func.func private @tensor_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = true
-// CHECK-SAME: bosc_ame.source_lineage_complete = true
-// CHECK-LABEL: func.func private @tensor_bridge_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK-LABEL: func.func private @readonly_helper
-// CHECK-SAME: bosc_ame.compute_graph_complete = true
-// CHECK-SAME: bosc_ame.source_lineage_complete = true
-// CHECK-LABEL: func.func @custom_space_entry
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false

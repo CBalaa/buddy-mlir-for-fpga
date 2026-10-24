@@ -1,8 +1,11 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.default %t.reported
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1
+
+// Retain the historical source case as a precise v1 compatibility boundary.
+// A single private scalar store cannot initialize a larger root. New
+// task/version, alias and source-lineage checks live in KernelContract and
+// PlanRoutes tests;
+// the removed legacy inventory/report must not imply those proofs succeeded.
+// V1: v1 private scalar stores require rank-zero storage
 
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   memref.global "private" @inventory_global : memref<8xf32> = uninitialized
@@ -54,13 +57,3 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
 
 // Transfer requirements stay in their own table; this inventory deduplicates
 // descriptors observed by memory effects and makes no lifetime claim.
-// PLAN: buffer[0]:
-// PLAN: buffer-inventory: count=7 scope=post-planning-observed-memref-values
-// PLAN: buffer-inventory[0]: function=@inventory value={{.*}} type=memref<16xf32> memory-space=default root=known root-id={{[0-9]+}} root-capacity-bytes=<unknown> views=[] shape=[16] strides=[1] effective-byte-offset-bytes=0 accesses=[1] logical-values=[10] tasks=[0] transfers=[0] physical-lifetime=unknown
-// PLAN: buffer-inventory[1]: function=@inventory value={{.*}} type=memref<16xf32> memory-space=default root=known root-id={{[0-9]+}} root-capacity-bytes=<unknown> views=[] shape=[16] strides=[1] effective-byte-offset-bytes=0 accesses=[2] logical-values=[11] tasks=[0] transfers=[1] physical-lifetime=unknown
-// PLAN: buffer-inventory[2]: function=@inventory value={{.*}} type=memref<4xf32> memory-space=default root=known root-id=[[SCRATCH_ROOT:[0-9]+]] root-capacity-bytes=16 views=[] shape=[4] strides=[1] effective-byte-offset-bytes=0 accesses=[3, 4, 5, 6, 7] logical-values=[] tasks=[] transfers=[] physical-lifetime=unknown
-// PLAN: buffer-inventory[3]: function=@inventory value={{.*}} type=memref<2xf32, strided<[1]>> memory-space=default root=known root-id=[[SCRATCH_ROOT]] root-capacity-bytes=16 views=[memref.subview] shape=[2] strides=[1] effective-byte-offset-bytes=0 accesses=[8] logical-values=[] tasks=[] transfers=[] physical-lifetime=unknown
-// PLAN: buffer-inventory[4]: function=@inventory value={{.*}} type=memref<16xf32> memory-space=default root=unknown root-capacity-bytes=<unknown> views=[] shape=[16] strides=[1] effective-byte-offset-bytes=0 accesses=[9, 10] logical-values=[] tasks=[] transfers=[] physical-lifetime=unknown
-// PLAN: buffer-inventory[5]: function=@inventory value={{.*}} type=memref<8xf32> memory-space=default root=known root-id={{[0-9]+}} root-capacity-bytes=32 views=[] shape=[8] strides=[1] effective-byte-offset-bytes=0 accesses=[11] logical-values=[] tasks=[] transfers=[] physical-lifetime=unknown
-// PLAN: buffer-inventory[6]: function=@inventory value={{.*}} type=memref<2xf32> memory-space=default root=known root-id={{[0-9]+}} root-capacity-bytes=8 views=[] shape=[2] strides=[1] effective-byte-offset-bytes=0 accesses=[12, 13] logical-values=[] tasks=[] transfers=[] physical-lifetime=unknown
-// PLAN-NOT: buffer-inventory[7]:

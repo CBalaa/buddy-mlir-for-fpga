@@ -39,7 +39,7 @@ MODULE = """module {
 
 OPTIONS = (
     "enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias "
-    "target=nr-fpga bm=128 bn=128 bk=128"
+    "target=nr-fpga"
 )
 
 
@@ -56,22 +56,65 @@ def lower(opt, module, plan_report):
 def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
-    module = work / "ame-tile-plan.mlir"
-    module.write_text(MODULE)
-
+    original = work / "ame-tile-plan-original.mlir"
+    original.write_text(MODULE)
     opt = Path(buddy_opt_path())
+    rejected = lower(opt, original, plan_report=False)
+    assert rejected.returncode != 0
+    assert "no initialized content version" in rejected.stderr, rejected.stderr
+
+    # A v1 frontend must tile M and pad K before the backend boundary. Fill
+    # every physical input explicitly; an SPM descriptor alone is not content.
+    supported = MODULE
+    for old, new in (
+        ("65x160", "64x192"),
+        ("160x80", "192x128"),
+        ("65x80", "64x128"),
+        ("[65, 160]", "[64, 192]"),
+        ("[160, 80]", "[192, 128]"),
+        ("[65, 80]", "[64, 128]"),
+        ("[160, 1]", "[192, 1]"),
+        ("[1, 160]", "[1, 192]"),
+        ("[80, 1]", "[128, 1]"),
+    ):
+        supported = supported.replace(old, new)
+    supported = supported.replace("10432xi8", "12288xi8")
+    supported = supported.replace("12800xi8", "24576xi8")
+    supported = supported.replace("5216xi32", "8192xi32")
+    supported = supported.replace("offset = 10496", "offset = 12288")
+    marker = "    linalg.matmul"
+    initialization = """    %one = arith.constant 1 : i8
+    %negative = arith.constant -1 : i8
+    %seven = arith.constant 7 : i32
+    linalg.fill ins(%one : i8) outs(%a : memref<64x192xi8, strided<[192, 1]>, #bosc_ame.spm<0>>)
+    linalg.fill ins(%negative : i8) outs(%b : memref<192x128xi8, strided<[1, 192]>, #bosc_ame.spm<1>>)
+    linalg.fill ins(%seven : i32) outs(%c : memref<64x128xi32, strided<[128, 1]>, #bosc_ame.spm<0>>)
+"""
+    supported = supported.replace(marker, initialization + marker)
+    module = work / "ame-tile-plan.mlir"
+    module.write_text(supported)
     plain = lower(opt, module, plan_report=False)
     assert plain.returncode == 0, plain.stderr
     assert not plain.stderr, plain.stderr
-
     reported = lower(opt, module, plan_report=True)
     assert reported.returncode == 0, reported.stderr
     assert plain.stdout == reported.stdout
-    expected = (
-        "ame-tile-plan: m=65 n=80 k=160 tile=[64,64,64] "
-        "tile-counts=[2,2,3] tail=[1,16,32]"
+    assert "subtiles = {k = 3 : i64, n = 2 : i64}" in reported.stderr
+    assert (
+        "tile = {k = 64 : i64, m = 64 : i64, n = 64 : i64}" in reported.stderr
     )
-    assert expected in reported.stderr, reported.stderr
+    assert (
+        'a = {bank = 0 : i64, bytes = 12288 : i64, level = "spm"'
+        in reported.stderr
+    )
+    assert (
+        'b = {bank = 1 : i64, bytes = 24576 : i64, level = "spm"'
+        in reported.stderr
+    )
+    assert (
+        'accumulator = {bank = 0 : i64, bytes = 32768 : i64, level = "spm", offset = 12288'
+        in reported.stderr
+    )
 
     # CHECK: PASS normalized AME tile plan and report-only IR stability
     print("PASS normalized AME tile plan and report-only IR stability")

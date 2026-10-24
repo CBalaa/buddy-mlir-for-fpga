@@ -1,6 +1,7 @@
 # RUN: %PYTHON %s %t
 """Private i32 product fusion is independent of the storage route."""
 
+import re
 import struct
 import subprocess
 import sys
@@ -149,7 +150,7 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     opt = buddy_opt_path()
 
-    def lower(name, source):
+    def lower(name, source, diagnostic=None):
         input_path = work / (name + ".mlir")
         input_path.write_text(source)
         result = subprocess.run(
@@ -162,7 +163,11 @@ def main():
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, result.stderr
+        if diagnostic is None:
+            assert result.returncode == 0, result.stderr
+        else:
+            assert result.returncode != 0
+            assert diagnostic in result.stderr, result.stderr
         return result
 
     for name, source in (
@@ -213,108 +218,47 @@ def main():
         "partial_overlap": alias_source(64),
     }
     for name, source in rejected.items():
-        result = lower(name, source)
-        assert "arith.addi" in result.stdout, (name, result.stdout)
-        assert "bosc_ame.tile.mma" in result.stdout
+        diagnostic = {
+            "extra_consumer": "scalar load must access planned host rank-zero storage",
+            "effect": "call may clobber live SPM workspace",
+        }.get(name)
+        result = lower(name, source, diagnostic)
+        if diagnostic is None:
+            assert "arith.addi" in result.stdout, (name, result.stdout)
+            assert "bosc_ame.tile.mma" in result.stdout
 
-    graph = lower("complete_graph", graph_source())
-    assert (
-        "status=complete tasks=2 dependencies=1 logical-values=5"
-        in graph.stderr
+    # Preserve the old external post-store read as a precise v1 boundary.
+    lower(
+        "original_graph",
+        graph_source(),
+        "reading an external region after its terminal write",
     )
-    assert (
-        "task[1]: op=linalg.matmul kind=ame-matmul stage=0 predecessors=[] "
-        "inputs=[10,11,12] outputs=[22] varying-axes=[0,1,2] "
-        "barrier-after=true rematerializable=false"
-    ) in graph.stderr, graph.stderr
-    assert "stage=1 predecessors=[1] inputs=[22] outputs=[23]" in graph.stderr
-    assert (
-        "logical-value[12]: producer=function-argument consumers=[1]"
-        in graph.stderr
+    graph_input = re.sub(r"    memref.copy %c, %d[^\n]*\n", "", graph_source())
+    graph_input = graph_input.replace(
+        "linalg.matmul {",
+        "linalg.matmul {bosc_ame.a_source_load_origin_ids = array<i64: 42>, "
+        "bosc_ame.a_source_lineage_complete = true, ",
     )
-    assert "logical-value[22]: producer=1 consumers=[3]" in graph.stderr
-    assert "bosc_ame.compute_graph_node_count = 2 : i64" in graph.stdout
+    graph = lower("rebuilt_graph", graph_input)
+    assert "bosc_ame.compute_id" not in graph.stdout
+    assert "bosc_ame.source_task_count = 3 : i64" in graph.stdout
+    assert 'action = "eliminated", old_id = 0 : i64' in graph.stdout
     assert (
-        "bosc_ame.source_load_origin_ids = array<i64: 41, 42, 43>"
+        'action = "retained", new_id = 0 : i64, old_id = 1 : i64'
         in graph.stdout
     )
-    assert "bosc_ame.invariant_program_axes = array<i64: 3>" in graph.stdout
-
-    # A barrier-dependent task before the matmul cannot be redirected to the
-    # later surviving task without introducing an invalid task-order edge.
-    before_matmul = graph_source()
-    for old, new in ((3, 4), (2, 3), (1, 2)):
-        before_matmul = before_matmul.replace(
-            f"bosc_ame.compute_id = {old} :", f"bosc_ame.compute_id = {new} :"
-        )
-        for attribute in ("compute_predecessors", "logical_value_users"):
-            before_matmul = before_matmul.replace(
-                f"bosc_ame.{attribute} = array<i64: {old}>",
-                f"bosc_ame.{attribute} = array<i64: {new}>",
-            ).replace(
-                f"bosc_ame.{attribute} = [array<i64: {old}>]",
-                f"bosc_ame.{attribute} = [array<i64: {new}>]",
-            )
-    before_matmul = (
-        before_matmul.replace(
-            "compute_graph_node_count = 4", "compute_graph_node_count = 5"
-        )
-        .replace(
-            "bosc_ame.logical_value_id = 12 : i64, bosc_ame.logical_value_users = array<i64: 3>",
-            "bosc_ame.logical_value_id = 12 : i64, bosc_ame.logical_value_users = array<i64: 1, 3>",
-        )
-        .replace(
-            "    linalg.matmul",
-            "    memref.copy %c, %d {"
-            + task(1, [12], [30], [0], 1)
-            + ", bosc_ame.logical_value_users = [array<i64>]} "
-            ": memref<16x16xi32> to memref<16x16xi32>\n    linalg.matmul",
-            1,
-        )
+    assert 'action = "eliminated", old_id = 2 : i64' in graph.stdout
+    assert "input_values = array<i64: 0, 1, 2>" in graph.stdout
+    assert "source_load_origin_ids = array<i64: 42>" in graph.stdout
+    # Old graph metadata is derived, including stale IDs and ordering. It may
+    # not prevent legal semantic fusion or override the actual use-def graph.
+    corrupt = graph_input.replace(
+        "bosc_ame.compute_predecessors = array<i64: 0>",
+        "bosc_ame.compute_predecessors = array<i64: 99>",
     )
-    unfused = lower("complete_graph_ordering", before_matmul)
-    assert "status=complete tasks=5 dependencies=4" in unfused.stderr
-    assert "arith.addi" in unfused.stdout
+    rebuilt = lower("legacy_metadata_rebuilt", corrupt)
+    assert rebuilt.stdout == graph.stdout
 
-    # Task IDs need not follow lexical IR order. An add predecessor whose ID
-    # exceeds the surviving matmul ID also prevents safe graph contraction.
-    later_predecessor = graph_source()
-    for old, new in ((3, 4), (2, 3)):
-        later_predecessor = later_predecessor.replace(
-            f"bosc_ame.compute_id = {old} :", f"bosc_ame.compute_id = {new} :"
-        )
-        for attribute in ("compute_predecessors", "logical_value_users"):
-            later_predecessor = later_predecessor.replace(
-                f"bosc_ame.{attribute} = array<i64: {old}>",
-                f"bosc_ame.{attribute} = array<i64: {new}>",
-            ).replace(
-                f"bosc_ame.{attribute} = [array<i64: {old}>]",
-                f"bosc_ame.{attribute} = [array<i64: {new}>]",
-            )
-    later_predecessor = (
-        later_predecessor.replace(
-            "compute_graph_node_count = 4", "compute_graph_node_count = 5"
-        )
-        .replace(
-            "bosc_ame.logical_value_id = 12 : i64, bosc_ame.logical_value_users = array<i64: 3>",
-            "bosc_ame.logical_value_id = 12 : i64, bosc_ame.logical_value_users = array<i64: 2, 3>",
-        )
-        .replace(
-            "bosc_ame.compute_predecessors = array<i64: 1>",
-            "bosc_ame.compute_predecessors = array<i64: 1, 2>",
-        )
-        .replace(
-            "    linalg.matmul",
-            "    memref.copy %c, %d {"
-            + task(2, [12], [30], [], 0)
-            + ", bosc_ame.logical_value_users = [array<i64>]} "
-            ": memref<16x16xi32> to memref<16x16xi32>\n    linalg.matmul",
-            1,
-        )
-    )
-    unfused = lower("complete_graph_later_predecessor", later_predecessor)
-    assert "status=complete tasks=5 dependencies=4" in unfused.stderr
-    assert "arith.addi" in unfused.stdout
     print(
         "PASS buffer accumulator: private fusion, swapped inputs, wrap and rejection boundaries"
     )

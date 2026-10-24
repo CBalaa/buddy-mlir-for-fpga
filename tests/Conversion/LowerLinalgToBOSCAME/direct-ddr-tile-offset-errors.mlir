@@ -1,10 +1,10 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/bn15.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga bn=15' 2>&1 | FileCheck %s --check-prefix=BN
-// RUN: not buddy-opt %t/dynamic.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga bn=16' 2>&1 | FileCheck %s --check-prefix=DYNAMIC
+// RUN: not buddy-opt %t/bn15.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga bn=15' 2>&1 | FileCheck %s --check-prefix=BN
+// RUN: not buddy-opt %t/dynamic.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=DYNAMIC
 
-// The automatic planner must diagnose an AME C tile plan whose N
-// step is not a 64-byte multiple. Otherwise the planner would silently stage
-// C through SPM/DMA, or emit a later tile at an unaligned column offset.
+// Legacy tile-size overrides are rejected: geometry belongs to the logical
+// buffer operands. The separate dynamic-offset case exercises address proofs
+// without an obsolete override.
 //--- bn15.mlir
 module {
   func.func @gemm(%a: memref<64x64xi8>,
@@ -17,10 +17,6 @@ module {
     return
   }
 }
-
-// BN: bosc_ame.dma.start
-// BN: bosc_ame.tile.load_acc {{.*}}#bosc_ame.spm<
-// BN-NOT: bosc_ame.direct_ddr
 
 // A dynamic descriptor offset is valid only when its divisibility can be
 // proved. An arbitrary i32 offset can put a later C tile at a non-cache-line
@@ -41,4 +37,5 @@ module {
   }
 }
 
-// DYNAMIC: BOSCAME DDR endpoint effective address cannot be proven 64 B aligned (descriptor offset in elements)
+// BN: legacy bm/bn/bk overrides are obsolete; geometry is taken from buffer-form Linalg operands
+// DYNAMIC: no legal direct or staging route: external operand requires aligned endpoints, complete cache lines, and a DMA-compatible physical layout

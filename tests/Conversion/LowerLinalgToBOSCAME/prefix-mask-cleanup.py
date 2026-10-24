@@ -1,14 +1,16 @@
 # RUN: %PYTHON %s buddy-opt
 """Prefix specialization prunes only private, unused mask computations."""
 
-import runpy
+import struct
 import subprocess
 import sys
 from pathlib import Path
 
-graph = runpy.run_path(
-    str(Path(__file__).with_name("buffer-placement-metadata.py"))
-)["graph"]
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[3] / "examples/FPGA-BOSCAME/tools")
+)
+from boscame_buffer_sim import Machine  # noqa: E402
+
 OPTIONS = (
     "--linalg-to-boscame=buffer-placement=true enable-spm-dma=true "
     "dma-abi=args_aligned64_nonalias "
@@ -171,79 +173,111 @@ module attributes {{bosc_ame.compute_graph_version = 1 : i32}} {{
     return module
 
 
+def check_standard_prefix(binary):
+    # The tail is expressed by executable standard IR, not a trusted target
+    # mask hint. Test in-place, separate output and a static alias descriptor.
+    for case in ("in_place", "distinct", "alias"):
+        false_value = -0.0 if case == "distinct" else 0.0
+        result = (
+            "%work"
+            if case == "in_place"
+            else "%alias"
+            if case == "alias"
+            else "%other"
+        )
+        setup = (
+            "%alias = memref.cast %work : memref<32xf32> to memref<32xf32>"
+            if case == "alias"
+            else "%other = memref.alloc() alignment = 64 : memref<32xf32>"
+            if case == "distinct"
+            else ""
+        )
+        module = f"""module {{
+  func.func @prefix(%input: memref<32xf32>, %output: memref<32xf32>) {{
+    %bound = arith.constant 16 : index
+    %zero = arith.constant {false_value} : f32
+    %work = memref.alloc() alignment = 64 : memref<32xf32>
+    memref.copy %input, %work : memref<32xf32> to memref<32xf32>
+    {setup}
+    linalg.generic {{indexing_maps = [affine_map<(i)->(i)>, affine_map<(i)->(i)>],
+      iterator_types = ["parallel"]}}
+      ins({"%alias" if case == "alias" else "%work"} : memref<32xf32>) outs({result} : memref<32xf32>) {{
+    ^bb0(%x: f32, %old: f32):
+      %lane = linalg.index 0 : index
+      %valid = arith.cmpi slt, %lane, %bound : index
+      %square = arith.mulf %x, %x : f32
+      %value = arith.select %valid, %square, %zero : f32
+      linalg.yield %value : f32
+    }}
+    memref.copy {result}, %output : memref<32xf32> to memref<32xf32>
+    return
+  }}
+}}"""
+        lowered = subprocess.run(
+            [binary, "-", OPTIONS], input=module, text=True, capture_output=True
+        )
+        assert lowered.returncode == 0, lowered.stderr
+        assert (
+            "arith.select" not in lowered.stdout
+            and "linalg." not in lowered.stdout
+        )
+        assert lowered.stdout.count('kind = "fill"') >= 1
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prefix.mlir"
+            path.write_text(lowered.stdout)
+            machine = Machine(path, "prefix")
+            for launch in range(2):
+                # An arithmetic mask would preserve NaN/Inf in these lanes.
+                # A select must store the false constant's exact zero bits.
+                values = (
+                    tuple((i - 17 + launch) / 4 for i in range(16))
+                    + (float("nan"), float("inf"), -float("inf"), -0.0) * 4
+                )
+                source_bytes = struct.pack("<32f", *values)
+                expected = struct.pack(
+                    "<32f", *(x * x for x in values[:16]), *([false_value] * 16)
+                )
+                buffers = {
+                    "%arg0": bytearray(source_bytes),
+                    "%arg1": bytearray([0xCD] * 128),
+                }
+                machine.launch(buffers)
+                assert buffers["%arg0"] == source_bytes
+                assert buffers["%arg1"] == expected, (case, launch)
+
+
 def main():
     binary = sys.argv[1]
-    for case, surviving in [
-        ("dead_local", {3}),
-        ("dead_alloca", {3}),
-        ("dead_dealloc", {3}),
-        ("condition_last", {3}),
-        ("other_consumer", {0, 1, 2, 3, 4}),
-        ("alias_consumer", {0, 1, 2, 3, 4}),
-        ("ordering_consumer", {0, 1, 2, 3, 4}),
-        ("external_mask", {0, 1, 2, 3}),
-        ("external_width", {0, 3}),
-        ("external_range", {1, 3}),
-        ("effectful_range", {1, 3}),
-        ("barrier_mask", {0, 1, 2, 3}),
-    ]:
+    for case in (
+        "dead_local",
+        "dead_alloca",
+        "dead_dealloc",
+        "condition_last",
+        "other_consumer",
+        "alias_consumer",
+        "ordering_consumer",
+        "external_mask",
+        "external_width",
+        "external_range",
+        "effectful_range",
+        "barrier_mask",
+    ):
         result = subprocess.run(
             [binary, "-", OPTIONS],
             input=source(case),
             text=True,
             capture_output=True,
-            check=False,
         )
-        assert result.returncode == 0, (case, result.stderr)
-        tasks, _, counts, _ = graph(result.stdout)
-        assert set(tasks) == surviving, (case, set(tasks), surviving)
-        assert counts == [f"{len(surviving)} : i64"], (case, counts)
+        assert result.returncode != 0, case
         assert (
-            tasks[3]["bosc_ame.compute_input_values"] == "array<i64: 10, 11>"
-        ), case
-        expected_predecessors = (
-            "array<i64: 2>" if case == "barrier_mask" else "array<i64>"
-        )
-        assert (
-            tasks[3]["bosc_ame.compute_predecessors"] == expected_predecessors
-        ), case
-        if case in {"other_consumer", "alias_consumer"}:
-            assert (
-                tasks[2]["bosc_ame.logical_value_users"] == "[array<i64: 4>]"
-            ), case
-            assert (
-                tasks[4]["bosc_ame.compute_input_values"] == "array<i64: 3>"
-            ), case
-            assert (
-                tasks[4]["bosc_ame.compute_predecessors"] == "array<i64: 2>"
-            ), case
-        elif 2 in surviving:
-            assert tasks[2]["bosc_ame.logical_value_users"] == "[array<i64>]", (
-                case
-            )
-        for producer in surviving & {0, 1}:
-            users = "[array<i64: 2>]" if 2 in surviving else "[array<i64>]"
-            assert tasks[producer]["bosc_ame.logical_value_users"] == users, (
-                case
-            )
-        if case in {
-            "dead_local",
-            "dead_alloca",
-            "dead_dealloc",
-            "condition_last",
-        }:
-            assert "memref.alloc" not in result.stdout, result.stdout
-            assert "memref.dealloc" not in result.stdout, result.stdout
-        if case in {"dead_local", "external_width", "external_range"}:
-            # The retained external fill/range writes need no old destination
-            # value. Ordinary lowering's unused init loads must also be gone.
-            assert "memref.load" not in result.stdout, result.stdout
-        if case == "ordering_consumer":
-            assert (
-                tasks[4]["bosc_ame.compute_predecessors"] == "array<i64: 2>"
-            ), case
+            "unsupported legacy target metadata: bosc_ame.prefix_mask_aux"
+            in result.stderr
+        ), (case, result.stderr)
+    check_standard_prefix(binary)
     print(
-        "PASS private dead masks removed; physical and graph consumers preserved"
+        "PASS standard prefix tails exact; legacy target hints rejected for all consumers/effects"
     )
 
 

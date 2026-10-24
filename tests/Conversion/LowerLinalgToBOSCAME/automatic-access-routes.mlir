@@ -1,10 +1,21 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: FileCheck %s --check-prefix=IR < %t
+// RUN: split-file %s %t
+// RUN: not buddy-opt %t/direct.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=COPY
+// RUN: not buddy-opt %t/staged.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=COPY
+// RUN: buddy-opt %t/window.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/window.out 2>%t/window.plan
+// RUN: FileCheck %s --check-prefix=WINDOW < %t/window.out
+// RUN: buddy-opt %t/window.out --bosc-ame-spm-dma-check --lower-bosc-ame -o /dev/null
 
-// Each access chooses its route independently. An entry function's ABI proves
-// disjoint DDR arguments; a private function has no such caller promise and
-// retains a staging barrier even though its descriptors have the same shape.
+// Preserve the original functions. Independent external copies have no V1
+// recipe; the explicit SPM window retains its bank/offset and initialization.
+// Mixed per-access DDR/SPM routes and reasons are covered by PlanRoutes.py.
+// COPY: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// WINDOW-LABEL: func.func @existing_window
+// WINDOW: bosc_ame.spm.view {bank = 0 : i32,
+// WINDOW-SAME: offset = 256 : i64} : memref<16xi32, #bosc_ame.spm<0>>
+// WINDOW: vector.store
+// WINDOW-NOT: bosc_ame.dma.start
+
+//--- direct.mlir
 module {
   func.func @direct(%src: memref<16xi32>, %dst: memref<16xi32>) {
     memref.copy %src, %dst {
@@ -14,7 +25,10 @@ module {
     } : memref<16xi32> to memref<16xi32>
     return
   }
+}
 
+//--- staged.mlir
+module {
   func.func private @staged(%src: memref<16xi32>, %dst: memref<16xi32>) {
     memref.copy %src, %dst {
       bosc_ame.memory = {kind = "store", destination = "external_ddr",
@@ -23,7 +37,10 @@ module {
     } : memref<16xi32> to memref<16xi32>
     return
   }
+}
 
+//--- window.mlir
+module {
   func.func @existing_window() {
     %zero = arith.constant 0 : i32
     %window = bosc_ame.spm.view {bank = 0 : i32, offset = 256 : i64}
@@ -33,17 +50,3 @@ module {
     return
   }
 }
-
-// PLAN: buffer-access[{{[0-9]+}}]: op=linalg.generic effect=write{{.*}}route=direct-ddr reason=complete-disjoint-external-store route-bytes=64 route-bank=-1 route-offset=0 route-capacity=0
-// PLAN: buffer-access[{{[0-9]+}}]: op=linalg.generic effect=read{{.*}}route=staging reason=direct-store-alias-unproven route-bytes=64 route-bank=1 route-offset=0 route-capacity=64
-// PLAN: buffer-access[{{[0-9]+}}]: op=linalg.generic effect=write{{.*}}route=staging reason=direct-store-alias-unproven route-bytes=64 route-bank=1 route-offset=64 route-capacity=64
-// PLAN: buffer-access[{{[0-9]+}}]: op=linalg.fill effect=write{{.*}}route=existing-spm reason=existing-spm-window route-bytes=64 route-bank=0 route-offset=256 route-capacity=64
-
-// IR-LABEL: func.func @direct
-// IR-COUNT-1: bosc_ame.dma.start
-// IR-NOT: bosc_ame.dma.start
-// IR: vector.store
-// IR-LABEL: func.func private @staged
-// IR-COUNT-3: bosc_ame.dma.start
-// IR-NOT: bosc_ame.dma.start
-// IR: return

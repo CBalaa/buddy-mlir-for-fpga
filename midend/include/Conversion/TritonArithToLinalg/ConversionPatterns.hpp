@@ -1027,8 +1027,8 @@ struct MulHiUIOpConverter : public OpConversionPattern<triton::MulhiUIOp> {
 
 struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
   MatmulConverter(MLIRContext *context, TritonLoweringConfig config = {})
-      : OpConversionPattern(context), enableBOSCAME(config.enableBOSCAME) {}
-  bool enableBOSCAME;
+      : OpConversionPattern(context), emitContract(config.emitContract) {}
+  bool emitContract;
 
   // true means tensor elements are zeros
   // false means not zero or it cannot be determined
@@ -1063,9 +1063,9 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     while (Operation *def = value.getDefiningOp()) {
       if (!visited.insert(def).second)
         return {};
-      auto eventKind = def->getAttrOfType<StringAttr>("bosc_ame.event_kind");
+      auto eventKind = def->getAttrOfType<StringAttr>("contract.event_kind");
       if (eventKind && eventKind.getValue() == "load")
-        return def->getAttr("bosc_ame.origin_id");
+        return def->getAttr("contract.origin_id");
       StringRef name = def->getName().getStringRef();
       if (def->getNumOperands() != 1 ||
           (name != "tensor.cast" && name != "tensor.expand_shape" &&
@@ -1158,9 +1158,9 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     Operation *def = value.getDefiningOp();
     if (!def)
       return;
-    auto eventKind = def->getAttrOfType<StringAttr>("bosc_ame.event_kind");
+    auto eventKind = def->getAttrOfType<StringAttr>("contract.event_kind");
     if (eventKind && eventKind.getValue() == "load") {
-      auto origin = def->getAttrOfType<IntegerAttr>("bosc_ame.origin_id");
+      auto origin = def->getAttrOfType<IntegerAttr>("contract.origin_id");
       if (origin && origin.getInt() >= 0)
         lineage.origins.push_back(origin.getInt());
       else
@@ -1299,7 +1299,9 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     std::string completeName = (operand + "_source_lineage_complete").str();
     matmul->setAttr(originsName,
                     DenseI64ArrayAttr::get(context, lineage.origins));
-    matmul->setAttr(completeName, builder.getBoolAttr(lineage.complete));
+    matmul->setAttr(
+        completeName,
+        builder.getBoolAttr(lineage.complete && !lineage.origins.empty()));
   }
 
   LogicalResult
@@ -1313,11 +1315,6 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     auto dstType = cast<RankedTensorType>(op.getType());
     auto elementType = dstType.getElementType();
     bool integers = elementType.isInteger();
-    if (enableBOSCAME && integers &&
-        (!elementType.isInteger(32) ||
-         !cast<RankedTensorType>(opa.getType()).getElementType().isInteger(8) ||
-         !cast<RankedTensorType>(opb.getType()).getElementType().isInteger(8)))
-      return op.emitError("BOSCAME integer dot requires signed i8 x i8 -> i32");
     // For mixed-precision integer matmul (e.g. i8 x i8 -> i32), linalg.matmul
     // requires a cast attribute so the inner multiply can promote i8 operands
     // to the i32 accumulator type.  Without it the op verifier rejects the IR.
@@ -1325,12 +1322,12 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     bool skipC = false;
     auto aElemType = cast<RankedTensorType>(opa.getType()).getElementType();
 
-    // AME consumes the dot's accumulator directly.  Keeping the incoming C
-    // tensor as the linalg output makes the reduction order explicit and
-    // prevents a separate product tensor followed by a tensor add.  The
+    // Integer contraction consumes the dot's accumulator directly.  Keeping the
+    // incoming C tensor as the linalg output makes the reduction order explicit
+    // and prevents a separate product tensor followed by a tensor add.  The
     // ordinary Triton lowering below retains its historical zero-product
-    // expansion for integer and floating point dots outside BOSCAME.
-    if (enableBOSCAME && integers) {
+    // expansion for integer and floating point dots outside contract mode.
+    if (emitContract && integers) {
       bool isMixedIntPrecision = aElemType != elementType;
       if (isMixedIntPrecision) {
         auto castAttr = linalg::TypeFnAttr::get(rewriter.getContext(),
@@ -1392,31 +1389,28 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
       }
     }
 
-    if (enableBOSCAME && integers)
-      res.getDefiningOp()->setAttr("bosc_ame.lower_to_ame",
-                                   rewriter.getUnitAttr());
-
-    if (Operation *matmul = res.getDefiningOp()) {
-      if (Attribute id = op->getAttr("bosc_ame.origin_id"))
-        matmul->setAttr("bosc_ame.origin_id", id);
-      if (Attribute eventKind = op->getAttr("bosc_ame.event_kind"))
-        matmul->setAttr("bosc_ame.event_kind", eventKind);
-      attachSourceLoadLineage(matmul, "bosc_ame.a", op.getA());
-      attachSourceLoadLineage(matmul, "bosc_ame.b", op.getB());
-      attachSourceLoadLineage(matmul, "bosc_ame.accumulator", op.getC());
+    if (emitContract) {
+      Operation *matmul = res.getDefiningOp();
+      if (Attribute id = op->getAttr("contract.origin_id"))
+        matmul->setAttr("contract.origin_id", id);
+      if (Attribute eventKind = op->getAttr("contract.event_kind"))
+        matmul->setAttr("contract.event_kind", eventKind);
+      attachSourceLoadLineage(matmul, "contract.a", op.getA());
+      attachSourceLoadLineage(matmul, "contract.b", op.getB());
+      attachSourceLoadLineage(matmul, "contract.accumulator", op.getC());
       if (Attribute id = findOriginId(op.getA());
-          id && !matmul->hasAttr("bosc_ame.a_origin_id"))
-        matmul->setAttr("bosc_ame.a_origin_id", id);
+          id && !matmul->hasAttr("contract.a_origin_id"))
+        matmul->setAttr("contract.a_origin_id", id);
       if (Attribute id = findOriginId(op.getB());
-          id && !matmul->hasAttr("bosc_ame.b_origin_id"))
-        matmul->setAttr("bosc_ame.b_origin_id", id);
+          id && !matmul->hasAttr("contract.b_origin_id"))
+        matmul->setAttr("contract.b_origin_id", id);
       if (!skipC)
         if (Attribute id = findOriginId(op.getC());
-            id && !matmul->hasAttr("bosc_ame.accumulator_origin_id"))
-          matmul->setAttr("bosc_ame.accumulator_origin_id", id);
+            id && !matmul->hasAttr("contract.accumulator_origin_id"))
+          matmul->setAttr("contract.accumulator_origin_id", id);
     }
 
-    if (!(enableBOSCAME && integers) && !skipC) {
+    if (!(emitContract && integers) && !skipC) {
       if (integers)
         res = rewriter.create<arith::AddIOp>(loc, opc, res);
       else

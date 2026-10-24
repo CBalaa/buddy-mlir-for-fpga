@@ -11,7 +11,24 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "examples/FPGA-BOSCAME/tools"))
 from boscame_buffer_sim import Machine  # noqa: E402
-from boscame_check import buddy_opt_path, experimental_pipeline  # noqa: E402
+from boscame_check import buddy_opt_path  # noqa: E402
+
+
+def physical_pipeline():
+    # Explicitly placed buffer-form IR uses the backend compatibility entry.
+    # It cannot cross the neutral frontend contract boundary.
+    return [
+        "--triton-to-linalg-experimental",
+        "--empty-tensor-to-alloc-tensor",
+        "--one-shot-bufferize=bufferize-function-boundaries=true buffer-alignment=64",
+        "--canonicalize",
+        "--cse",
+        "--linalg-to-boscame=enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias",
+        "--promote-buffers-to-stack",
+        "--canonicalize",
+        "--cse",
+    ]
+
 
 SOURCE = """
 #id = affine_map<(i) -> (i)>
@@ -84,6 +101,27 @@ module {
 }
 """
 
+# Keep the original external scalar accumulator case as an explicit v1
+# boundary test. Its private rank-zero counterpart exercises the same ordered
+# cancellation oracle through the supported host accumulator recipe.
+SUPPORTED_SOURCE = SOURCE.replace(
+    "func.func @cancellation(%out: memref<f32>) {",
+    "func.func @cancellation() -> f32 {\n"
+    "    %out = memref.alloca() : memref<f32>",
+).replace(
+    "    scf.for %i = %c0 to %c1024 step %c16 {",
+    "    linalg.fill ins(%zero : f32) "
+    "outs(%x : memref<1024xf32, #bosc_ame.spm<0>>)\n"
+    "    scf.for %i = %c0 to %c1024 step %c16 {",
+)
+SUPPORTED_SOURCE = SUPPORTED_SOURCE.rsplit("    return\n", 1)
+SUPPORTED_SOURCE = (
+    SUPPORTED_SOURCE[0]
+    + "    %result = memref.load %out[] : memref<f32>\n"
+    + "    return %result : f32\n"
+    + SUPPORTED_SOURCE[1]
+)
+
 
 def run(command, source=None):
     return subprocess.run(
@@ -100,9 +138,15 @@ def main():
     opt = Path(buddy_opt_path())
     command = [
         opt,
-        *experimental_pipeline(),
+        *physical_pipeline(),
     ]
-    result = run(command, SOURCE)
+    external = run(command, SOURCE)
+    assert external.returncode != 0
+    assert (
+        "v1 does not support reading an external region after its terminal write"
+        in external.stderr
+    )
+    result = run(command, SUPPORTED_SOURCE)
     assert result.returncode == 0, result.stdout + result.stderr
     text = result.stdout
     assert text.count("vector.reduction <add>") == 2, text
@@ -201,24 +245,29 @@ def main():
     loop_path.write_text(loops.stdout)
     # Lane-wise cancellation makes an ordered sum differ from independent
     # vector-lane accumulators: every fourth scalar addition ends at 1.0f.
-    result_bytes = bytearray(4)
-    Machine(loop_path, "cancellation").launch({"%arg0": result_bytes})
-    assert struct.unpack("<f", result_bytes)[0] == 1.0
+    cancellation = Machine(loop_path, "cancellation")
+    cancellation.launch({})
+    return_op = cancellation.function.blocks[0][-1].text
+    returned = re.search(r"return (%[\w]+) : f32", return_op)
+    assert returned, return_op
+    assert cancellation.values[returned.group(1)] == 1.0
     matrix_bytes = bytearray(2 * 16 * 4)
     Machine(loop_path, "rank_two_add").launch({"%arg0": matrix_bytes})
     assert struct.unpack("<32I", matrix_bytes) == (0x80000000,) * 32
     for source, error in (
-        (SOURCE.replace("1024xf32", "1007xf32"), "complete 64 B vectors"),
+        (SUPPORTED_SOURCE.replace("1024xf32", "1007xf32"), "complete"),
         (
-            SOURCE.replace("arith.mulf %in, %in", "math.powf %in, %in"),
-            "unsupported operation in SPM vector computation",
+            SUPPORTED_SOURCE.replace(
+                "arith.mulf %in, %in", "math.powf %in, %in"
+            ),
+            "generic requires one pure arithmetic operation",
         ),
         (
-            SOURCE.replace(
+            SUPPORTED_SOURCE.replace(
                 "%next = arith.addf %in, %init : f32",
                 "%next = arith.addf %in, %init fastmath<reassoc> : f32",
             ),
-            "without fast-math flags",
+            "ordered",
         ),
     ):
         bad = run(command, source)

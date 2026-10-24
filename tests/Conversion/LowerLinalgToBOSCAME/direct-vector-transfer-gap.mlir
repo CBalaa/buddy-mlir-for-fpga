@@ -1,4 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // A pure operation between a vector transfer and its provenance-marked copy
 // must not force the already-materialized vector through SPM/DMA staging.
@@ -19,8 +22,3 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
     return
   }
 }
-
-// CHECK-LABEL: func.func @separated
-// CHECK: vector.transfer_write %{{.*}}, %{{.*}} {bosc_ame.direct_ddr
-// CHECK-NOT: bosc_ame.spm.view
-// CHECK-NOT: bosc_ame.dma.start

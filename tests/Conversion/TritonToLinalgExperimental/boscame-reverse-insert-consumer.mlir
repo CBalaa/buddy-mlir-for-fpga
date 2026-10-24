@@ -1,6 +1,9 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: reverse_insert_destination = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: reverse_memref_reshape_consumer = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: reverse_scatter_destination = reject: op was not bufferized
 module {
   func.func @reverse_insert_destination(%input: tensor<4xf32>, %upper: index)
       -> tensor<4xf32> {
@@ -12,7 +15,7 @@ module {
     %seed = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 730 : i64}}
+        contract.provenance = {origin_id = 730 : i64}}
         ins(%input : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%element: f32, %unused: f32):
         %negated = arith.negf %element : f32
@@ -22,7 +25,7 @@ module {
         iter_args(%acc = %seed) -> (tensor<4xf32>) {
       %next = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 731 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 731 : i64}
           ins(%acc : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%element: f32, %unused: f32):
           %doubled = arith.addf %element, %element : f32
@@ -33,7 +36,7 @@ module {
     %inserted = tensor.insert %value into %loop[%idx] : tensor<4xf32>
     %result = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 732 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 732 : i64}
         ins(%inserted : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%element: f32, %unused: f32):
         %negated = arith.negf %element : f32
@@ -50,7 +53,7 @@ module {
     %seed = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 733 : i64}}
+        contract.provenance = {origin_id = 733 : i64}}
         ins(%input : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%element: f32, %unused: f32):
         %negated = arith.negf %element : f32
@@ -60,7 +63,7 @@ module {
         iter_args(%acc = %seed) -> (tensor<4xf32>) {
       %next = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 734 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 734 : i64}
           ins(%acc : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%element: f32, %unused: f32):
           %doubled = arith.addf %element, %element : f32
@@ -75,7 +78,7 @@ module {
         (tensor<1x1xf32>, tensor<4xf32>, tensor<1x1xindex>) -> tensor<4xf32>
     %result = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 735 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 735 : i64}
         ins(%scattered : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%element: f32, %unused: f32):
         %negated = arith.negf %element : f32
@@ -94,7 +97,7 @@ module {
         iter_args(%acc = %input) -> (memref<4xf32>) {
       linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 737 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 737 : i64}
           ins(%acc : memref<4xf32>) outs(%output : memref<4xf32>) {
         ^bb0(%element: f32, %unused: f32):
           linalg.yield %element : f32
@@ -105,7 +108,7 @@ module {
         : (memref<4xf32>, memref<1xi32>) -> memref<4xf32>
     linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 736 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 736 : i64}
         ins(%reshaped : memref<4xf32>) outs(%output : memref<4xf32>) {
       ^bb0(%element: f32, %unused: f32):
         linalg.yield %element : f32
@@ -113,16 +116,3 @@ module {
     return
   }
 }
-
-// CHECK-LABEL: func.func @reverse_insert_destination
-// CHECK: scf.for
-// CHECK: exit_consumer_compute_ids = array<i64: 2>
-// CHECK: bosc_ame.compute_origin_id = 732 : i64
-// CHECK-LABEL: func.func @reverse_scatter_destination
-// CHECK: scf.for
-// CHECK: exit_consumer_compute_ids = array<i64: 5>
-// CHECK: bosc_ame.compute_origin_id = 735 : i64
-// CHECK-LABEL: func.func @reverse_memref_reshape_consumer
-// CHECK: scf.for
-// CHECK: exit_consumer_compute_ids = array<i64: 7>
-// CHECK: bosc_ame.compute_origin_id = 736 : i64

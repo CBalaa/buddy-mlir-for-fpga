@@ -1,9 +1,19 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.facts.mlir 2> %t.facts
-// RUN: FileCheck %s --check-prefix=GRAPH < %t.facts.mlir
-// RUN: FileCheck %s --check-prefix=FACTS < %t.facts
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t.plain.mlir
-// RUN: diff %t.facts.mlir %t.plain.mlir
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: dynamic_seed_sum = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: generic_reduction = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: hidden_read = reject: kernel contract V25: generic requires one pure arithmetic operation
+// CONTRACT-CASE: hidden_write = reject: kernel contract V25: generic requires one pure arithmetic operation
+// CONTRACT-CASE: multi_operation_reduction = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: multi_output_extrema = complete
+// CONTRACT-CASE: nan_neutral_with_nnan = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: nan_neutral_without_nnan = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: parallel_and_fill = complete
+// CONTRACT-CASE: unknown_call = reject: kernel contract V25: generic requires one pure arithmetic operation
+// CONTRACT-CASE: unmatched_multi_operation_combiner = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: vector_element_maximum = reject: kernel contract V25: pointwise update requires parallel identity indexing
+// CONTRACT-CASE: zero_filled_sum = reject: kernel contract V25: pointwise update requires parallel identity indexing
 module {
   func.func private @unknown(f32) -> f32
 
@@ -241,55 +251,3 @@ module {
     return %result : tensor<4xf32>
   }
 }
-
-// GRAPH-LABEL: func.func @generic_reduction
-// GRAPH-SAME: bosc_ame.compute_graph_complete = true
-// GRAPH: linalg.generic {{.*}}bosc_ame.compute_barrier_after = true
-// GRAPH-SAME: bosc_ame.compute_id = [[REDUCE:[0-9]+]] : i64
-// GRAPH-SAME: bosc_ame.compute_kind = "reduction"
-// GRAPH-SAME: bosc_ame.compute_stage = 0 : i64
-// GRAPH-SAME: bosc_ame.rematerializable = false
-// GRAPH: linalg.generic {{.*}}bosc_ame.compute_barrier_after = false
-// GRAPH-SAME: bosc_ame.compute_kind = "elementwise"
-// GRAPH-SAME: bosc_ame.compute_predecessors = array<i64: [[REDUCE]]>
-// GRAPH-SAME: bosc_ame.compute_stage = 1 : i64
-// GRAPH-SAME: bosc_ame.rematerializable = true
-
-// FACTS: op=linalg.generic {{.*}} kind=reduction {{.*}} reduction-dimensions=[1] reduction-structure={complete=true input-args=[{{[0-9]+}}] init-args=[{{[0-9]+}}] init-values=[{{[0-9]+}}] yields=[{{[0-9]+}}] reducer-body-ops=[{{[0-9]+}}] output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=0.000000e+00 : f32 seed-neutral=unknown}]}
-// FACTS: op=linalg.generic {{.*}} kind=reduction {{.*}} reduction-dimensions=[1] reduction-structure={complete=true input-args=[{{[0-9]+}}] init-args=[{{[0-9]+}}] init-values=[{{[0-9]+}}] yields=[{{[0-9]+}}] reducer-body-ops=[{{[0-9]+}}, {{[0-9]+}}] output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=0.000000e+00 : f32 seed-neutral=unknown}]}
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=0.000000e+00 : f32 seed-neutral=matches}]
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=0.000000e+00 : f32 seed-neutral=unknown}]
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=0xFF800000 : f32 seed-neutral=matches}, {output-index=1 combiner-op={{[0-9]+}} neutral=0x7F800000 : f32 seed-neutral=matches}]
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op=<unknown> neutral=<unknown> seed-neutral=unknown}]
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=<unknown> seed-neutral=unknown}]
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=0xFFC00000 : f32 seed-neutral=matches}]
-// FACTS: {{.*}}output-facts=[{output-index=0 combiner-op={{[0-9]+}} neutral=<unknown> seed-neutral=unknown}]
-
-// GRAPH-LABEL: func.func @parallel_and_fill
-// GRAPH-SAME: bosc_ame.compute_graph_complete = true
-// GRAPH: linalg.fill {{.*}}bosc_ame.compute_barrier_after = false
-// GRAPH-SAME: bosc_ame.compute_kind = "fill"
-// GRAPH-SAME: bosc_ame.compute_stage = 0 : i64
-// GRAPH-SAME: bosc_ame.rematerializable = true
-// GRAPH: linalg.generic {{.*}}bosc_ame.compute_barrier_after = false
-// GRAPH-SAME: bosc_ame.compute_kind = "elementwise"
-// GRAPH-SAME: bosc_ame.compute_stage = 0 : i64
-// GRAPH-SAME: bosc_ame.rematerializable = true
-
-// GRAPH-LABEL: func.func @hidden_write
-// GRAPH-SAME: bosc_ame.compute_graph_complete = false
-// GRAPH: linalg.generic {{.*}}bosc_ame.compute_kind = "elementwise"
-// GRAPH-SAME: bosc_ame.rematerializable = false
-// GRAPH: memref.store
-
-// GRAPH-LABEL: func.func @hidden_read
-// GRAPH-SAME: bosc_ame.compute_graph_complete = false
-// GRAPH: linalg.generic {{.*}}bosc_ame.compute_kind = "elementwise"
-// GRAPH-SAME: bosc_ame.rematerializable = false
-// GRAPH: memref.load
-
-// GRAPH-LABEL: func.func @unknown_call
-// GRAPH-SAME: bosc_ame.compute_graph_complete = false
-// GRAPH: linalg.generic {{.*}}bosc_ame.compute_kind = "elementwise"
-// GRAPH-SAME: bosc_ame.rematerializable = false
-// GRAPH: func.call @unknown

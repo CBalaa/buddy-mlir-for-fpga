@@ -2,7 +2,6 @@
 """Promote private scalar scratch without dropping visible or aliased writes."""
 
 import re
-import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -102,46 +101,100 @@ def run(binary, arguments, source):
     return result.stdout
 
 
+def function_source(name):
+    body = re.search(
+        r"  func.func @" + name + r"\(.*?^  }", SOURCE, re.S | re.M
+    )
+    assert body, name
+    return (
+        "module {\n  func.func private @observe(memref<*xf32>)\n"
+        + body.group()
+        + "\n}\n"
+    )
+
+
 def main():
     directory, binary = Path(sys.argv[1]), sys.argv[2]
     directory.mkdir(parents=True, exist_ok=True)
-    text = run(
-        binary,
-        [
-            "--lower-linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias"
-        ],
-        SOURCE,
-    )
-    functions = {
-        part.split("(", 1)[0]: part for part in text.split("func.func @")[1:]
-    }
-    for name in ("private_copy", "heap"):
-        body = functions[name]
-        assert not re.search(
-            r"memref\.(?:alloca?|load|copy|dealloc)\b", body
-        ), body
-        assert body.count("memref.store ") == 1, body
-    assert "vector.reduction <add>" in functions["private_copy"]
-    assert "memref.load" in functions["external_result"]
-    assert functions["external_result"].count("memref.store ") == 2
-    for name in ("alias", "nested", "uninitialized"):
-        assert "memref.alloca" in functions[name], functions[name]
-        assert "memref.load" in functions[name], functions[name]
-    # Simulate before canonicalization to exercise the lowering itself.
-    path = directory / "scalar-ssa.mlir"
-    path.write_text(text)
-    for name, scalars, expected in (
-        ("private_copy", {}, 37.0),
-        ("external_result", {}, 37.0),
-        ("nested", {"%arg1": 0}, 5.0),
-        ("nested", {"%arg1": 1}, 1.0),
-        ("heap", {}, 5.0),
+    options = ["--lower-linalg-to-boscame=dma-abi=args_aligned64_nonalias"]
+    # Preserve every former external-scalar source as an explicit v1 boundary
+    # case. The neutral planner has no independent external scalar store or
+    # private-to-private scalar copy recipe.
+    for name, diagnostic in (
+        ("private_copy", "exactly one external DDR endpoint"),
+        (
+            "external_result",
+            "reading an external region after its terminal write",
+        ),
+        ("alias", "no independent external or SPM scalar-store recipe"),
+        ("nested", "if requires explicit then and else scopes"),
+        ("uninitialized", "no initialized content version"),
+        ("heap", "no independent external or SPM scalar-store recipe"),
     ):
-        output = bytearray(4)
-        Machine(path, name).launch({"%arg0": output}, scalars)
-        assert struct.unpack("<f", output)[0] == expected, (name, output)
+        result = subprocess.run(
+            [binary, "-", *options],
+            input=function_source(name),
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode != 0, name
+        assert diagnostic in result.stderr, result.stderr
+
+    supported = function_source("private_copy")
+    supported = supported.replace(
+        "func.func @private_copy(%out: memref<f32>)",
+        "func.func @private_seed() -> f32",
+    )
+    supported = supported.replace(
+        "    %seed = memref.alloca() : memref<f32>\n", ""
+    )
+    supported = supported.replace(
+        "    memref.store %five, %seed[] : memref<f32>\n"
+        "    memref.copy %seed, %sum : memref<f32> to memref<f32>",
+        "    linalg.fill ins(%five : f32) outs(%sum : memref<f32>)",
+    )
+    supported = supported.replace(
+        "    memref.store %value, %out[] : memref<f32>\n    return",
+        "    return %value : f32",
+    )
+    text = run(binary, options, supported)
+    assert "vector.reduction <add>" in text, text
+    assert "memref.copy" not in text, text
+    path = directory / "scalar-seed.mlir"
+    path.write_text(text)
+    machine = Machine(path, "private_seed")
+    machine.launch({})
+    returned = re.search(
+        r"return (%[\w]+) : f32", machine.function.blocks[0][-1].text
+    )
+    assert returned
+    assert machine.values[returned.group(1)] == 37.0
+
+    # Ordinary private host scalar memory is preserved without inventing an
+    # external scalar route. Its exact before/after oracle remains 5.0f.
+    heap = (
+        function_source("heap")
+        .replace(
+            "func.func @heap(%out: memref<f32>)", "func.func @heap() -> f32"
+        )
+        .replace("    memref.store %value, %out[] : memref<f32>\n", "")
+    )
+    heap = heap.replace("    return", "    return %value : f32").replace(
+        "memref.store %five, %sum[] : memref<f32>",
+        "linalg.fill ins(%five : f32) outs(%sum : memref<f32>)",
+    )
+    heap_text = run(binary, options, heap)
+    path = directory / "scalar-host.mlir"
+    path.write_text(heap_text)
+    machine = Machine(path, "heap")
+    machine.launch({})
+    returned = re.search(
+        r"return (%[\w]+) : f32", machine.function.blocks[0][-1].text
+    )
+    assert returned
+    assert machine.values[returned.group(1)] == 5.0
     print(
-        "PASS scalar SSA: private copy/nonzero seed/heap removed; external, alias and nested memory preserved"
+        "PASS private scalar nonzero seed and host memory; unsupported external recipes diagnosed"
     )
 
 

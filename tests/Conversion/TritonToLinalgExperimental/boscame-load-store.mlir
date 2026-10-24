@@ -1,7 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack | FileCheck %s
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias structured-ldst-mode=tensor-first-vector-cpu' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack | FileCheck %s
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
-// CHECK: bosc_ame.dma.abi = "args_aligned64_nonalias"
+// RUN: buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=args_aligned64_nonalias' --bosc-ame-plan --bosc-ame-plan-verify --bosc-ame-emit --promote-buffers-to-stack | FileCheck %s
+// RUN: buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=args_aligned64_nonalias structured-ldst-mode=tensor-first-vector-cpu' --bosc-ame-plan --bosc-ame-plan-verify --bosc-ame-emit --promote-buffers-to-stack | FileCheck %s
+// RUN: buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=args_aligned64_nonalias' --bosc-ame-plan --bosc-ame-plan-verify --bosc-ame-emit --promote-buffers-to-stack --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
+// CHECK: contract.abi = {args_aligned_bytes = 64 : i64, args_disjoint = true}
 // CHECK-LABEL: func.func @masked
 // CHECK: bosc_ame.spm.view {{.*}} : memref<1024xf32, #bosc_ame.spm<{{[01]}}>>
 // CHECK: vector.store {{.*}} : memref<1024xf32, #bosc_ame.spm<{{[01]}}>>, vector<16xf32>

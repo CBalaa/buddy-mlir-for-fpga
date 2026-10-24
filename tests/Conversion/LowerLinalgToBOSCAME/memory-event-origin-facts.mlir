@@ -1,7 +1,10 @@
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true' -o %t.ir 2>%t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='' -o %t.default
-// RUN: cmp %t.default %t.ir
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1
+
+// Retain the historical source case as a precise v1 compatibility boundary.
+// The independent DDR copy has no execution recipe. New contract task/version,
+// alias and source-lineage checks live in KernelContract and PlanRoutes tests;
+// the removed legacy inventory/report must not imply those proofs succeeded.
+// V1: v1 has no independent DDR-to-DDR copy recipe
 
 module {
   func.func @consistent_origin(%source: memref<16xf32>,
@@ -35,13 +38,3 @@ module {
     return
   }
 }
-
-// PLAN: ir-node[2]: op=linalg.generic {{.*}}memory-event={kind=copy role=store effect=write origin-id=77 inputs=[0] outputs=[1]}
-// PLAN: ir-node[6]: op=linalg.generic {{.*}}memory-event={kind=copy role=store effect=write origin-id=<unknown> inputs=[4] outputs=[5]}
-// PLAN: buffer-source-events: count=1 scope=pre-accumulator-fusion
-// PLAN: buffer-source-event[0]: function=@consistent_origin source-origin-id=77 op=linalg.generic effect=write
-// PLAN: buffer-accesses: count=4 scope=post-planning
-// PLAN: buffer-access[1]: op=linalg.generic effect=write effect-index=1 operand=1 source-origin-id=77
-// PLAN: buffer-access[3]: op=linalg.generic effect=write effect-index=1 operand=1
-// PLAN-NOT: source-origin-id=
-// PLAN: memory-dependencies:

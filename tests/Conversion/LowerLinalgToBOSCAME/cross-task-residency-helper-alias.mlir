@@ -1,73 +1,19 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/reader.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/reader.out 2>%t/reader.plan
-// RUN: FileCheck %s --check-prefix=UNSAFE-PLAN < %t/reader.plan
-// RUN: FileCheck %s --check-prefix=READER-IR < %t/reader.out
-// RUN: buddy-opt %t/produced.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/produced.out 2>%t/produced.plan
-// RUN: FileCheck %s --check-prefix=UNSAFE-PLAN < %t/produced.plan
-// RUN: FileCheck %s --check-prefix=PRODUCED-IR < %t/produced.out
-// RUN: buddy-opt %t/entry.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/entry.out 2>%t/entry.plan
-// RUN: FileCheck %s --check-prefix=ENTRY-PLAN < %t/entry.plan
-// RUN: buddy-opt %t/fresh.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/fresh.out 2>%t/fresh.plan
-// RUN: FileCheck %s --check-prefix=FRESH-PLAN < %t/fresh.plan
+// RUN: not buddy-opt %t/reader.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=READER
+// RUN: not buddy-opt %t/produced.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=PRODUCED
+// RUN: not buddy-opt %t/entry.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ENTRY
+// RUN: not buddy-opt %t/fresh.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=FRESH
 
-// The module ABI applies to external entry arguments. It cannot make distinct
-// helper formals disjoint when a caller passes the same actual buffer twice.
-// The reader helper is public: visibility alone does not make it an entry.
-// Both unsafe cases must retain their DDR writes and subsequent DDR reads.
-// UNSAFE-PLAN-NOT: residency=cross-task
-// UNSAFE-PLAN: resources: transfers=4 dma-packets=4 read-bytes=128 write-bytes=128 totals-exact=true latency=uncalibrated
-// UNSAFE-PLAN: function-argument-residency-search: candidates=0 selected=0
-
-// The first consumer changes the aliased source by adding one. The second
-// consumer must reload that updated source after the first output write.
-// READER-IR-LABEL: func.func @reader_helper(
-// READER-IR-SAME: %[[SRC:arg[0-9]+]]: memref<16xf32>
-// READER-IR-SAME: %[[ALIAS:arg[0-9]+]]: memref<16xf32>
-// READER-IR-SAME: %[[DST:arg[0-9]+]]: memref<16xf32>
-// READER-IR: %[[READ0:.*]] = memref.reinterpret_cast %[[SRC]] to
-// READER-IR: bosc_ame.dma.start %[[READ0]],
-// READER-IR: arith.addf
-// READER-IR: %[[WRITE0:.*]] = memref.reinterpret_cast %[[ALIAS]] to
-// READER-IR: bosc_ame.dma.start {{.*}}, %[[WRITE0]],
-// READER-IR: bosc_ame.dma.wait
-// READER-IR: %[[READ1:.*]] = memref.reinterpret_cast %[[SRC]] to
-// READER-IR: bosc_ame.dma.start %[[READ1]],
-// READER-IR: %[[WRITE1:.*]] = memref.reinterpret_cast %[[DST]] to
-// READER-IR: bosc_ame.dma.start {{.*}}, %[[WRITE1]],
-// READER-IR: return
-// READER-IR-LABEL: func.func @reader_entry(
-// READER-IR: call @reader_helper(%[[ACTUAL:arg[0-9]+]], %[[ACTUAL]],
-
-// The producer writes two to %tmp, then the consumer adds %tmp and the
-// aliasing formal %other. Its result must be four even when %other held a
-// different value before the call. The producer write must precede both reads.
-// PRODUCED-IR-LABEL: func.func private @produced_helper(
-// PRODUCED-IR-SAME: %[[TMP:arg[0-9]+]]: memref<16xf32>
-// PRODUCED-IR-SAME: %[[OTHER:arg[0-9]+]]: memref<16xf32>
-// PRODUCED-IR-SAME: %[[OUT:arg[0-9]+]]: memref<16xf32>
-// PRODUCED-IR: %[[TMP_WRITE:.*]] = memref.reinterpret_cast %[[TMP]] to
-// PRODUCED-IR: bosc_ame.dma.start {{.*}}, %[[TMP_WRITE]],
-// PRODUCED-IR: bosc_ame.dma.wait
-// PRODUCED-IR: %[[TMP_READ:.*]] = memref.reinterpret_cast %[[TMP]] to
-// PRODUCED-IR: bosc_ame.dma.start %[[TMP_READ]],
-// PRODUCED-IR: %[[OTHER_READ:.*]] = memref.reinterpret_cast %[[OTHER]] to
-// PRODUCED-IR: bosc_ame.dma.start %[[OTHER_READ]],
-// PRODUCED-IR: arith.addf
-// PRODUCED-IR: %[[OUT_WRITE:.*]] = memref.reinterpret_cast %[[OUT]] to
-// PRODUCED-IR: bosc_ame.dma.start {{.*}}, %[[OUT_WRITE]],
-// PRODUCED-IR: return
-// PRODUCED-IR-LABEL: func.func @produced_entry(
-// PRODUCED-IR: call @produced_helper(%[[ACTUAL:arg[0-9]+]], %[[ACTUAL]],
-
-// An uncalled public entry retains the ABI proof for its distinct arguments.
-// ENTRY-PLAN: transfer[0]: consumer=linalg.generic residency=cross-task consumers=[linalg.generic, linalg.generic] role=input-a
-// ENTRY-PLAN: resources: transfers=3 dma-packets=3 read-bytes=64 write-bytes=128 totals-exact=true latency=uncalibrated
-// ENTRY-PLAN: function-argument-residency-search: candidates=1 selected=1
-
-// Fresh local storage remains disjoint from helper arguments even if those
-// arguments themselves alias. Its producer output can stay resident safely.
-// FRESH-PLAN: transfer[0]: consumer=linalg.generic residency=cross-task consumers=[linalg.generic, linalg.generic, linalg.generic] role=output-c
-// FRESH-PLAN: resources: transfers=3 dma-packets=3 read-bytes=0 write-bytes=192 totals-exact=true latency=uncalibrated
+// Retain all original helper/caller alias relationships. The reader has a
+// multi-operation generic payload; the produced value is read after an
+// external terminal write; the entry has a DDR-to-DDR boundary; the fresh
+// helper has no entry-ABI alignment proof for its required DDR write.
+// Entry ABI isolation for called helpers is tested directly by
+// tests/KernelContract/entry-abi.py and PlanWorkspaceCalls.py.
+// READER: kernel contract V25: generic requires one pure arithmetic operation
+// PRODUCED: kernel contract V23/V24: v1 does not support reading an external region after its terminal write
+// ENTRY: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// FRESH: no legal DMA route: endpoint alignment or SPM placement is unproven
 
 //--- reader.mlir
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {

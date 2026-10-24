@@ -1,10 +1,9 @@
 // RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t
-// RUN: FileCheck %s --check-prefix=IR < %t
-// RUN: buddy-opt %t --lower-bosc-ame | FileCheck %s --check-prefix=LLVM
+// RUN: FileCheck %s --check-prefix=IR --implicit-check-not=bosc_ame.dma.start --implicit-check-not=bosc_ame.spm.view < %t
+// RUN: buddy-opt %t --lower-bosc-ame | FileCheck %s --check-prefix=LLVM --implicit-check-not=bosc_ame_dma_start
 
-// The automatic planner proves the external C store is direct DDR. A and B
-// still use the typed SPM/DMA staging path, while the AME accumulator reads and writes C
-// itself, so no C DMA request is emitted.
+// All three external operands meet the direct DDR address and layout proofs.
+// Enabling SPM/DMA does not force staging when no private storage is needed.
 module {
   func.func @gemm(%a: memref<64x64xi8>,
                   %b: memref<64x64xi8, strided<[1, 64]>>,
@@ -17,10 +16,13 @@ module {
   }
 }
 
-// IR-COUNT-2: bosc_ame.dma.start
 // IR: bosc_ame.tile.load_acc {{.*}} {bosc_ame.direct_ddr}
-// IR: bosc_ame.tile.store_acc {{.*}} {bosc_ame.direct_ddr}
-// IR-NOT: bosc_ame.dma.start
-// LLVM-COUNT-2: llvm.call @bosc_ame_dma_start
+// IR: bosc_ame.tile.load_a {{.*}} {bosc_ame.direct_ddr}
+// IR: bosc_ame.tile.load_b {{.*}} {bosc_ame.direct_ddr}
+// IR: bosc_ame.tile.mma
+// IR: bosc_ame.tile.store_acc {{.*}} {bosc_ame.direct_ddr,
+// LLVM: "bosc_ame.intr.mlce32.m"
+// LLVM: "bosc_ame.intr.mlae8.m"
+// LLVM: "bosc_ame.intr.mlbe8.m"
+// LLVM: mqma.b.mm
 // LLVM: "bosc_ame.intr.msce32.m"
-// LLVM-NOT: llvm.call @bosc_ame_dma_start

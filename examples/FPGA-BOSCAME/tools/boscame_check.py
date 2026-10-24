@@ -56,17 +56,17 @@ def run_pass(buddy_opt, fixture, output, dma_abi=True, extra=None):
     return result.returncode, result.stderr
 
 
-def experimental_pipeline():
-    """The public frontend, explicit bufferization and automatic backend planner."""
-    backend = "--linalg-to-boscame"
+def experimental_pipeline(launch_grid=None):
+    """Neutral frontend followed by explicit plan verification and emission."""
+    frontend = "--triton-to-linalg-experimental=contract=true caller-contract=args_aligned64_nonalias"
+    if launch_grid:
+        frontend += f" launch-grid={launch_grid}"
     return [
-        "--triton-to-linalg-experimental=boscame=true dma-abi=args_aligned64_nonalias",
-        "--empty-tensor-to-alloc-tensor",
-        "--one-shot-bufferize=bufferize-function-boundaries=true buffer-alignment=64",
-        "--canonicalize",
-        "--cse",
-        backend,
-        "--promote-buffers-to-stack",
+        frontend,
+        "--kernel-contract-verify",
+        "--bosc-ame-plan",
+        "--bosc-ame-plan-verify",
+        "--bosc-ame-emit",
     ]
 
 

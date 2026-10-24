@@ -1,7 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true' -o %t.noabi.ir 2>%t.noabi.plan
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true dma-abi=args_aligned64_nonalias' -o %t.abi.ir 2>%t.abi.plan
-// RUN: FileCheck %s --check-prefix=NO-ABI --implicit-check-not=proof=abi-nonalias-entry-arguments < %t.noabi.plan
-// RUN: FileCheck %s --check-prefix=ABI < %t.abi.plan
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 module {
   memref.global "private" @left_global : memref<16xf32> = uninitialized
@@ -39,9 +39,3 @@ module {
     return
   }
 }
-
-// NO-ABI: buffer-alias-pairs: count=1 scope=known-roots-within-function unproven-pairs=unknown status=complete
-// NO-ABI: buffer-alias-pair[{{[0-9]+}}]: function=@distinct_arguments accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=distinct-global-symbols
-// ABI: buffer-alias-pairs: count=2 scope=known-roots-within-function unproven-pairs=unknown status=complete
-// ABI-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@distinct_arguments accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=abi-nonalias-entry-arguments
-// ABI-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@distinct_arguments accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=distinct-global-symbols

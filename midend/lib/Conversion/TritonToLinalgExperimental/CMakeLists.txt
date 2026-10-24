@@ -7,7 +7,7 @@
 
 add_mlir_library(BuddyTritonToLinalgExperimental
   TritonToLinalgExperimentalPass.cpp
-  BOSCAMETileSpecialization.cpp
+  ContractTileSpecialization.cpp
   ReconcilePtrCastsPass.cpp
   TritonToPtrPass.cpp
   CollapseShape.cpp
@@ -16,7 +16,7 @@ add_mlir_library(BuddyTritonToLinalgExperimental
   BuddyTritonToLinalgExperimentalPassIncGen
 
   LINK_LIBS PUBLIC
-  BuddyBOSCAMEAnalysis
+  BuddyKernelContract
   BuddyTPtrIR
   BuddyTritonAnalysis
   BuddyTritonAnalysisStructured
@@ -30,21 +30,27 @@ add_mlir_library(BuddyTritonToLinalgExperimental
   BuddyTritonUnstructuredToMemref
   MLIRAffineDialect
   MLIRArithDialect
+  MLIRArithTransforms
   MLIRBufferizationDialect
+  MLIRBufferizationTransforms
   MLIRControlFlowDialect
   MLIRDialectUtils
   MLIRFuncDialect
   MLIRIR
   MLIRLinalgDialect
+  MLIRLinalgTransforms
   MLIRMathDialect
   MLIRMemRefDialect
   MLIRPass
   MLIRPtrDialect
   MLIRReconcileUnrealizedCasts
   MLIRSCFDialect
+  MLIRSCFTransforms
   MLIRSupport
   MLIRTensorDialect
+  MLIRTensorTransforms
   MLIRTransforms
   MLIRTransformUtils
   MLIRVectorDialect
+  MLIRVectorTransforms
 )

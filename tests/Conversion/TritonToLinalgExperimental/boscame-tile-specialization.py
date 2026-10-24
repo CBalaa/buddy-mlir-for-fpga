@@ -1,5 +1,4 @@
-# RUN: %PYTHON %s %t/staged buddy-opt false
-# RUN: %PYTHON %s %t/resident buddy-opt true
+# RUN: %PYTHON %s %t buddy-opt
 """Launch/loop proofs, compact snapshots, graph rebuilding and pitched DMA."""
 
 import itertools
@@ -16,9 +15,11 @@ from boscame_buffer_sim import Machine  # noqa: E402
 from boscame_sim import op_name, read_module  # noqa: E402
 
 SYMBOL = "triton_matmul_i8_196x768x768"
-BUFFERIZE = [
-    "--empty-tensor-to-alloc-tensor",
-    "--one-shot-bufferize=bufferize-function-boundaries=true buffer-alignment=64",
+BUFFERIZE = []
+BACKEND = [
+    "--bosc-ame-plan",
+    "--bosc-ame-plan-verify",
+    "--bosc-ame-emit",
     "--canonicalize",
     "--cse",
 ]
@@ -32,53 +33,41 @@ def walk(ops):
 
 
 def check_graph(text, functions=1):
-    ids = list(map(int, re.findall(r"bosc_ame.compute_id = (\d+)", text)))
-    assert len(ids) == len(set(ids)) == 12 * functions
-    values = [
-        int(value)
-        for array in re.findall(
-            r"bosc_ame.logical_value_ids = array<i64: ([^>]+)>", text
-        )
-        for value in array.split(",")
-    ]
-    assert len(values) == len(set(values))
-
-    def branch_ids(function, tail):
-        begin, end = (5, 12) if tail else (0, 5)
-        return set(range(12 * function + begin, 12 * function + end))
-
-    for line in text.splitlines():
-        if match := re.search(r"bosc_ame.compute_id = (\d+)", line):
-            node = int(match[1])
+    bodies = re.split(r"  func.func @", text)[1:]
+    assert len(bodies) == functions
+    for function in bodies:
+        tasks = re.findall(r"contract.task = \{([^}]+)\}", function)
+        ids = [int(re.search(r"(?:^|, )id = (\d+)", task)[1]) for task in tasks]
+        assert sorted(ids) == list(range(12)), ids
+        assert "contract.compute_graph = {complete = true" in function
+        assert function.count("contract.loop_carried_slots") == 2
+        for task in tasks:
+            node = int(re.search(r"(?:^|, )id = (\d+)", task)[1])
             predecessors = re.search(
-                r"bosc_ame.compute_predecessors = array<i64(?:: ([^>]+))?>",
-                line,
+                r"predecessors = array<i64(?:: ([^>]+))?>", task
             )[1]
-            if predecessors:
-                assert set(map(int, predecessors.split(","))) <= branch_ids(
-                    node // 12, node % 12 >= 5
-                )
-    assert text.count("bosc_ame.compute_graph_complete = false") == functions
-    assert text.count("bosc_ame.loop_carried_slots") == 2 * functions
-    fields = [
-        "backedge_producer_compute_ids",
-        "exit_consumer_compute_ids",
-        "init_producer_compute_ids",
-        "iter_arg_consumer_compute_ids",
-    ]
-    slots = re.findall(r"bosc_ame.loop_carried_slots = \[\{([^}]+)\}\]", text)
-    assert len(slots) == 2 * functions
-    for index, slot in enumerate(slots):
-        for field in fields:
-            array = re.search(field + r" = array<i64: ([^>]+)>", slot)[1]
-            assert set(map(int, array.split(","))) <= branch_ids(
-                index // 2, index % 2
+            branch = set(range(0, 5) if node < 5 else range(5, 12))
+            assert (
+                not predecessors
+                or set(map(int, predecessors.split(","))) <= branch
             )
-    # Clones share source event identity, but have distinct compute/value IDs.
-    for function in range(functions):
-        assert (
-            text.count(f"bosc_ame.compute_origin_id = {3 + 5 * function} : i64")
-            == 2
+        slots = re.findall(
+            r"contract.loop_carried_slots = \[\{([^}]+)\}\]", function
+        )
+        for index, slot in enumerate(slots):
+            branch = set(range(0, 5) if index == 0 else range(5, 12))
+            for field in (
+                "backedge_producer_compute_ids",
+                "exit_consumer_compute_ids",
+                "init_producer_compute_ids",
+                "iter_arg_consumer_compute_ids",
+            ):
+                values = re.search(field + r" = array<i64: ([^>]+)>", slot)[1]
+                assert set(map(int, values.split(","))) <= branch
+        # Full/tail clones share the source event, but keep distinct task IDs.
+        dots = [task for task in tasks if 'kind = "dot"' in task]
+        assert len(dots) == 2 and all(
+            "input_values = array<i64:" in task for task in dots
         )
 
 
@@ -136,17 +125,11 @@ def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
     opt = sys.argv[2]
-    resident = len(sys.argv) > 3 and sys.argv[3] == "true"
-    backend_pass = "--linalg-to-boscame=buffer-placement=" + (
-        "true" if resident else "false"
-    )
 
-    def run(name, source, grid=None, passes=()):
+    def run(name, source, grid=None, passes=(), reject=None):
         path, output = work / (name + ".ttir"), work / (name + ".mlir")
         path.write_text(source)
-        options = (
-            "boscame=true dma-abi=args_aligned64_nonalias bm=32 bn=128 bk=128"
-        )
+        options = "contract=true caller-contract=args_aligned64_nonalias"
         if grid:
             options += " launch-grid=" + grid
         result = subprocess.run(
@@ -161,25 +144,31 @@ def main():
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, result.stderr
+        if reject:
+            assert result.returncode > 0 and reject in result.stderr, (
+                name,
+                result.stderr,
+            )
+            return output, result.stderr
+        assert result.returncode == 0, (name, result.stderr)
         return output, output.read_text()
 
     source = (Path(__file__).parent / "Inputs/matmul-tiled-i8.ttir").read_text()
     grid = SYMBOL + ":7,6,1"
     _, text = run("specialized", source, grid)
     assert text.count("scf.if") == 1 and "arith.minsi" not in text
-    assert "bosc_ame.expected_ame_matmuls = 2" in text
-    assert "bosc_ame.compute_graph_node_count = 12" in text
+    assert text.count("linalg.matmul") == 2
+    assert "bosc_ame." not in text and "plan." not in text
     assert "arith.cmpi slt, %arg6, %c6_i32" in text
     full, tail = text.split("} else {")
-    assert "bosc_ame.padding" not in full
-    assert tail.count("bosc_ame.padding") == 2
-    assert full.count("masked = false") == 4
-    assert tail.count("masked = false") == 1  # B remains full in both branches.
+    assert "contract.fill" not in full
+    assert tail.count("contract.fill") == 2
+    assert full.count('kind = "none"') == 4
+    assert tail.count('kind = "none"') == 1  # B remains full in both branches.
     assert tail.count("valid_shape = array<i64: 4, 128>") == 3
-    assert text.count("bosc_ame.lower_to_ame") == 2
+    assert text.count("cast_signed") == 2
     assert (
-        text.count('bosc_ame.compute_kind = "fill"') == 2
+        text.count('kind = "fill"') == 2
     )  # Only tail A/C padding remains; there is no product initialization.
     check_graph(text)
 
@@ -195,14 +184,14 @@ def main():
     assert "memref<23936x" not in buffer and "memref<97664x" not in buffer
     # All plain local copies vanished; the four provenance copies per branch
     # include the final store of the C snapshot carried through the K loop.
-    assert buffer.count("memref.copy") == buffer.count("bosc_ame.memory") == 8
+    assert buffer.count("memref.copy") == buffer.count("contract.access") == 8
 
     backend = work / "backend.mlir"
     subprocess.run(
         [
             opt,
             str(path),
-            backend_pass,
+            *BACKEND,
             "-o",
             str(backend),
         ],
@@ -211,40 +200,18 @@ def main():
     )
     text = backend.read_text()
     assert "memref.alloc(" not in text and "bufferization." not in text
-    ids = re.findall(r"bosc_ame.compute_id = (\d+)", text)
-    if resident:
-        assert len(ids) == len(set(ids)) == 12, ids
-        assert "bosc_ame.compute_graph_complete = false" in text
-        assert "memref.alloca" not in text
     ops = list(walk(read_module(backend)))
     branches = next(op for op in ops if op_name(op.text) == "scf.if").blocks
     for branch in branches:
-        if resident:
-            windows = [
-                op.text
-                for op in walk(branch)
-                if op_name(op.text) == "bosc_ame.spm.view"
-            ]
-            assert len(windows) == 3, windows
-            assert sorted(
-                (int(bank), int(offset))
-                for line in windows
-                for bank, offset in re.findall(
-                    r"bank = (\d+) : i32.*offset = (\d+) : i64", line
-                )
-            ) == [(0, 0), (1, 0), (1, 4096)]
-        else:
-            assert (
-                sum(op_name(op.text) == "memref.alloca" for op in branch) == 3
-            )
-        for loop in (
-            op for op in walk(branch) if op_name(op.text) == "scf.for"
-        ):
-            assert all(
-                op_name(op.text) != "memref.alloca"
-                for block in loop.blocks
-                for op in walk(block)
-            )
+        windows = [
+            op.text
+            for op in walk(branch)
+            if op_name(op.text) == "bosc_ame.spm.view"
+        ]
+        assert len(windows) == 2, windows
+        assert "memref.alloca" not in "\n".join(op.text for op in walk(branch))
+        assert any("memref<32x128xi32" in window for window in windows)
+        assert any("memref<32x128xi8" in window for window in windows)
     for line in text.splitlines():
         if (
             "bosc_ame.tile.load_a " in line
@@ -253,7 +220,9 @@ def main():
         ):
             assert "strided<[128, 1]" in line, line
         elif "bosc_ame.tile.load_b " in line:
-            assert "strided<[1, 128]" in line, line
+            assert (
+                "strided<[1, 768]" in line and "bosc_ame.direct_ddr" in line
+            ), line
     lowered = work / "hardware.mlir"
     subprocess.run(
         [
@@ -278,11 +247,10 @@ def main():
     assert len(pitches) == 24
     for name, operands in pitches:
         assert constants[operands.split(",")[-1].strip()] == (
-            "128" if name in {"mlae8", "mlbe8"} else "512"
+            "768" if name == "mlbe8" else "128" if name == "mlae8" else "512"
         )
 
-    _, text = run("no-contract", source)
-    assert "scf.if" not in text and "arith.minsi" in text
+    run("no-grid", source, reject="kernel contract V4")
     _, text = run(
         "all-full",
         source.replace("dense<196>", "dense<192>"),
@@ -291,20 +259,18 @@ def main():
     assert (
         "scf.if" not in text
         and "arith.minsi" not in text
-        and "bosc_ame.padding" not in text
+        and "contract.fill" not in text
     )
     for label, contract in [
         ("wide-tail", ":8,6,1"),
         ("overflow-end", ":67108864,6,1"),
         ("overflow", ":67108865,6,1"),
     ]:
-        _, text = run(label, source, SYMBOL + contract)
-        assert "scf.if" not in text and "arith.minsi" in text
+        run(label, source, SYMBOL + contract, reject="kernel contract V4")
     unknown = source.replace(
         "%arg2: !tt.ptr<i32>)", "%arg2: !tt.ptr<i32>, %unknown: i32)"
     ).replace("%1 = arith.muli %0,", "%1 = arith.muli %unknown,")
-    _, text = run("unproved", unknown, grid)
-    assert "scf.if" not in text and "arith.minsi" in text
+    run("unproved", unknown, grid, reject="kernel contract V4")
     _, text = run(
         "nonunit-loop",
         source.replace(
@@ -332,7 +298,7 @@ def main():
         [
             opt,
             str(path),
-            backend_pass,
+            *BACKEND,
             "--convert-linalg-to-loops",
             "--lower-affine",
             "--canonicalize",
@@ -404,7 +370,7 @@ def main():
         [
             opt,
             str(path),
-            backend_pass,
+            *BACKEND,
             "--convert-linalg-to-loops",
             "--lower-affine",
             "--canonicalize",

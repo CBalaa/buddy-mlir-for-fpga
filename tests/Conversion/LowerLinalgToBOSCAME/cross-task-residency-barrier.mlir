@@ -1,6 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
+// The retained identity generic normalizes to an independent DDR-to-DDR
+// copy, which V1 rejects before scheduling or physical placement.
+// Supported direct/staged routes and capacity proofs are covered by
+// PlanRoutes.mlir/py and PlanTerminalStore.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @barrier(
       %src: memref<16xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -45,5 +48,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN-NOT: residency=cross-task
-// PLAN: resources: transfers=4 dma-packets=4 read-bytes=128 write-bytes=128 totals-exact=true latency=uncalibrated
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

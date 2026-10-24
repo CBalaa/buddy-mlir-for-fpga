@@ -1,3 +1,14 @@
+The small `generic-*` and `linalg-to-boscame-matmul.mlir` programs retain their
+original mathematical inputs through standard Linalg-to-LLVM reference
+lowering. Their lit tests execute the programs and check every printed value.
+They include broadcasts, small rows and payloads outside the V1 FPGA planner
+contract. The matching makefile targets use the same standard lowering.
+
+The handwritten `bosc-*` programs continue to test standalone BOSCAME target
+instruction lowering. The production neutral contract, planner and emitter are
+documented in [BOSCAMEKernelContractPipeline.md](../../docs/BOSCAMEKernelContractPipeline.md)
+and tested by the FPGA examples and `tests/Conversion/LowerLinalgToBOSCAME`.
+
 # Overall design process developed by BOSCAME
 
 [TOC]

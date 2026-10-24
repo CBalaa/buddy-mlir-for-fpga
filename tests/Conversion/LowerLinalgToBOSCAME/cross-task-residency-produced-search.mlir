@@ -1,13 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// The first producer output saves one reload. The later output saves two.
-// Their 112 KiB windows compete with a later 64 KiB operation, so the exact
-// bounded search must choose the larger traffic benefit regardless of walk
-// order.
+// Projected generics lack the V1 parallel identity-indexing proof, so the
+// original candidate-search module is rejected before physical placement.
 module attributes {bosc_ame.compute_graph_version = 1 : i32,
                    bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   func.func @low_savings(
@@ -148,6 +142,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32,
   }
 }
 
-// PLAN: producer-output-residency-search: candidates=2 selected=1 rejected-capacity=1 objective=maximize-read-bytes-then-packets-saved status=exact latency=uncalibrated
-// PLAN-NEXT: producer-output-residency[0]: function=@low_savings consumers=1 capacity=114688 saved-read-bytes=114688 saved-packets=1 decision=writeback-and-reload reason=spm-capacity
-// PLAN-NEXT: producer-output-residency[1]: function=@high_savings consumers=2 capacity=114688 saved-read-bytes=229376 saved-packets=2 decision=resident reason=traffic-benefit-and-capacity
+// CHECK: kernel contract V25: pointwise update requires parallel identity indexing

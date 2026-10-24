@@ -1,8 +1,7 @@
-//===- BOSCAMETileSpecialization.cpp - Rectangular tiles
+//===- ContractTileSpecialization.cpp - Rectangular tiles
 //-------------------===//
 
-#include "BOSCAMETileSpecialization.h"
-#include "Analysis/BOSCAMELaunchFacts.h"
+#include "ContractTileSpecialization.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -264,7 +263,7 @@ static void refineMemorySubviews(func::FuncOp function) {
   function.walk([&](memref::SubViewOp view) {
     if (view.getType().getRank() == view.getSourceType().getRank() &&
         llvm::all_of(view->getUsers(), [](Operation *user) {
-          return isa<memref::CopyOp>(user) && user->hasAttr("bosc_ame.memory");
+          return isa<memref::CopyOp>(user) && user->hasAttr("contract.access");
         }))
       views.push_back(view);
   });
@@ -288,7 +287,7 @@ static void refineMemorySubviews(func::FuncOp function) {
 
 static void updateMemoryEvents(func::FuncOp function) {
   function.walk([&](memref::CopyOp copy) {
-    auto memory = copy->getAttrOfType<DictionaryAttr>("bosc_ame.memory");
+    auto memory = copy->getAttrOfType<DictionaryAttr>("contract.access");
     if (!memory)
       return;
     auto logical = memory.getAs<DenseI64ArrayAttr>("logical_shape");
@@ -299,10 +298,13 @@ static void updateMemoryEvents(func::FuncOp function) {
       return;
     NamedAttrList attrs(memory);
     OpBuilder builder(copy);
-    attrs.set("valid_shape", builder.getDenseI64ArrayAttr(source.getShape()));
     bool full = source.getShape() == logical.asArrayRef();
-    attrs.set("masked", builder.getBoolAttr(!full));
-    copy->setAttr("bosc_ame.memory",
+    NamedAttrList mask;
+    mask.set("kind", builder.getStringAttr(full ? "none" : "rectangular"));
+    if (!full)
+      mask.set("valid_shape", builder.getDenseI64ArrayAttr(source.getShape()));
+    attrs.set("mask", mask.getDictionary(function.getContext()));
+    copy->setAttr("contract.access",
                   attrs.getDictionary(function.getContext()));
 
     auto kind = memory.getAs<StringAttr>("kind");
@@ -317,11 +319,11 @@ static void updateMemoryEvents(func::FuncOp function) {
       snapshot = view.getSource();
     }
     // Only an unobserved, fully overwritten padding fill may disappear.
-    // Accumulator fills lack bosc_ame.padding and are always retained.
+    // Accumulator fills lack contract.fill and are always retained.
     for (Operation *op = copy->getPrevNode(); op; op = op->getPrevNode()) {
       if (auto fill = dyn_cast<linalg::FillOp>(op)) {
-        if (fill->hasAttr("bosc_ame.padding") &&
-            fill.getOutputs().size() == 1 && fill.getOutputs()[0] == snapshot)
+        if (fill->hasAttr("contract.fill") && fill.getOutputs().size() == 1 &&
+            fill.getOutputs()[0] == snapshot)
           fill.erase();
         break;
       }
@@ -332,13 +334,11 @@ static void updateMemoryEvents(func::FuncOp function) {
 }
 } // namespace
 
-LogicalResult mlir::triton::specializeBOSCAMETiles(ModuleOp module) {
-  auto facts = buddy::boscame::analyzeBOSCAMELaunchFacts(module);
-  if (failed(facts))
-    return failure();
-  for (const auto &fact : *facts) {
-    auto function = module.lookupSymbol<func::FuncOp>(fact.functionName);
-    if (!fact.knownGrid || !function || function.isExternal() ||
+LogicalResult mlir::triton::specializeContractTiles(ModuleOp module) {
+  for (auto function : module.getOps<func::FuncOp>()) {
+    auto knownGrid =
+        function->getAttrOfType<DenseI32ArrayAttr>("gpu.known_grid_size");
+    if (!knownGrid || knownGrid.size() != 3 || function.isExternal() ||
         !llvm::hasSingleElement(function.getBody()))
       continue;
     auto terminator =
@@ -347,23 +347,29 @@ LogicalResult mlir::triton::specializeBOSCAMETiles(ModuleOp module) {
       continue;
     Ranges ranges;
     std::array<Value, 3> pids{};
-    for (const auto &argument : fact.programArguments) {
-      if (!argument.axis || *argument.axis < 0 || *argument.axis >= 3)
+    for (unsigned i = 0; i < function.getNumArguments(); ++i) {
+      auto argument =
+          function.getArgAttrOfType<DictionaryAttr>(i, "contract.program");
+      if (!argument)
         continue;
-      int64_t grid = (*fact.knownGrid)[*argument.axis];
-      Value value = function.getArgument(argument.argumentIndex);
+      auto role = argument.getAs<StringAttr>("role");
+      auto axis = argument.getAs<IntegerAttr>("axis");
+      if (!role || !axis || axis.getInt() < 0 || axis.getInt() >= 3)
+        continue;
+      int64_t grid = knownGrid[axis.getInt()];
+      Value value = function.getArgument(i);
       if (!value.getType().isInteger(32))
         continue;
-      if (argument.role == buddy::boscame::LaunchProgramRole::ProgramId) {
+      if (role.getValue() == "program_id") {
         ranges.arguments[value] = {0, grid - 1};
-        pids[*argument.axis] = value;
+        pids[axis.getInt()] = value;
       } else {
         ranges.arguments[value] = {grid, grid};
       }
     }
     llvm::SetVector<Value> sizes;
     function.walk([&](memref::CopyOp copy) {
-      if (!copy->hasAttr("bosc_ame.memory"))
+      if (!copy->hasAttr("contract.access"))
         return;
       for (Value operand : copy->getOperands())
         if (auto view = operand.getDefiningOp<memref::SubViewOp>())
@@ -378,7 +384,7 @@ LogicalResult mlir::triton::specializeBOSCAMETiles(ModuleOp module) {
     SmallVector<Partition> partitions;
     for (unsigned axis = 0; axis < 3; ++axis) {
       Value pid = pids[axis];
-      int64_t grid = (*fact.knownGrid)[axis];
+      int64_t grid = knownGrid[axis];
       if (!pid || grid < 2)
         continue;
       for (const auto &extent : extents) {

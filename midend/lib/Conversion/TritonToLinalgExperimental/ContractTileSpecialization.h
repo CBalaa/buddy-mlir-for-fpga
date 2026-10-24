@@ -1,15 +1,15 @@
-//===- BOSCAMETileSpecialization.h - Rectangular tiles
+//===- ContractTileSpecialization.h - Rectangular tiles
 //---------------------===//
 
-#ifndef BUDDY_BOSCAMETILESPECIALIZATION_H
-#define BUDDY_BOSCAMETILESPECIALIZATION_H
+#ifndef BUDDY_CONTRACTTILESPECIALIZATION_H
+#define BUDDY_CONTRACTTILESPECIALIZATION_H
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Support/LogicalResult.h"
 
 namespace mlir::triton {
 /// Specialize proven rectangular load/store bounds before graph annotation.
-LogicalResult specializeBOSCAMETiles(ModuleOp module);
+LogicalResult specializeContractTiles(ModuleOp module);
 } // namespace mlir::triton
 
 #endif

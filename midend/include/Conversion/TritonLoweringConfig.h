@@ -16,8 +16,7 @@ namespace mlir::triton {
 
 /// Internal configuration, independent of any driver or command-line options.
 struct TritonLoweringConfig {
-  bool enableBOSCAME = false;
-  std::string dmaAbi;
+  bool emitContract = false;
 };
 
 } // namespace mlir::triton

@@ -1,7 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
 
-// Unsupported SPM vector element types stay in ordinary memory even when the
-// typed DMA planner is enabled.
+// Preserve the f16 identity-generic input. It normalizes to a DDR-to-DDR
+// boundary, which V1 rejects before selecting a vector or staging recipe.
+// Legal automatic staging fallback is covered by PlanRoutes.mlir/py.
 module {
   func.func @f16(%input: memref<32xf16>, %out: memref<32xf16>) {
     linalg.generic {indexing_maps = [affine_map<(i) -> (i)>,
@@ -16,6 +17,4 @@ module {
 
 }
 
-// CHECK-LABEL: func.func @f16
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: scf.for
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

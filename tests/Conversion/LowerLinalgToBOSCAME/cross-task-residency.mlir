@@ -1,6 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
+// The retained identity generic normalizes to an independent DDR-to-DDR
+// copy, which V1 rejects before scheduling or physical placement.
+// Supported direct/staged routes and capacity proofs are covered by
+// PlanRoutes.mlir/py and PlanTerminalStore.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @reuse(
       %src: memref<16xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -62,7 +65,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN: transfer[{{[0-9]+}}]: consumer=linalg.generic residency=cross-task consumers=[linalg.generic, linalg.generic, linalg.generic] role=input-a
-// PLAN: resources: transfers=4 dma-packets=4 read-bytes=64 write-bytes=192 totals-exact=true latency=uncalibrated
-// PLAN: function-argument-residency-search: candidates=1 selected=1 rejected-capacity=0 objective=minimize-read-bytes-then-packets status=exact latency=uncalibrated
-// PLAN: argument-residency[0]: function=@reuse arg#0 consumers=3 capacity=64 resident-read-bytes=64 resident-packets=1 reload-read-bytes=192 reload-packets=3 decision=resident reason=traffic-benefit-and-capacity
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

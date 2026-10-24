@@ -11,8 +11,9 @@ AME blocks.
 The only lowering route in this directory is:
 
 ```text
-TTIR -> triton-to-linalg-experimental -> one-shot bufferize
-     -> linalg-to-boscame -> lower-bosc-ame -> LLVM IR -> AME assembly -> ELF
+TTIR -> triton-to-linalg-experimental (contract=true; includes bufferization)
+     -> neutral contract IR -> bosc-ame-plan -> verified planned IR
+     -> bosc-ame-emit -> lower-bosc-ame -> LLVM IR -> AME assembly -> ELF
 ```
 
 ## Quick start
@@ -41,30 +42,34 @@ The conversion commands used by `make boscame llvm` are:
 
 ```bash
 buddy-opt build/matmul_i8_128x1024x128/kernel.ttir \
-  --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias" \
+  --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_matmul_i8_128x1024x128:2,16,1" \
   -o build/matmul_i8_128x1024x128/kernel.frontend.mlir
 buddy-opt build/matmul_i8_128x1024x128/kernel.frontend.mlir \
-  --empty-tensor-to-alloc-tensor \
-  --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" \
-  --canonicalize --cse \
-  -o build/matmul_i8_128x1024x128/kernel.bufferized.mlir
+  --kernel-contract-verify -o build/matmul_i8_128x1024x128/kernel.bufferized.mlir
 buddy-opt build/matmul_i8_128x1024x128/kernel.bufferized.mlir \
-  --linalg-to-boscame \
-  -o build/matmul_i8_128x1024x128/kernel.boscame.mlir
+  --bosc-ame-plan --bosc-ame-plan-verify \
+  -o build/matmul_i8_128x1024x128/kernel.planned.mlir
+buddy-opt build/matmul_i8_128x1024x128/kernel.planned.mlir \
+  --bosc-ame-emit -o build/matmul_i8_128x1024x128/kernel.boscame.mlir
 buddy-opt build/matmul_i8_128x1024x128/kernel.boscame.mlir \
   --lower-bosc-ame -o build/matmul_i8_128x1024x128/kernel.llvm.mlir
 buddy-translate build/matmul_i8_128x1024x128/kernel.llvm.mlir \
   --buddy-to-llvmir -o build/matmul_i8_128x1024x128/kernel.ll
 ```
 
-`--triton-to-linalg-experimental` keeps the Triton source, mask and
-program-axis facts as `bosc_ame.*` attributes on the buffer-form Linalg IR.
-`--linalg-to-boscame` reads those facts, analyzes the Linalg computation and
-its memory facts, plans placement/transfer decisions, and emits the BOSCAME
-dialect; `--lower-bosc-ame` then lowers the tile/DMA/SPM operations to
-`bosc_ame.intr.*` and the surrounding LLVM dialect. See
-[the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md) for
-the fact and plan reports, the DMA ABI and the supported accesses.
+Contract mode performs integer normalization, static mask specialization and
+safe bufferization inside the frontend. `kernel.frontend.mlir` already contains
+standard buffer-form Linalg/MemRef/SCF and target-neutral `contract.*` facts;
+`kernel.bufferized.mlir` is its verified copy, retained as a familiar artifact
+name. No second bufferization is needed. The planner binds actual operands,
+selects each DDR/SPM route, rebuilds content versions and dependencies, and
+records concrete `plan.*` decisions in `kernel.planned.mlir`. Emission verifies
+that plan and expands it mechanically. There is no global storage-policy option.
+
+The contract can be produced by another frontend without Triton or BOSCAME
+dialect dependencies. See the [pipeline guide](../../../docs/BOSCAMEKernelContractPipeline.md)
+and [regenerated-example validation](../../../docs/BOSCAMEKernelContractValidation.md)
+for the interface, resource counts and artifact hashes.
 
 ## AME datapath
 
@@ -124,15 +129,16 @@ extrema, random nonzero C and i32 overflow; a separate K=256 test checks
 internal blocking, a nonzero dot initializer and rectangular masks. All integer
 comparisons are exact.
 
-The accumulator-fusion build passes `make`, `make check` and `make simcheck`:
-all 32 programs produce 131072 exact i32 outputs, with zero DMA transfers and
-zero SPM occupancy. The final graph has one matmul task. The 524288 output
-bytes have SHA256
+The regenerated contract/plan/emit build passes `make`, `make check` and
+`make simcheck`: all 32 programs produce 131072 exact i32 outputs, with zero
+DMA transfers and zero SPM occupancy. Five source tasks fold into one matmul
+task. Its final kernel assembly matches the saved baseline byte for byte.
+The 524288 verified output bytes have SHA256
 `38114b2648726d06482fc92bf727d2376ae93b763c1951c7df6cd16876e45cb2`.
-A final-ELF call-chain audit, including the encoder's temporary register save,
-finds a 656-byte peak within the unchanged 65536-byte E6 stack.
-See [the accumulator-fusion validation record](../../../docs/validation/boscame-accumulator-routing/README.md)
-for the recorded compiler and resource checks.
+The linked ELF's E6 call-chain stack bound is 656 B, including the encoder's
+temporary saves, within the unchanged 65536-byte stack. DMA code is unreachable
+and removed from this direct-only image. See the [validation record](../../../docs/BOSCAMEKernelContractValidation.md)
+for the current artifact hashes and audit procedure.
 
 ```bash
 make debug            # progress markers and the launcher's 16-row board oracle
@@ -192,4 +198,4 @@ comparison has been made.
 | `../tools/check_nr_elf.py` | Complete-ELF instruction audit |
 | `../tools/check_experimental_board.py` | Independent final-DDR checker using exact ELF symbols |
 
-See [the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md).
+See [the pipeline guide](../../../docs/BOSCAMEKernelContractPipeline.md).

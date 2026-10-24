@@ -1,13 +1,7 @@
-// RUN: split-file %s %t
-// RUN: not buddy-opt %t/strided-peer.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=STRIDED
-// RUN: not buddy-opt %t/oversized.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=CAPACITY
-// RUN: not buddy-opt %t/global-peer.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=ALIAS
-// RUN: not buddy-opt %t/helper-alias.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=HELPER-ALIAS
-
-// STRIDED: dynamic BOSCAME prefix peer buffer must be contiguous
-// CAPACITY: BOSCAME SPM workspace capacity exceeded
-// ALIAS: dynamic BOSCAME prefix peer buffer may alias the external endpoint
-// HELPER-ALIAS: dynamic BOSCAME prefix peer buffer may alias the external endpoint
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 //--- strided-peer.mlir
 module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {

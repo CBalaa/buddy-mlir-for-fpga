@@ -93,7 +93,7 @@ public:
     auto moduleOp = getOperation();
     RewritePatternSet prePatterns(&getContext());
     triton::populateStructuredToMemrefPreConversionPatterns(
-        prePatterns, enableTensorFirstVectorCpu && !config.enableBOSCAME);
+        prePatterns, enableTensorFirstVectorCpu && !config.emitContract);
     if (failed(applyPatternsGreedily(moduleOp, std::move(prePatterns)))) {
       signalPassFailure();
       return;

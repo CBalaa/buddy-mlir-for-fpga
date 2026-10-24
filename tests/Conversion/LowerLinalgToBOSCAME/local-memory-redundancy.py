@@ -1,5 +1,5 @@
 # RUN: %PYTHON %s %t buddy-opt
-"""Remove local redundant SPM accesses without losing tail or graph semantics."""
+"""Keep operand addresses, ordered arithmetic and fixed-window numerics exact."""
 
 import re
 import struct
@@ -135,70 +135,27 @@ def check_local(binary, directory, case):
     loops = [
         op for op in walk(read_module(path)) if op_name(op.text) == "scf.for"
     ]
-    if case.startswith("select_"):
-        destination = spm_root(text, 256 if case == "select_distinct" else 0)
-        copies = []
-        for loop in loops:
-            loads, stores = (
-                memory_ops(loop, "vector.load"),
-                memory_ops(loop, "vector.store"),
-            )
-            if len(loads) != 1 or len(stores) != 1:
-                continue
-            load = re.search(r"vector\.load (%[\w.]+)\[", loads[0].text)[1]
-            store = re.search(
-                r"vector\.store %[^,]+, (%[\w.]+)\[", stores[0].text
-            )[1]
-            if store == destination and load in (
-                spm_root(text, 0),
-                spm_root(text, 128),
-            ):
-                copies.append(load)
-        expected = [spm_root(text, 128)]
-        if case != "select_in_place":
-            expected.insert(0, spm_root(text, 0))
-        assert copies == expected, (case, copies, expected, text)
-        expected_values = VALUES[:16] + (0.0,) * 16
+    arithmetic = [loop for loop in loops if memory_ops(loop, "arith.mulf")]
+    assert len(arithmetic) == (2 if case == "separate_loops" else 1), text
+    for loop in arithmetic:
+        # The emitter mechanically binds each used input. General load CSE is
+        # a later standard optimization, so equal addresses may have two loads.
+        loads = memory_ops(loop, "vector.load")
+        assert len(loads) == 2, text
+        multiply = memory_ops(loop, "arith.mulf")[0]
+        operands = re.search(
+            r"arith\.mulf (%[\w.]+), (%[\w.]+)", multiply.text
+        ).groups()
+        assert set(operands) == {result_name(load.text) for load in loads}, text
+    if case == "distinct_operands":
+        expected_values = tuple(x * y for x, y in zip(VALUES, OTHER))
+    elif case == "used_init":
+        assert sum(len(memory_ops(loop, "arith.addf")) for loop in loops) == 1
+        expected_values = tuple(x * x + x for x in VALUES)
+    elif case == "separate_loops":
+        expected_values = tuple(x**4 for x in VALUES)
     else:
-        arithmetic = [loop for loop in loops if memory_ops(loop, "arith.mulf")]
-        expected_counts = {
-            "duplicate": [1],
-            "distinct_operands": [2],
-            "distinct_cast_operands": [2],
-            "used_init": [1],
-            "separate_loops": [1, 1],
-            "split_ranges": [1, 1],
-        }[case]
-        assert [
-            len(memory_ops(loop, "vector.load")) for loop in arithmetic
-        ] == expected_counts, text
-        for loop in arithmetic:
-            multiply = memory_ops(loop, "arith.mulf")[0]
-            left, right = re.search(
-                r"arith\.mulf (%[\w.]+), (%[\w.]+)", multiply.text
-            ).groups()
-            assert (left == right) == (
-                case not in ("distinct_operands", "distinct_cast_operands")
-            ), (
-                case,
-                multiply.text,
-            )
-            assert left in {
-                result_name(load.text)
-                for load in memory_ops(loop, "vector.load")
-            }, text
-        if case == "distinct_operands":
-            expected_values = tuple(x * y for x, y in zip(VALUES, OTHER))
-        elif case == "used_init":
-            expected_values = tuple(x * x + x for x in VALUES)
-        elif case == "separate_loops":
-            expected_values = tuple(x**4 for x in VALUES)
-        elif case == "split_ranges":
-            expected_values = tuple(x * x for x in VALUES[:16]) + tuple(
-                x * x + x for x in VALUES[16:]
-            )
-        else:
-            expected_values = tuple(x * x for x in VALUES)
+        expected_values = tuple(x * x for x in VALUES)
     output = bytearray(128)
     Machine(path, "local").launch(
         {
@@ -210,69 +167,52 @@ def check_local(binary, directory, case):
     assert output == struct.pack("<32f", *expected_values), (case, output)
 
 
-def check_layernorm(binary, directory):
-    fixture = Path(__file__).parent / "Inputs/layernorm-197x768-bufferized.mlir"
-    text = lower(
-        binary,
-        fixture.read_text(),
-        directory / "layernorm.mlir",
-        "--linalg-to-boscame=buffer-placement=true ",
+def check_legacy(binary):
+    cases = dict.fromkeys(
+        ("select_in_place", "select_distinct", "select_cast"),
+        "unsupported legacy target metadata: bosc_ame.zero_tail_select_prefix",
     )
-    tasks = {}
-    for line in text.splitlines():
-        task = re.search(r"bosc_ame.compute_id = (\d+) : i64", line)
-        if task:
-            number = int(task[1])
-            assert number not in tasks, number
-            tasks[number] = line
-    assert set(tasks) == set(range(22)) - {1, 2, 3}, tasks
-    assert "bosc_ame.compute_graph_node_count = 19 : i64" in text, text
-    for task, attribute, value in (
-        (14, "compute_input_values", "26, 1"),
-        (14, "compute_predecessors", "0, 13"),
-        (14, "compute_output_values", "27"),
-        (15, "compute_input_values", "27, 27"),
-        (15, "compute_predecessors", "14"),
-        (15, "compute_output_values", "28"),
-    ):
-        assert f"bosc_ame.{attribute} = array<i64: {value}>" in tasks[task], (
-            tasks[task]
+    cases["split_ranges"] = "generic requires one pure arithmetic operation"
+    for case, diagnostic in cases.items():
+        result = subprocess.run(
+            [binary, "-", OPTIONS],
+            input=source(case),
+            text=True,
+            capture_output=True,
         )
-    # These rank-one task bodies contain no nested regions. The surviving
-    # task-14 anchor must remain on the tail loop, with task 15 on square.
-    for task in (14, 15):
-        closing = text.index(tasks[task])
-        body = text[text.rfind("scf.for ", 0, closing) : closing]
-        assert body.count("vector.load ") == 1, (task, body)
-        assert body.count("vector.store ") == 1, (task, body)
-        if task == 14:
-            lower_bound = re.search(r"scf.for %[^ ]+ = (%[\w.]+)", body)[1]
-            assert f"{lower_bound} = arith.constant 768 : index" in text, body
-        else:
-            left, right = re.search(
-                r"arith\.mulf (%[\w.]+), (%[\w.]+)", body
-            ).groups()
-            assert left == right, body
+        assert result.returncode != 0 and diagnostic in result.stderr, (
+            case,
+            result.stderr,
+        )
+    # The original LayerNorm artifact carries retired geometry. Current neutral
+    # prefix/tail and graph coverage lives in buffer-placement-metadata.py and
+    # boscame-spm-compute.py, including actual numerical comparisons.
+    fixture = Path(__file__).parent / "Inputs/layernorm-197x768-bufferized.mlir"
+    result = subprocess.run(
+        [binary, str(fixture), "--linalg-to-boscame"],
+        text=True,
+        capture_output=True,
+    )
+    assert (
+        result.returncode != 0
+        and "obsolete geometry attribute bosc_ame.bm" in result.stderr
+    )
 
 
 def main():
     directory, binary = Path(sys.argv[1]), sys.argv[2]
     directory.mkdir(parents=True, exist_ok=True)
     for case in (
-        "select_in_place",
-        "select_distinct",
-        "select_cast",
         "duplicate",
         "distinct_operands",
         "distinct_cast_operands",
         "used_init",
         "separate_loops",
-        "split_ranges",
     ):
         check_local(binary, directory, case)
-    check_layernorm(binary, directory)
+    check_legacy(binary)
     print(
-        "PASS local memory redundancy: exact outputs, required copies/tails, load scope and 19 graph tasks preserved"
+        "PASS exact local arithmetic and operand addresses; unsafe legacy prefix proofs rejected"
     )
 
 

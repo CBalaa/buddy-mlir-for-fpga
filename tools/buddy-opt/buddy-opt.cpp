@@ -37,11 +37,13 @@
 #include "AME/AMEDialect.h"
 #include "AME/AMEOps.h"
 #include "AME/Transform.h"
+#include "Analysis/KernelContract.h"
 #include "BOSCAME/BOSCAMEDialect.h"
 #include "BOSCAME/BOSCAMEOps.h"
 #include "BOSCAME/Transform.h"
 #include "Bud/BudDialect.h"
 #include "Bud/BudOps.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
 #include "Conversion/StructuredToMemref/Passes.h"
 #include "Conversion/TritonArithToLinalg/Passes.h"
 #include "Conversion/TritonPtrToMemref/Passes.h"
@@ -184,6 +186,9 @@ int main(int argc, char **argv) {
 #endif
   mlir::buddy::registerLowerGemminiPass();
   mlir::buddy::registerLowerLinalgToBOSCAMEPass();
+  buddy::contract::registerKernelContractPasses();
+  buddy::boscame::registerBOSCAMEPlanPasses();
+  buddy::boscame::registerBOSCAMEPlanEmissionPasses();
   mlir::buddy::registerLowerLinalgToGemminiPass();
   mlir::buddy::registerLowerLinalgToIMEPass();
   mlir::buddy::registerLowerIMEPass();

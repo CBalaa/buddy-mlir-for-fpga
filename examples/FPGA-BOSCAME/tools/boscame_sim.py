@@ -94,10 +94,12 @@ def _split_top_level(text, separator=","):
     parts = []
     depth = 0
     current = ""
-    for char in text:
+    for index, char in enumerate(text):
         if char in "<([{":
             depth += 1
-        elif char in ">)]}":
+        elif char in ">)]}" and not (
+            char == ">" and index > 0 and text[index - 1] == "-"
+        ):
             depth -= 1
         if char == separator and depth == 0:
             parts.append(current)
@@ -495,7 +497,9 @@ def split_op_and_types(text):
     for index, char in enumerate(text):
         if char in "<([{":
             depth += 1
-        elif char in ">)]}":
+        elif char in ">)]}" and not (
+            char == ">" and index > 0 and text[index - 1] == "-"
+        ):
             depth -= 1
         elif char == ":" and depth == 0:
             return text[:index].strip(), text[index + 1 :].strip()

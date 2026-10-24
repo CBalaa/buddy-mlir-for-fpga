@@ -1,18 +1,12 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/entry.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/entry.out 2>%t/entry.plan
-// RUN: FileCheck %s --check-prefix=ENTRY-PLAN < %t/entry.plan
-// RUN: buddy-opt %t/helper.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/helper.out 2>%t/helper.plan
-// RUN: FileCheck %s --check-prefix=HELPER-PLAN < %t/helper.plan
+// RUN: not buddy-opt %t/entry.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ENTRY
+// RUN: not buddy-opt %t/helper.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=HELPER
 
-// An intervening write to a distinct entry argument is harmless when the
-// explicit ABI proves it disjoint from the cached source. A called helper
-// cannot use that contract for its formals because the caller may alias them.
-// ENTRY-PLAN: transfer[0]: consumer=linalg.generic residency=cross-task consumers=[linalg.generic, linalg.generic] role=input-a
-// ENTRY-PLAN: resources: transfers=3 dma-packets=3 read-bytes=64 write-bytes=128 totals-exact=true latency=uncalibrated
-// ENTRY-PLAN: function-argument-residency-search: candidates=1 selected=1
-// HELPER-PLAN-NOT: residency=cross-task
-// HELPER-PLAN: resources: transfers=4 dma-packets=4 read-bytes=128 write-bytes=128 totals-exact=true latency=uncalibrated
-// HELPER-PLAN: function-argument-residency-search: candidates=0 selected=0
+// The original entry copy has no independent V1 DDR-to-DDR recipe. Called
+// helper formals have no entry disjointness guarantee; the contract rejects
+// their potentially overlapping copy before physical route selection.
+// ENTRY: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// HELPER: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer
 
 //--- entry.mlir
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {

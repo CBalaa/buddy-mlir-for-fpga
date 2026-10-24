@@ -1,7 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s
 
-// The input and direct-DDR output share a root but occupy adjacent 64-byte
-// intervals, so the direct store is legal.
+// Adjacent static views pass the contract alias proof. The identity generic
+// becomes DDR-to-DDR copy, which V1 does not plan independently.
+// Supported direct compute and terminal stores are covered by PlanRoutes.py
+// and PlanTerminalStore.py.
 module {
   func.func @disjoint_views(%root: memref<32xf32>) {
     %input = memref.subview %root[0] [16] [1]
@@ -25,8 +27,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @disjoint_views
-// CHECK: bosc_ame.dma.start
-// CHECK: vector.load
-// CHECK: vector.store
-// CHECK: return
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

@@ -1,19 +1,25 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly or retain an incomplete graph. Complete,
+// read-free private overwrites may recover local versions after an opaque
+// boundary; they do not make its control-flow summary complete.
+// CONTRACT-CASE: while_before_result = incomplete
+// CONTRACT-CASE: while_memref_condition = incomplete
+// CONTRACT-CASE: while_slot_permutation = incomplete
+// CONTRACT-CASE: while_writer_exit = incomplete
 module {
   func.func @while_before_result(%input: tensor<4xf32>, %condition: i1,
       %condition_buffer: memref<1xi1>)
       -> tensor<4xf32> {
     %c0 = arith.constant 0 : index
     %loaded_condition = memref.load %condition_buffer[%c0] {
-      bosc_ame.memory = {kind = "load", origin_id = 30 : i64}
+      contract.provenance = {origin_id = 30 : i64}
     } : memref<1xi1>
     %empty = tensor.empty() : tensor<4xf32>
     %seed = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 40 : i64}}
+        contract.provenance = {origin_id = 40 : i64}}
         ins(%input : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -24,7 +30,7 @@ module {
         : (tensor<4xf32>) -> tensor<4xf32> {
       %before_value = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 410 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 410 : i64}
           ins(%before : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%value: f32, %unused: f32):
           %negated = arith.negf %value : f32
@@ -35,7 +41,7 @@ module {
     ^bb0(%after: tensor<4xf32>):
       %after_value = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 420 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 420 : i64}
           ins(%after : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%value: f32, %unused: f32):
           %negated = arith.negf %value : f32
@@ -45,7 +51,7 @@ module {
     }
     %result_value = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 430 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 430 : i64}
         ins(%result : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -61,7 +67,7 @@ module {
     %lhs_values = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 210 : i64}}
+        contract.provenance = {origin_id = 210 : i64}}
         ins(%lhs : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -70,7 +76,7 @@ module {
     %rhs_values = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 220 : i64}}
+        contract.provenance = {origin_id = 220 : i64}}
         ins(%rhs : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -79,7 +85,7 @@ module {
     %guard_values = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 230 : i64}}
+        contract.provenance = {origin_id = 230 : i64}}
         ins(%guard : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -97,7 +103,7 @@ module {
          %after_guard: tensor<4xf32>):
       %next_lhs = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 310 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 310 : i64}
           ins(%after_lhs : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%value: f32, %unused: f32):
           %negated = arith.negf %value : f32
@@ -105,7 +111,7 @@ module {
       } -> tensor<4xf32>
       %next_rhs = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 320 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 320 : i64}
           ins(%after_rhs : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%value: f32, %unused: f32):
           %negated = arith.negf %value : f32
@@ -113,7 +119,7 @@ module {
       } -> tensor<4xf32>
       %next_guard = linalg.generic {
           indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-          iterator_types = ["parallel"], bosc_ame.origin_id = 330 : i64}
+          iterator_types = ["parallel"], contract.origin_id = 330 : i64}
           ins(%after_guard : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
         ^bb0(%value: f32, %unused: f32):
           %negated = arith.negf %value : f32
@@ -125,7 +131,7 @@ module {
 
     %result_lhs = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 401 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 401 : i64}
         ins(%result#0 : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -133,7 +139,7 @@ module {
     } -> tensor<4xf32>
     %result_rhs = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 402 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 402 : i64}
         ins(%result#1 : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -141,7 +147,7 @@ module {
     } -> tensor<4xf32>
     %result_guard = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 403 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 403 : i64}
         ins(%result#2 : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -158,7 +164,7 @@ module {
     %initial_values = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 510 : i64}}
+        contract.provenance = {origin_id = 510 : i64}}
         ins(%initial : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -167,7 +173,7 @@ module {
     %before_values = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 520 : i64}}
+        contract.provenance = {origin_id = 520 : i64}}
         ins(%before_input : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -176,7 +182,7 @@ module {
     %after_values = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 530 : i64}}
+        contract.provenance = {origin_id = 530 : i64}}
         ins(%after_input : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -190,13 +196,13 @@ module {
       : tensor<4xf32> to memref<4xf32>
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial_buffer, %buffer {
-      bosc_ame.memory = {kind = "store", origin_id = 511 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 511 : i64}
     } : memref<4xf32> to memref<4xf32>
 
     %result = scf.while (%carry = %initial_values)
         : (tensor<4xf32>) -> tensor<4xf32> {
       memref.copy %before_buffer, %buffer {
-        bosc_ame.memory = {kind = "store", origin_id = 521 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 521 : i64}
       } : memref<4xf32> to memref<4xf32>
       %snapshot = bufferization.to_tensor %buffer restrict
         : memref<4xf32> to tensor<4xf32>
@@ -204,13 +210,13 @@ module {
     } do {
     ^bb0(%after: tensor<4xf32>):
       memref.copy %after_buffer, %buffer {
-        bosc_ame.memory = {kind = "store", origin_id = 531 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 531 : i64}
       } : memref<4xf32> to memref<4xf32>
       scf.yield %after : tensor<4xf32>
     }
     %result_value = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 541 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 541 : i64}
         ins(%result : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -220,7 +226,7 @@ module {
       : memref<4xf32> to tensor<4xf32>
     %post_value = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 542 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 542 : i64}
         ins(%post_snapshot : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %negated = arith.negf %value : f32
@@ -234,7 +240,7 @@ module {
     %result = scf.while (%before = %dst)
         : (memref<4xf32>) -> memref<4xf32> {
       memref.copy %src, %before {
-        bosc_ame.memory = {kind = "store", origin_id = 610 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 610 : i64}
       } : memref<4xf32> to memref<4xf32>
       scf.condition(%condition) %before : memref<4xf32>
     } do {
@@ -244,46 +250,3 @@ module {
     return %result : memref<4xf32>
   }
 }
-
-// CHECK-LABEL: func.func @while_before_result
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_id = [[BEFORE_ID:[0-9]+]] : i64{{.*}}bosc_ame.compute_origin_id = 410 : i64
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 420 : i64{{.*}}bosc_ame.source_load_origin_ids = array<i64: 40>
-// CHECK: bosc_ame.loop_carried_slots = [{
-// CHECK-SAME: after_arg_value_id = {{[0-9]+}} : i64
-// CHECK-SAME: backedge_producer_compute_ids = array<i64: {{[0-9]+}}>
-// CHECK-SAME: condition_producer_compute_ids = array<i64: [[BEFORE_ID]]>
-// CHECK-SAME: init_producer_compute_ids = array<i64: {{[0-9]+}}>
-// CHECK-SAME: slot = 0 : i64
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 430 : i64{{.*}}bosc_ame.compute_predecessors = array<i64: {{.*}}[[BEFORE_ID]]>{{.*}}bosc_ame.source_load_origin_ids = array<i64: 30, 40>
-
-// CHECK-LABEL: func.func @while_slot_permutation
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_id = [[LHS_LOAD:[0-9]+]] : i64{{.*}}bosc_ame.memory = {kind = "load", origin_id = 210 : i64}
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_id = [[RHS_LOAD:[0-9]+]] : i64{{.*}}bosc_ame.memory = {kind = "load", origin_id = 220 : i64}
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_id = [[GUARD_LOAD:[0-9]+]] : i64{{.*}}bosc_ame.memory = {kind = "load", origin_id = 230 : i64}
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 310 : i64{{.*}}bosc_ame.compute_predecessors = array<i64: [[RHS_LOAD]]>{{.*}}bosc_ame.source_load_origin_ids = array<i64: 210, 220>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 320 : i64{{.*}}bosc_ame.compute_predecessors = array<i64: [[LHS_LOAD]]>{{.*}}bosc_ame.source_load_origin_ids = array<i64: 210, 220>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 330 : i64{{.*}}bosc_ame.compute_predecessors = array<i64: [[GUARD_LOAD]]>{{.*}}bosc_ame.source_load_origin_ids = array<i64: 230>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 401 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 210, 220>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 402 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 210, 220>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 403 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 230>
-
-// CHECK-LABEL: func.func @while_writer_exit
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = [[BEFORE_WRITER:[0-9]+]] : i64{{.*}}bosc_ame.compute_origin_id = 521 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 520>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = [[AFTER_WRITER:[0-9]+]] : i64{{.*}}bosc_ame.compute_origin_id = 531 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 530>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 541 : i64{{.*}}bosc_ame.compute_predecessors = array<i64: [[BEFORE_WRITER]]>{{.*}}bosc_ame.source_load_origin_ids = array<i64: 520>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 542 : i64{{.*}}bosc_ame.compute_predecessors = array<i64: [[BEFORE_WRITER]]>{{.*}}bosc_ame.source_load_origin_ids = array<i64: 520>
-
-// CHECK-LABEL: func.func @while_memref_condition
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = [[MEMREF_WRITER:[0-9]+]] : i64{{.*}}bosc_ame.compute_origin_id = 610 : i64
-// CHECK: bosc_ame.loop_carried_slots = [{
-// CHECK-SAME: condition_producer_compute_ids = array<i64: [[MEMREF_WRITER]]>
-// CHECK-SAME: slot = 0 : i64

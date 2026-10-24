@@ -184,12 +184,10 @@ def main():
         return path, result.stdout, result.stderr
 
     path, text, report = lower("scoped", scoped_source())
-    assert "resident=5 ddr=0 applied=true" in report, report
-    assert "scope=serial-scf fixed-windows=true" in report
     roots = [
-        tuple(map(int, match))
-        for match in re.findall(
-            r"root\[\d+\]: kind=SpmResident bytes=(\d+) bank=(\d+) offset=(\d+)",
+        (int(size), int(bank), int(offset))
+        for bank, size, offset in re.findall(
+            r"memref.alloc plan.buffer=\{bank = (\d+) : i64, capacity = (\d+) : i64, level = \"spm\", offset = (\d+) : i64",
             report,
         )
     ]
@@ -204,7 +202,7 @@ def main():
             # particular the outer sum and inner-loop scratch stay distinct.
             assert overlap == ((j, i) == (1, 3)), roots
     assert "memref.alloc" not in text and text.count("bosc_ame.dma.start") == 2
-    assert "scope=lexical status=incomplete" in report
+    assert "contract.compute_graph = {complete = false" in text
     machine = Machine(path, "scoped")
     values = np.arange(256, dtype=np.int64) * 131 + (1 << 31) - 100
     values = values.astype("<i4")
@@ -230,26 +228,56 @@ def main():
         ]
 
     for column_major in [False, True]:
-        path, text, report = lower(
-            "boundary-" + str(column_major), boundary_source(column_major)
+        original = boundary_source(column_major)
+        rejected = subprocess.run(
+            [opt, "-", PASS], input=original, text=True, capture_output=True
         )
         assert (
-            "transfers=2 dma-packets=6 read-bytes=192 write-bytes=192" in report
+            rejected.returncode != 0
+            and "masked load must record its other value" in rejected.stderr
         )
-        starts = [
-            line for line in text.splitlines() if "bosc_ame.dma.start" in line
+        # Keep the original incomplete physical input as a negative. The legal
+        # variant explicitly initializes its complete declared private window;
+        # the planner must never invent that padding initialization itself.
+        initialized = original.replace(
+            'kind = "load", masked = true,',
+            'kind = "load", masked = true, other = 0 : i32,',
+        )
+        initialized = initialized.replace(
+            "    %parent = memref.reinterpret_cast %raw",
+            "    %zero = arith.constant 0 : i32\n"
+            "    linalg.fill ins(%zero : i32) outs(%raw : memref<384xi32, #bosc_ame.spm<1>>)\n"
+            "    %parent = memref.reinterpret_cast %raw",
+        )
+        unknown_bounds = subprocess.run(
+            [opt, "-", PASS], input=initialized, text=True, capture_output=True
+        )
+        assert (
+            unknown_bounds.returncode != 0
+            and "DDR view exceeds its statically known argument storage"
+            in unknown_bounds.stderr
+        )
+        # This compatibility path accepts the caller's effective unranked view;
+        # it does not claim an unrestricted dynamic row is bounded by 1024.
+        initialized = initialized.replace("memref<1024xi32>", "memref<*xi32>")
+        path, text, report = lower("boundary-" + str(column_major), initialized)
+        assert report.count("memref.copy plan.transfer=") == 2
+        assert "chunks = {bytes = 64 : i64, count = 3 : i64" in report
+        waits = [
+            line for line in text.splitlines() if "bosc_ame.dma.wait" in line
         ]
-        assert len(starts) == 6
-        for index, line in enumerate(starts):
-            task = re.search(r"bosc_ame.compute_id = (\d+)", line)
-            assert (int(task[1]) if task else None) == {2: 0, 5: 1}.get(index)
-        assert "bosc_ame.compute_graph_complete = true" in text
+        assert len(waits) == text.count("bosc_ame.dma.start ") == 6
+        for index, line in enumerate(waits):
+            task = re.search(r"contract.task = \{[^}]*?\bid = (\d+)", line)
+            assert (int(task[1]) if task else None) == {2: 1, 5: 2}.get(index)
+        assert "contract.compute_graph = {complete = true" in text
         machine = Machine(path, "boundary")
         for row in [2, 1]:
             output = np.full(1024, -317, dtype="<i4")
             values = (np.arange(1024, dtype=np.int32) * 97 - 1357).astype("<i4")
             expected = output.copy()
             expected_spm = bytearray(machine.spm[1])
+            expected_spm[128 : 128 + 384 * 4] = bytes(384 * 4)
             for i in range(3):
                 a, b = 16 + (row + i) * 96, 32 + (row + i) * 112
                 expected[b : b + 16] = values[a : a + 16]

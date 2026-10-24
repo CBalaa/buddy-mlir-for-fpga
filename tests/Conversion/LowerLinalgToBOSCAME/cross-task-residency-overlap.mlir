@@ -1,11 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// The second residency starts in the first residency's final consumer. Their
-// SPM ranges must remain distinct through that shared operation.
+// Projected legacy memory metadata cannot be translated to a concrete
+// identity buffer copy. The adapter rejects it before residency planning.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @overlap_at_consumer(
       %a: memref<32768xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -80,9 +76,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN: transfer[0]: consumer=linalg.generic residency=cross-task
-// PLAN-SAME: bank=0 offset=0 capacity=131072
-// PLAN: transfer[1]: consumer=linalg.generic residency=cross-task
-// PLAN-SAME: bank=1 offset=0 capacity=131072
-// PLAN: bank[0]: high-water=131072/131072 bytes
-// PLAN: bank[1]: high-water=131072/131072 bytes
+// CHECK: legacy memory facts require a concrete buffer copy

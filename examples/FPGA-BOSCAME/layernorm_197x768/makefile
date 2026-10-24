@@ -2,10 +2,11 @@
 #
 #     kernel.py (Triton)                      [make ttir]
 #       -> kernel.ttir
-#     kernel.ttir --triton-to-linalg-experimental=boscame=true
-#       -> kernel.frontend.mlir -> explicit one-shot bufferization
-#       -> kernel.bufferized.mlir --linalg-to-boscame       [make boscame]
-#       -> kernel.boscame.mlir                 (BOSCAME dialect: analysis/plan/emit)
+#     kernel.ttir --triton-to-linalg-experimental=contract=true
+#       -> kernel.frontend.mlir (neutral buffer contract)
+#       -> kernel.bufferized.mlir --bosc-ame-plan
+#       -> kernel.planned.mlir --bosc-ame-emit             [make boscame]
+#       -> kernel.boscame.mlir
 #     --lower-bosc-ame + --buddy-to-llvmir     [make llvm]
 #       -> kernel.llvm.mlir + kernel.ll
 #     llc -> RVV assembly; NR filter           [make asm]
@@ -47,7 +48,7 @@ PYTHON ?= python3
 TOOLS := $(REPO)/examples/FPGA-BOSCAME/tools
 NAME := layernorm_197x768
 OUT := $(ROOT)/build/$(NAME)
-BOSCAME_PASS ?= --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias"
+BOSCAME_PASS ?= --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_layernorm_197x768:197,1,1"
 RUNTIME := $(REPO)/runtime/boscame/runtime
 UART := $(REPO)/runtime/boscame/uart
 PLATFORM := $(REPO)/runtime/boscame/nh_e6
@@ -84,11 +85,14 @@ $(OUT)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(B
 frontend: $(OUT)/kernel.frontend.mlir
 
 $(OUT)/kernel.bufferized.mlir: $(OUT)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
-	$(BUDDY_OPT) $< --empty-tensor-to-alloc-tensor --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" --canonicalize --cse -o $@
+	$(BUDDY_OPT) $< --kernel-contract-verify -o $@
 bufferized: $(OUT)/kernel.bufferized.mlir
 
-$(OUT)/kernel.boscame.mlir: $(OUT)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
-	$(BUDDY_OPT) $< --linalg-to-boscame --promote-buffers-to-stack -o $@
+$(OUT)/kernel.planned.mlir: $(OUT)/kernel.bufferized.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --bosc-ame-plan --bosc-ame-plan-verify -o $@
+
+$(OUT)/kernel.boscame.mlir: $(OUT)/kernel.planned.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
+	$(BUDDY_OPT) $< --bosc-ame-emit -o $@
 boscame: $(OUT)/kernel.boscame.mlir
 
 # --- 3. BOSCAME -> LLVM dialect -> LLVM IR -----------------------------
@@ -157,10 +161,8 @@ simcheck: boscame
 check: bin
 	$(PYTHON) -B $(ROOT)/build.py --check-abi $(OUT)/kernel.ll
 # The placement build keeps only the four external boundary transfers.
-ifneq ($(BUFFER_PLACEMENT),false)
 	@test "$$(grep -c 'bosc_ame.dma.start' $(OUT)/kernel.boscame.mlir)" = "4" \
 	  || { echo "FAIL: expected four boundary DMA operations in the BOSCAME IR"; exit 1; }
-endif
 	@echo "ok: $(NAME) passed the typed ABI, boundary DMA and NR ELF audits"
 
 clean:

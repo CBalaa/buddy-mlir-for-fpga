@@ -1,5 +1,5 @@
 # RUN: %PYTHON %s %t buddy-opt
-"""Forward dedicated SPM fills while preserving alias and effect barriers."""
+"""Preserve SPM fill versions, aliases and effect barriers through replanning."""
 
 import re
 import struct
@@ -113,59 +113,69 @@ def main():
             capture_output=True,
             check=False,
         )
-        if case == "overlap":
-            assert result.returncode != 0, "overlapping SPM roots accepted"
-            assert "overlapping explicit SPM windows" in result.stderr, (
-                result.stderr
-            )
+        rejected = {
+            "overlap": "overlapping SPM input windows require a shared root",
+            "unknown_effect": "call may clobber live SPM workspace",
+            "late_unknown_effect": "call may clobber live SPM workspace",
+            "nested_late_unknown_effect": "if requires explicit then and else scopes",
+            "read_before_fill": "no initialized content version",
+        }
+        if case in rejected:
+            assert result.returncode != 0, case
+            assert rejected[case] in result.stderr, result.stderr
+            if case == "nested_late_unknown_effect":
+                with_else = source(case).replace(
+                    "scf.if %choose { func.call @unknown() : () -> () }",
+                    "scf.if %choose { func.call @unknown() : () -> () } else {}",
+                )
+                nested = subprocess.run(
+                    [
+                        binary,
+                        "-",
+                        "--lower-linalg-to-boscame=dma-abi=args_aligned64_nonalias",
+                    ],
+                    input=with_else,
+                    text=True,
+                    capture_output=True,
+                )
+                assert nested.returncode != 0
+                assert "call may clobber live SPM workspace" in nested.stderr, (
+                    nested.stderr
+                )
             continue
         assert result.returncode == 0, (case, result.stderr)
         text = result.stdout
-        anchors = [
-            line
-            for line in text.splitlines()
-            if any(
-                f"bosc_ame.compute_id = {number} : i64" in line
-                for number in (11, 12)
-            )
-        ]
-        assert len(anchors) == 2, (case, anchors)
-        if case == "repeated_fill":
-            assert all("vector.broadcast" in line for line in anchors), anchors
-            assert "offset = 0 : i64" not in text, text
-            # Two arithmetic reads plus the input/output vector copies.
-            assert text.count("vector.load ") == 4, text
-            path = directory / "broadcast.mlir"
-            path.write_text(text)
-            inputs = bytearray(struct.pack("<32f", *([1.0] * 32)))
-            output = bytearray(128)
-            machine = Machine(path, "broadcast")
-            machine.launch({"%arg0": inputs, "%arg1": output})
-            assert struct.unpack("<32f", output) == (-3.0,) * 32
-            assert machine.accesses == [
-                ("%arg0", 0, 64, "read"),
-                ("%arg0", 64, 128, "read"),
-                ("%arg1", 0, 64, "write"),
-                ("%arg1", 64, 128, "write"),
-            ], machine.accesses
-        else:
-            assert all("vector.broadcast" not in line for line in anchors), (
-                case,
-                anchors,
-            )
-            assert "offset = 0 : i64" in text, (case, text)
-            root = re.search(
-                r"(%[\w.]+) = bosc_ame\.spm\.view[^\n]*offset = 0 : i64",
-                text,
-            )[1]
-            assert re.search(
-                rf"vector\.store[^\n]*, {re.escape(root)}\[", text
-            ), (
-                case,
-                text,
-            )
+        # Legacy graph IDs are derived information. The shared analysis rebuilds
+        # tasks and keeps the two distinct fill versions in their original order.
+        assert "bosc_ame.compute_id" not in text, text
+        assert 'bosc_ame.task_map = [{action = "retained"' in text, text
+        assert "offset = 0 : i64" in text, text
+        root = re.search(
+            r"(%[\w.]+) = bosc_ame\.spm\.view[^\n]*offset = 0 : i64", text
+        )[1]
+        assert re.search(rf"vector\.store[^\n]*, {re.escape(root)}\[", text), (
+            text
+        )
+        path = directory / f"broadcast-{case}.mlir"
+        path.write_text(text)
+        values = [i * 0.25 - 4 for i in range(32)]
+        original = struct.pack("<32f", *values)
+        guard = b"\xb7" * 64
+        inputs = bytearray(original + guard)
+        output = bytearray(128 + 64)
+        output[128:] = guard
+        machine = Machine(path, "broadcast")
+        machine.spm[0][:] = b"\x69" * len(machine.spm[0])
+        machine.launch({"%arg0": inputs, "%arg1": output})
+        expected = tuple(
+            -3 * value if case == "output_write" else (value - 2) * 3
+            for value in values
+        )
+        assert struct.unpack("<32f", output[:128]) == expected
+        assert inputs == original + guard
+        assert output[128:] == guard
     print(
-        "PASS broadcast forwarding: latest scalar fill reused; task IDs retained; alias, overlap, effects, early reads, writes and DMA guarded"
+        "PASS broadcast versions: exact arithmetic and guards; alias, overlap, calls and early reads checked"
     )
 
 

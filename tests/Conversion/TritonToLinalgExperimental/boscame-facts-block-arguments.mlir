@@ -1,8 +1,8 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.facts.mlir 2> %t.facts
-// RUN: FileCheck %s --check-prefix=FACTS < %t.facts
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t.plain.mlir
-// RUN: diff %t.facts.mlir %t.plain.mlir
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: another_function = complete
+// CONTRACT-CASE: argument_owners = incomplete
 // The function input and both while-region inputs have argument number zero.
 // Their references must retain the owner, region and block instead of merging
 // all three into the same block-arg#0 name.
@@ -93,13 +93,3 @@ module {
     return %sum, %square, %scalar : tensor<4xf32>, tensor<4xf32>, f32
   }
 }
-
-// FACTS: LinalgFacts:
-// FACTS: compute op#{{[0-9]+}} linalg.generic {{.*}}inputs=[ir-op#[[FUNCTION:[0-9]+]]:func.func.region#0.block#0.arg#0:tensor<4xf32>]
-// FACTS: compute op#{{[0-9]+}} linalg.generic {{.*}}inputs=[ir-op#[[WHILE:[0-9]+]]:scf.while.region#0.block#0.arg#0:tensor<4xf32>]
-// FACTS: compute op#{{[0-9]+}} linalg.generic {{.*}}inputs=[ir-op#[[WHILE]]:scf.while.region#1.block#0.arg#0:tensor<4xf32>]
-// FACTS: compute op#{{[0-9]+}} linalg.generic {{.*}}inputs=[ir-op#{{[0-9]+}}:scf.for.region#0.block#0.arg#1:tensor<4xf32>]
-// FACTS: compute op#{{[0-9]+}} linalg.generic {{.*}}inputs=[ir-op#{{[0-9]+}}:func.func.region#0.block#0.arg#0:tensor<4xf32>]
-// FACTS-SAME: result-users=[result#0 users=[op#[[SUM:[0-9]+]], op#[[SQUARE:[0-9]+]], ir-op#{{[0-9]+}}:tensor.extract]]
-// FACTS: compute op#[[SUM]] linalg.generic results=[tensor<4xf32>] body=[arith.addf]
-// FACTS: compute op#[[SQUARE]] linalg.generic results=[tensor<4xf32>] body=[arith.mulf]

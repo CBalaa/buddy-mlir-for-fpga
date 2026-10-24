@@ -1,13 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: FileCheck %s --check-prefix=IR < %t
-// RUN: FileCheck %s --check-prefix=OFFSETS < %t
-// RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null
+// RUN: not buddy-opt %s '--linalg-to-boscame=buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s
 
-// A masked event's static subview is its valid range. The resident window is
-// larger than that range, and its subview contributes 64 B exactly once. Both
-// external rows retain their dynamic aligned descriptor offset. The two DMA
-// starts retain the identity copies' complete compute graph and logical users.
+// The DDR row index has no static bound. V1 cannot prove the dynamic view
+// remains within the external argument, even though its alignment is known.
+// Bounded transfer offsets and packet metadata are covered by
+// PlanEmitValidation.py and physical-adapter.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32,
                    bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   func.func @masked_boundary(
@@ -68,30 +64,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32,
   }
 }
 
-// PLAN: transfer[0]:
-// PLAN-SAME: bank=1 offset=128 capacity=4096
-// PLAN-SAME: read=true write=false
-// PLAN: transfer[1]:
-// PLAN-SAME: bank=1 offset=128 capacity=4096
-// PLAN-SAME: read=false write=true
-// PLAN: resources: transfers=2 dma-packets=2 read-bytes=3072 write-bytes=3072
-
-// IR: bosc_ame.compute_graph_node_count = 2 : i64
-// IR: bosc_ame.dma.start
-// IR-SAME: bosc_ame.compute_id = 0 : i64
-// IR-SAME: bosc_ame.compute_input_values = array<i64: 10>
-// IR-SAME: bosc_ame.compute_output_values = array<i64: 11>
-// IR-SAME: bosc_ame.logical_value_users = [array<i64: 1>]
-// IR: bosc_ame.dma.wait
-// IR: bosc_ame.dma.start
-// IR-SAME: bosc_ame.compute_id = 1 : i64
-// IR-SAME: bosc_ame.compute_input_values = array<i64: 11>
-// IR-SAME: bosc_ame.compute_predecessors = array<i64: 0>
-// IR: bosc_ame.dma.wait
-// IR-NOT: bosc_ame.dma.start
-// IR-NOT: memref.copy
-// OFFSETS: %[[VALID:.*]] = memref.subview {{.*}}[16] [768] [1]
-// OFFSETS: %[[LOAD_OFFSET:.*]] = arith.constant 16 : index
-// OFFSETS: memref.reinterpret_cast %[[VALID]] to offset: [%[[LOAD_OFFSET]]], sizes: [768], strides: [1]
-// OFFSETS: %[[STORE_OFFSET:.*]] = arith.constant 16 : index
-// OFFSETS: memref.reinterpret_cast %[[VALID]] to offset: [%[[STORE_OFFSET]]], sizes: [768], strides: [1]
+// CHECK: invalid BOSCAME plan: DDR view exceeds its statically known argument storage

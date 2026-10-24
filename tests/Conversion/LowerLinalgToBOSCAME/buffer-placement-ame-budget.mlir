@@ -1,5 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s < %t.plan
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // The unrelated root occupies an entire bank. The external C has a proven
 // direct route, so only A/B need staging and their two 64 KiB windows fit in
@@ -19,9 +21,3 @@ module {
     return
   }
 }
-
-// CHECK: buffer-placement: resident=1 ddr=0 applied=true
-// CHECK: root[0]: kind=SpmResident bytes=131072 bank=0 offset=0{{.*}}reason=group-legality-and-capacity applied=true
-// CHECK: transfer[0]:{{.*}}role=input-a{{.*}}bank=1 offset=0 capacity=65536
-// CHECK: transfer[1]:{{.*}}role=input-b{{.*}}bank=1 offset=65536 capacity=65536
-// CHECK: direct-C=direct-ddr (proven)

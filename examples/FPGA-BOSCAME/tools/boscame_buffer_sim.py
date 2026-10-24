@@ -531,6 +531,40 @@ class Machine:
                     )
                 ],
             )
+        elif name == "memref.transpose":
+            source = get(operands[0])
+            match = re.search(r"\([^()]*\)\s*->\s*\(([^()]*)\)", body)
+            dimensions = _split_top_level(match[1]) if match else []
+            if not dimensions or any(
+                re.fullmatch(r"d\d+", dim.strip()) is None for dim in dimensions
+            ):
+                raise SimError("transpose must be a dimension permutation")
+            permutation = [int(dim.strip()[1:]) for dim in dimensions]
+            if sorted(permutation) != list(range(len(source.shape))):
+                raise SimError(
+                    "transpose permutation does not match source rank"
+                )
+            shape, element = type_shape(types.split(" to ")[-1])
+            expected = [source.shape[axis] for axis in permutation]
+            if shape != expected or element != source.element:
+                raise SimError(
+                    "transpose result descriptor does not match permutation"
+                )
+            self.result(
+                op,
+                [
+                    Buffer(
+                        source.data,
+                        source.element,
+                        shape,
+                        [source.strides[axis] for axis in permutation],
+                        base=source.base,
+                        offset=source.offset,
+                        bank=source.bank,
+                        name=source.name,
+                    )
+                ],
+            )
         elif name == "memref.collapse_shape":
             source = get(operands[0])
             shape, _ = type_shape(types.split(" into ")[-1])
@@ -843,14 +877,30 @@ class Machine:
             source = get(operands[0])
             shape, _ = type_shape(types.split(" -> ")[-1])
             direct = re.search(r"\bbosc_ame\.direct_ddr\b", op.text) is not None
+            if direct and source.bank is not None:
+                raise SimError("direct tile load must read external DDR")
+            if not direct and source.bank is None:
+                raise SimError("SPM tile load must read an SPM window")
             if (
-                direct
-                and name == "bosc_ame.tile.load_acc"
-                and source.name is not None
+                len(shape) != 2
+                or len(source.shape) != 2
+                or any(count > size for count, size in zip(shape, source.shape))
             ):
-                for i in range(shape[0]):
-                    row_start = source.address([i, 0])
-                    row_bytes = shape[1] * source.width
+                raise SimError("tile load exceeds source shape")
+            # B has logical KxN shape and physical NxK rows. Log each actual
+            # contiguous span, including direct A/B reads as well as C reads.
+            minor = 0 if name == "bosc_ame.tile.load_b" else 1
+            major = 1 - minor
+            if source.strides[minor] != 1:
+                raise SimError(
+                    "tile load requires its physical contiguous axis"
+                )
+            if direct and source.name is not None:
+                for i in range(shape[major]):
+                    indices = [0, 0]
+                    indices[major] = i
+                    row_start = source.address(indices)
+                    row_bytes = shape[minor] * source.width
                     if row_start + row_bytes > len(source.data):
                         raise SimError("direct tile load exceeds source")
                     self.accesses.append(
@@ -946,7 +996,35 @@ class Machine:
                 shape = (
                     [len(data) // WIDTHS[element]] if None in shape else shape
                 )
-                self.values[name] = Buffer(data, element, shape, name=name)
+                layout = re.search(
+                    r"strided<\[([^]]*)\](?:,\s*offset:\s*([^>]+))?>",
+                    type_text,
+                )
+                strides, offset = None, 0
+                if layout:
+                    entries = [entry.strip() for entry in layout[1].split(",")]
+                    if entries == [""]:
+                        entries = []
+                    if any(entry == "?" for entry in entries) or (
+                        layout[2] is not None and layout[2].strip() == "?"
+                    ):
+                        raise SimError(
+                            "dynamic argument layout requires a caller descriptor"
+                        )
+                    strides = [int(entry) for entry in entries]
+                    if len(strides) != len(shape):
+                        raise SimError(
+                            "argument stride rank differs from shape"
+                        )
+                    offset = int(layout[2]) if layout[2] is not None else 0
+                self.values[name] = Buffer(
+                    data,
+                    element,
+                    shape,
+                    strides=strides,
+                    offset=offset,
+                    name=name,
+                )
             else:
                 self.values[name] = scalars.get(name, 0)
         self.block(self.function.blocks[0])

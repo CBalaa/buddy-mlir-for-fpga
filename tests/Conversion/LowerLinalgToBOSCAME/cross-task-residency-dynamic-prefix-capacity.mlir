@@ -1,13 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
-// RUN: FileCheck %s --check-prefix=IR < %t.reported
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// Residency leaves less than the dynamic prefix's 83,968-byte maximum in
-// either bank. Reloading the shared argument lets the two Linalg operations
-// use the explicit windows and leaves bank 0 large enough for the prefix.
+// The legacy dynamic-prefix memory facts do not specify a positive static
+// valid shape. V1 rejects those access facts before capacity planning.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @dynamic_prefix_capacity(
       %shared: memref<64x256xf32, strided<[320, 1]>>
@@ -80,8 +74,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN: function-argument-residency-search: candidates=1 selected=0 rejected-capacity=1 objective=minimize-read-bytes-then-packets status=exact latency=uncalibrated
-// PLAN-NEXT: argument-residency[0]: function=@dynamic_prefix_capacity arg#0 consumers=2 capacity={{[0-9]+}} resident-read-bytes={{[0-9]+}} resident-packets={{[0-9]+}} reload-read-bytes={{[0-9]+}} reload-packets={{[0-9]+}} decision=reload reason=spm-capacity
-// IR: bosc_ame.spm.view {{.*}} : memref<20992xf32, #bosc_ame.spm<0>>
-// IR: bosc_ame.dma.start
-// IR: bosc_ame.dma.wait
+// CHECK: kernel contract V4: static valid shape must match the access rank and be positive

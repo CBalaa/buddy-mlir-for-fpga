@@ -1,6 +1,7 @@
-// RUN: buddy-opt %s --lower-linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t
-// RUN: FileCheck %s < %t
-// RUN: FileCheck %s --check-prefix=COPY < %t
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // Fill and unused generic output arguments must not cause a DDR read. An
 // accumulator does require its initial value. Scalar broadcasts stay in DDR
@@ -49,57 +50,3 @@ module {
     return
   }
 }
-
-// CHECK-LABEL: func.func @fill
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: vector.broadcast
-// CHECK: vector.store {{.*}} : memref<16xf32, {{.*}}#bosc_ame.spm<0>>, vector<16xf32>
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
-
-// CHECK-LABEL: func.func @copy
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: %[[COPY_TOKEN:.*]] = bosc_ame.dma.start
-// CHECK-SAME: (memref<16xf32, {{.*}}#bosc_ame.spm<0>>, memref<16xf32, {{.*}}#bosc_ame.spm<1>>, index)
-// CHECK-NEXT: bosc_ame.dma.wait %[[COPY_TOKEN]]
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
-
-// COPY-LABEL: func.func @copy
-// COPY-NOT: vector.load
-// COPY-NOT: vector.store
-// COPY: return
-
-// CHECK-LABEL: func.func @accumulate
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: vector.load
-// CHECK: vector.load
-// CHECK: arith.addf {{.*}} : vector<16xf32>
-// CHECK: vector.store
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
-
-// CHECK-LABEL: func.func @scalar_broadcast
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: memref.load {{.*}}[] : memref<f32>
-// CHECK: vector.load
-// CHECK: vector.broadcast
-// CHECK: arith.mulf {{.*}} : vector<16xf32>
-// CHECK: vector.store
-// CHECK: bosc_ame.dma.start
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return

@@ -1,4 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // A masked provenance event is ineligible for direct forwarding. The
 // existing full-copy IR remains available for ordinary DMA staging.
@@ -12,6 +15,3 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
     return
   }
 }
-
-// CHECK: bosc_ame.dma.start
-// CHECK-NOT: bosc_ame.direct_ddr

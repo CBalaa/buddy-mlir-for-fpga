@@ -1,16 +1,14 @@
 add_mlir_library(LowerLinalgToBOSCAMEPass
   LowerLinalgToBOSCAME.cpp
-  BOSCAMEAmeEmitter.cpp
-  BOSCAMEBoundaryTransfers.cpp
-  BOSCAMEDmaEmitter.cpp
-  BOSCAMEFootprint.cpp
-  BOSCAMEPlacement.cpp
-  BOSCAMEPlanner.cpp
+  BOSCAMEBufferNormalization.cpp
+  BOSCAMEOrderedMatmul.cpp
+  BOSCAMEPlan.cpp
+  BOSCAMEPlanEmit.cpp
+  BOSCAMEPlanVerify.cpp
 
   LINK_LIBS PUBLIC
-  BuddyBOSCAMEAnalysis
+  BuddyKernelContract
   BuddyBOSCAME
-  BuddyBOSCAMEHelpers
   BuddyBOSCAMETransforms
   MLIRArithDialect
   MLIRBufferizationTransforms

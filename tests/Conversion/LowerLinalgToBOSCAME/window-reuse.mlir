@@ -1,8 +1,8 @@
-// RUN: buddy-opt %s --lower-linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --implicit-check-not=vector.load --implicit-check-not=vector.store
+// RUN: not buddy-opt %s '--lower-linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// Each copy needs both complete 128 KiB banks. All transfers and consumers
-// finish before the next operation, so sequential operations and independent
-// functions can use the same windows without accumulating their capacities.
+// The original module reads an external region after writing it. V1 treats
+// that write as terminal and rejects the later read before residency search.
+// Private producer/consumer lifetimes remain covered by PlanRoutes.py.
 module {
   func.func @sequential(%input: memref<32768xf32>,
                         %temporary: memref<32768xf32>,
@@ -36,34 +36,4 @@ module {
   }
 }
 
-// CHECK-LABEL: func.func @sequential
-// CHECK: bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64} : memref<32768xf32, #bosc_ame.spm<0>>
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.spm.view {bank = 1 : i32, offset = 0 : i64} : memref<32768xf32, #bosc_ame.spm<1>>
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64} : memref<32768xf32, #bosc_ame.spm<0>>
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.spm.view {bank = 1 : i32, offset = 0 : i64} : memref<32768xf32, #bosc_ame.spm<1>>
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
-
-// CHECK-LABEL: func.func @independent
-// CHECK: bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64} : memref<32768xf32, #bosc_ame.spm<0>>
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.spm.view {bank = 1 : i32, offset = 0 : i64} : memref<32768xf32, #bosc_ame.spm<1>>
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
+// CHECK: kernel contract V23/V24: v1 does not support reading an external region after its terminal write

@@ -1,15 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack | FileCheck %s
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='' --promote-buffers-to-stack --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=LLVM
-// CHECK-LABEL: func.func @spm_store
-// CHECK-NOT: memref.alloc
-// CHECK: vector.store {{.*}} : memref<16xf32, #bosc_ame.spm<0>>, vector<16xf32>
-// CHECK: bosc_ame.dma.start {{.*}} : (memref<16xf32, strided<[1], offset: ?>, #bosc_ame.spm<0>>, memref<16xf32
-// CHECK: bosc_ame.dma.wait
-// CHECK-NOT: memref.copy
-// CHECK-NOT: bufferization.
-// LLVM: store <16 x float>
-// LLVM: call i64 @bosc_ame_dma_start
-// LLVM: call void @bosc_ame_dma_wait
+// RUN: not buddy-opt %s --triton-to-linalg-experimental='contract=true caller-contract=args_aligned64_nonalias' 2>&1 | FileCheck %s
+// A frontend contract cannot contain an already placed backend SPM operand.
+// Physical SPM inputs belong to the backend's buffer-form input adapter.
+// CHECK: kernel contract V14: target attributes are forbidden in the neutral contract
 
 module {
   tt.func public @spm_store(%out: !tt.ptr<f32>) {

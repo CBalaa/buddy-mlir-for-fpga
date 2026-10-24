@@ -1,18 +1,11 @@
-// RUN: split-file %s %t
-// RUN: not buddy-opt %t/tensor.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
-// RUN: not buddy-opt %t/unused-tensor.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
-// RUN: not buddy-opt %t/external-tensor.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
-// RUN: not buddy-opt %t/bridge.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=BRIDGE
-// RUN: not buddy-opt %t/unrealized.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
-// RUN: not buddy-opt %t/tensor.mlir --linalg-to-boscame 2>&1 | FileCheck %s
-// RUN: not buddy-opt %t/unrealized.mlir --linalg-to-boscame 2>&1 | FileCheck %s
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // The backend consumes an explicitly bufferized program.  It must reject
 // incomplete bufferization without inserting a second implicit bufferization
 // pipeline or accepting a cast as a data movement operation.
-// BRIDGE: incomplete BOSCAME lowering: residual Triton or bufferization bridge operation
-// CHECK: input must be pure buffer-form Linalg
-// CHECK-SAME: without tensor SSA or unrealized_conversion_cast
 
 //--- tensor.mlir
 module {

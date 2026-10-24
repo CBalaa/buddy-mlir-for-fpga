@@ -1,10 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: FileCheck %s --check-prefix=IR < %t
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// A staged producer output can stay in its SPM window for the next read.  The
-// planner must retain the producer's DDR write, but emit it after the consumer
-// rather than loading the same SSA memref again.
+// The original module reads an external region after writing it. V1 treats
+// that write as terminal and rejects the later read before residency search.
+// Private producer/consumer lifetimes remain covered by PlanRoutes.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @produced(
       %src: memref<16xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -50,10 +48,8 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN: transfer[1]: consumer=linalg.generic residency=cross-task consumers=[linalg.generic, linalg.generic] role=output-c
-// PLAN: resources: transfers=3 dma-packets=3 read-bytes=64 write-bytes=128 totals-exact=true latency=uncalibrated
-
 // The emitted schedule has one source read, one producer-to-consumer SPM
 // copy, and the two final writes.  A separate DDR-to-SPM reload of %tmp would
 // add another start.
-// IR-COUNT-4: bosc_ame.dma.start
+
+// CHECK: kernel contract V23/V24: v1 does not support reading an external region after its terminal write

@@ -4,6 +4,7 @@
 import re
 import runpy
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -119,143 +120,100 @@ def source(neighbors=False):
 def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
-
-    def lower(name, text):
-        return fusion["lower_source"](work, name, text, plan_report=True)
-
-    plain = source()
-    result = lower("fused_graph", plain)
-    fusion["check_success"](result, fused=True)
-    assert (
-        "status=complete tasks=1 dependencies=0 logical-values=4"
-        in result.stderr
+    original = fusion["lower_source"](
+        work, "legacy_pitched_graph", source(), plan_report=True
     )
-    assert (
-        "task[2]: op=linalg.matmul kind=ame-matmul stage=0 predecessors=[] "
-        "inputs=[1,3,4] outputs=[13]"
-    ) in result.stderr, result.stderr
-    assert (
-        "logical-value[4]: producer=function-argument consumers=[2]"
-        in result.stderr
-    )
-    assert "logical-value[13]: producer=2 consumers=[]" in result.stderr
-    assert "bosc_ame.compute_graph_node_count = 1 : i64" in result.stdout
-    assert "bosc_ame.logical_value_users = [array<i64: 2>]" in result.stdout
+    assert original.returncode != 0
+    assert "no initialized content version" in original.stderr, original.stderr
 
-    # The graph annotation must preserve signed i8 accumulation and i32 wrap.
-    lowered = work / "fused_graph.lowered.mlir"
-    lowered.write_text(result.stdout)
+    # Neutral graph integrity is checked independently from legacy metadata.
+    # Legacy task/value IDs are derived facts and are rebuilt by the adapter.
+    buffer = runpy.run_path(
+        str(Path(__file__).with_name("buffer-accumulator-fusion.py"))
+    )
+    standard = (
+        buffer["SOURCE"]
+        .replace("@GAP@", "")
+        .replace(", bosc_ame.lower_to_ame", "")
+        .replace(
+            "module {",
+            "module attributes {contract.abi = {args_aligned_bytes = 64 : i64, args_disjoint = true}} {",
+        )
+        .replace(
+            "linalg.matmul {cast",
+            "linalg.matmul {contract.provenance = {a_source_load_origin_ids = array<i64: 42>, a_source_lineage_complete = true}, cast",
+        )
+    )
+    opt = str(fusion["buddy_opt_path"]())
+
+    def invoke(text, *passes):
+        return subprocess.run(
+            [opt, *passes], input=text, text=True, capture_output=True
+        )
+
+    annotated = invoke(standard, "--kernel-contract-annotate")
+    assert annotated.returncode == 0, annotated.stderr
+    assert annotated.stdout.count("contract.task =") == 3
+    planned = invoke(
+        annotated.stdout, "--bosc-ame-plan", "--bosc-ame-plan-verify"
+    )
+    assert planned.returncode == 0, planned.stderr
+    assert planned.stdout.count("contract.task =") == 1
+    assert "plan.source_task_count = 3 : i64" in planned.stdout
+    assert 'action = "eliminated", old_id = 0 : i64' in planned.stdout
+    assert (
+        'action = "retained", new_id = 0 : i64, old_id = 1 : i64'
+        in planned.stdout
+    )
+    assert 'action = "eliminated", old_id = 2 : i64' in planned.stdout
+    assert "input_values = array<i64: 0, 1, 2>" in planned.stdout
+    assert "source_load_origin_ids = array<i64: 42>" in planned.stdout
+    emitted = invoke(planned.stdout, "--bosc-ame-emit")
+    assert emitted.returncode == 0, emitted.stderr
+    path = work / "neutral-fused.mlir"
+    path.write_text(emitted.stdout)
     previous = 0x7FFFFFF0
-    output = bytearray(struct.pack("<i", previous) * 65536)
-    machine = fusion["Machine"](lowered, "gemm")
+    output = bytearray(struct.pack("<i", previous) * 256)
+    machine = fusion["Machine"](path, "f")
     machine.launch(
         {
-            "%arg0": bytearray([128] * 8192),
-            "%arg1": bytearray([255] * 8192),
+            "%arg0": bytearray([128] * 1024),
+            "%arg1": bytearray([255] * 1024),
             "%arg2": output,
-        },
-        {"%arg3": 0},
+        }
     )
-    expected = (previous + 128 * 128 + (1 << 31)) % (1 << 32) - (1 << 31)
-    for i in range(64):
-        for j in range(1024):
-            actual = struct.unpack_from("<i", output, (i * 1024 + j) * 4)[0]
-            assert actual == (expected if j < 64 else previous)
-    assert machine.dma_log == []
+    expected = (previous + 64 * 128 + (1 << 31)) % (1 << 32) - (1 << 31)
+    assert output == struct.pack("<i", expected) * 256
+    assert not machine.dma_log
 
-    chained = lower("neighbor_graph", source(neighbors=True))
-    fusion["check_success"](chained, fused=True)
-    assert "status=complete tasks=3 dependencies=2" in chained.stderr, (
-        chained.stderr
-    )
-    assert (
-        "task[3]: op=linalg.matmul kind=ame-matmul stage=1 predecessors=[0] "
-        "inputs=[20,3,4] outputs=[22]"
-    ) in chained.stderr, chained.stderr
-    assert "stage=2 predecessors=[3] inputs=[22] outputs=[21]" in chained.stderr
-    assert "logical-value[22]: producer=3 consumers=[6]" in chained.stderr
-    assert "bosc_ame.logical_value_users = [array<i64: 3>]" in chained.stdout
-    assert "array<i64: 3, 6>" not in chained.stdout
-
-    # An earlier writer of C is a predecessor of the removed load, so its
-    # dependency must be inherited by the matmul as well.
-    c_writer = (
-        source(neighbors=True)
-        .replace(
-            task(0, "fill", [], [20], barrier=True),
-            task(0, "fill", [], [4], barrier=True),
-        )
-        .replace(
-            task(1, "memory-load", [4], [6], barrier=True),
-            task(1, "memory-load", [4], [6], [0], barrier=True),
-        )
-    )
-    c_writer = (
-        c_writer.replace(
-            "compute_input_values = array<i64: 20, 3, 9>",
-            "compute_input_values = array<i64: 1, 3, 9>",
-        )
-        .replace(
-            "compute_predecessors = array<i64: 0, 2>",
-            "compute_predecessors = array<i64: 2>",
-        )
-        .replace(
-            "%one = arith.constant 1 : i8", "%one = arith.constant 1 : i32"
-        )
-        .replace(
-            "ins(%one : i8) outs(%a : memref<64x128xi8, strided<[128, 1]>>)",
-            "ins(%one : i32) outs(%destination : memref<64x64xi32, strided<[1024, 1], offset: ?>>)",
-        )
-    )
-    inherited = lower("c_writer_graph", c_writer)
-    fusion["check_success"](inherited, fused=True)
-    assert "status=complete tasks=3 dependencies=2" in inherited.stderr
-    assert "stage=1 predecessors=[0] inputs=[1,3,4]" in inherited.stderr
-    assert "logical-value[4]: producer=0 consumers=[3]" in inherited.stderr
-
-    cases = {
-        "dangling": (
-            plain.replace(
-                "bosc_ame.compute_predecessors = array<i64: 1>",
-                "bosc_ame.compute_predecessors = array<i64: 99>",
-            ),
-            "unresolved BOSCAME compute predecessor 99 for task 2",
+    # Schema checks apply before graph contraction and in incomplete graphs.
+    corruptions = {
+        "duplicate_task": re.sub(
+            r"\bid = 1 : i64", "id = 0 : i64", annotated.stdout, count=1
         ),
-        "duplicate": (
-            plain.replace(
-                "bosc_ame.compute_id = 1 :", "bosc_ame.compute_id = 0 :"
-            ),
-            "duplicate BOSCAME compute task ID 0",
+        "dangling_predecessor": annotated.stdout.replace(
+            "predecessors = array<i64: 0>", "predecessors = array<i64: 99>", 1
         ),
-        "count": (
-            plain.replace(
-                "compute_graph_node_count = 5", "compute_graph_node_count = 6"
-            ),
-            "BOSCAME compute graph node count mismatch: expected 6, found 5",
+        "wrong_input_version": annotated.stdout.replace(
+            "input_values = array<i64>", "input_values = array<i64: 999>", 1
         ),
-        "cycle": (
-            plain.replace(
-                "bosc_ame.compute_predecessors = array<i64: 1>",
-                "bosc_ame.compute_predecessors = array<i64: 2>",
-            ),
-            "invalid BOSCAME compute predecessor order: 2 -> 2",
+        "self_dependency": annotated.stdout.replace(
+            "predecessors = array<i64>", "predecessors = array<i64: 0>", 1
         ),
     }
-    for name, (text, diagnostic) in cases.items():
-        broken = lower(name, text)
-        assert broken.returncode != 0, name
-        assert diagnostic in broken.stderr, broken.stderr
-        assert "BOSCAME plan report:" not in broken.stderr
-
-    incomplete = lower(
-        "incomplete_graph",
-        plain.replace(
-            "compute_graph_complete = true", "compute_graph_complete = false"
-        ),
-    )
-    fusion["check_success"](incomplete, fused=True)
-    assert "status=incomplete tasks=1 dependencies=0" in incomplete.stderr
-    assert not re.search(r"dependency:.*resolved=false", incomplete.stderr)
+    for name, broken in corruptions.items():
+        assert broken != annotated.stdout, name
+        checked = invoke(broken, "--kernel-contract-verify")
+        assert checked.returncode != 0, name
+        assert "kernel contract" in checked.stderr, checked.stderr
+        incomplete = broken.replace(
+            "complete = true",
+            'complete = false, limitation = "unmodeled boundary"',
+            1,
+        )
+        checked = invoke(incomplete, "--kernel-contract-verify")
+        assert checked.returncode != 0, name
+        assert "kernel contract" in checked.stderr, checked.stderr
     # CHECK: PASS accumulator compute graph: contraction, boundary values and integrity
     print(
         "PASS accumulator compute graph: contraction, boundary values and integrity"

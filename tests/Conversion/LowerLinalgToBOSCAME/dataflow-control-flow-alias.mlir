@@ -1,5 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @yielded_memref_alias(
@@ -196,19 +198,3 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
     return
   }
 }
-
-// PLAN: buffer[0]: {{.*}}physical-users=[0] physical-lifetime=unknown
-// PLAN: buffer[2]: {{.*}}physical-users=[1] physical-lifetime=unknown
-// PLAN: buffer-alias-pair[6]: function=@forwarded_view_intervals accesses=[8,9] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN: buffer-access[0]: {{.*}}root=known root-id=[[IFROOT:[0-9]+]]
-// PLAN: buffer-access[2]: {{.*}}root=known root-id=[[IFROOT]]
-// PLAN: buffer-access[3]: {{.*}}root=known root-id=[[FORROOT:[0-9]+]]
-// PLAN: buffer-access[5]: {{.*}}root=known root-id=[[FORROOT]]
-// PLAN: buffer-access[6]: {{.*}}root=unknown
-// PLAN: buffer-access[7]: {{.*}}root=unknown
-// PLAN: buffer-access[10]: {{.*}}root=known root-id=[[WHILEROOT:[0-9]+]]
-// PLAN: buffer-access[11]: {{.*}}root=unknown
-// PLAN: buffer-access[12]: {{.*}}root=known root-id=[[SWITCHROOT:[0-9]+]]
-// PLAN: buffer-access[13]: {{.*}}root=unknown
-// PLAN: buffer-access[14]: {{.*}}root=known root-id=[[SELECTROOT:[0-9]+]]
-// PLAN: buffer-access[15]: {{.*}}root=unknown

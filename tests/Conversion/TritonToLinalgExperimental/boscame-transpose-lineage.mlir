@@ -1,6 +1,8 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: transpose_exit_consumer = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: transpose_memref_writer = reject: kernel contract V23/V24: v1 does not support reading an external region after its terminal write
 module {
   func.func @transpose_memref_writer(
       %source: memref<4x4xf32>, %buffer: memref<4x4xf32>,
@@ -9,11 +11,11 @@ module {
       : memref<4x4xf32> to
         memref<4x4xf32, affine_map<(d0, d1) -> (d0 + d1 * 4)>>
     memref.copy %source, %transposed {
-      bosc_ame.memory = {kind = "load", origin_id = 101 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 101 : i64}
     } : memref<4x4xf32> to
         memref<4x4xf32, affine_map<(d0, d1) -> (d0 + d1 * 4)>>
     memref.copy %buffer, %destination {
-      bosc_ame.memory = {kind = "store", origin_id = 102 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 102 : i64}
     } : memref<4x4xf32> to memref<4x4xf32>
     return
   }
@@ -36,16 +38,9 @@ module {
       : memref<4x4xf32> to
         memref<4x4xf32, affine_map<(d0, d1) -> (d0 + d1 * 4)>>
     memref.copy %transposed, %destination {
-      bosc_ame.memory = {kind = "store", origin_id = 103 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 103 : i64}
     } : memref<4x4xf32, affine_map<(d0, d1) -> (d0 + d1 * 4)>>
         to memref<4x4xf32>
     return
   }
 }
-
-// CHECK-LABEL: func.func @transpose_memref_writer
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 101 : i64
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 102 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 101>
-// CHECK-LABEL: func.func @transpose_exit_consumer
-// CHECK: bosc_ame.loop_carried_slots = [{{.*}}exit_consumer_compute_ids = array<i64: 2>{{.*}}]

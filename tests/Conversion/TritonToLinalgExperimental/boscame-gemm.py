@@ -29,7 +29,7 @@ def main():
         text=True,
     )
     assert dynamic.returncode != 0
-    assert "dynamic provenance copies support rank one only" in dynamic.stderr
+    assert "kernel contract V4: static valid shape" in dynamic.stderr
     source = specialize_full_gemm(source, sys.argv[1] + ".static.ttir")
     subprocess.run(
         [
@@ -45,8 +45,8 @@ def main():
     text = Path(output).read_text()
     assert "bosc_ame.tile.mma" in text and "linalg.matmul" not in text
     assert "bosc_ame.lower_to_ame" not in text
-    # The proven external forwarding keeps C in DDR. Each K iteration loads
-    # and stores the accumulator, without a register lifetime across the loop.
+    # This legacy source loads C after the K loop. Keep that ordering: A/B
+    # forward to DDR, while the loop result and C snapshot use private SPM.
     assert text.count("bosc_ame.tile.load_acc ") == 1
     assert text.count("bosc_ame.tile.load_a ") == 1
     assert text.count("bosc_ame.tile.load_b ") == 1
@@ -59,15 +59,17 @@ def main():
         for line in text.splitlines()
         if "scf.for " in line
     )
-    assert "arith.addi" not in "\n".join(
-        line for line in text.splitlines() if "vector<" in line
-    )
-    assert all(
-        re.search(r"\bbosc_ame\.direct_ddr\b", line)
-        for line in text.splitlines()
-        if "bosc_ame.tile.load_" in line or "bosc_ame.tile.store_acc" in line
-    )
-    assert "bosc_ame.dma.start" not in text
+    assert re.search(r"arith.addi[^\n]*vector<16xi32>", text)
+    for line in text.splitlines():
+        if "bosc_ame.tile.load_a " in line or "bosc_ame.tile.load_b " in line:
+            assert "bosc_ame.direct_ddr" in line, line
+        elif (
+            "bosc_ame.tile.load_acc " in line
+            or "bosc_ame.tile.store_acc " in line
+        ):
+            assert "#bosc_ame.spm<" in line, line
+    assert text.count("bosc_ame.spm.view") == 2
+    assert text.count("bosc_ame.dma.start") == 32
     assert "memref.memory_space_cast" not in text
     assert "bufferization.to_tensor" not in text
     assert "bufferization.to_buffer" not in text
@@ -141,12 +143,11 @@ def main():
     c_accesses = [
         (name, kind) for name, _, _, kind in machine.accesses if name == "%arg2"
     ]
-    # The simulator records one access per contiguous C row.  These counts
-    # therefore check the load/store pair in each of the two K iterations.
-    expected_c_rows = (m // 16) * (n // 16) * 16 * (k // 64)
+    # C is read and written once per program, in 16 contiguous row packets.
+    expected_c_rows = (m // 16) * (n // 16) * 16
     assert sum(kind == "read" for _, kind in c_accesses) == expected_c_rows
     assert sum(kind == "write" for _, kind in c_accesses) == expected_c_rows
-    assert all(destination != "%arg2" for _, destination, *_ in machine.dma_log)
+    assert len(machine.dma_log) == expected_c_rows * 2
     # CHECK: PASS GEMM: 512 programs, 131072 exact i32 outputs (signed i8, nonzero C, wrap, physical B)
     print(
         "PASS GEMM: 512 programs, 131072 exact i32 outputs (signed i8, nonzero C, wrap, physical B)"

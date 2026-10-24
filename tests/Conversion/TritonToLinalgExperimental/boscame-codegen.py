@@ -71,9 +71,9 @@ def main():
         assert not re.search(r"@(?:malloc|aligned_alloc|free)\b", text)
         dma_starts = text.count("call i64 @bosc_ame_dma_start")
         assert dma_starts == text.count("call void @bosc_ame_dma_wait")
-        # GEMM's complete A/B/C ranges may all use proven direct routes;
-        # masked LayerNorm still needs its four external DMA boundaries.
-        assert dma_starts == (0 if ame else 4)
+        # The legacy GEMM reads C after the K loop: preserve its 16 row
+        # loads/stores, while A/B use direct DDR. LayerNorm has four packets.
+        assert dma_starts == (32 if ame else 4)
         run(
             [
                 llc,
@@ -111,7 +111,7 @@ def main():
         )
         (work / (name + ".nr.s")).write_text(checked)
         if ame:
-            assert not re.search(r"\bvadd\.vv\b", checked)
+            assert re.search(r"\bvadd\.vv\b", checked)
         else:
             assert re.search(r"\bvle(?:8|32)\.v\b", checked) and re.search(
                 r"\bvse(?:8|32)\.v\b", checked

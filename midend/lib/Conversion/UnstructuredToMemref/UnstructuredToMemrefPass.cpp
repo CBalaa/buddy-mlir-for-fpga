@@ -821,13 +821,13 @@ public:
 
   void runOnOperation() override {
     auto moduleOp = getOperation();
-    if (config.enableBOSCAME) {
+    if (config.emitContract) {
       WalkResult unsupported = moduleOp.walk([&](Operation *op) {
         if (!isa<tts::GatherOp, tts::ScatterOp, tts::AtomicRMWOp,
                  tts::AtomicCASOp, triton::LoadOp, triton::StoreOp>(op))
           return WalkResult::advance();
-        op->emitError("BOSCAME unstructured/scalar memory access is "
-                      "unsupported; cannot bypass DMA");
+        op->emitError("neutral contract unstructured/scalar memory access is "
+                      "unsupported in contract v1");
         return WalkResult::interrupt();
       });
       if (unsupported.wasInterrupted()) {

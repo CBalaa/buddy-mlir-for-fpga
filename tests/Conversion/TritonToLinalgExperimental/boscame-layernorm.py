@@ -57,8 +57,18 @@ def main():
     assert candidate_text.count("vector.reduction <add>") == 2
     assert "vector.extract " not in candidate_text
     assert "vector<1xf32>" not in candidate_text
-    assert not re.search(r"memref\.alloca?[^\n]*: memref<f32>", candidate_text)
-    assert not re.search(r"memref\.(?:load|store|copy)\b", candidate_text)
+    # Scalar reduction seeds/results are ordinary scratch. All tensor data
+    # stays in SPM; the two f32 slots add only eight bytes of stack payload.
+    assert (
+        len(re.findall(r"memref\.alloca[^\n]*: memref<f32>", candidate_text))
+        == 2
+    )
+    assert "memref.copy" not in candidate_text
+    assert all(
+        "memref<f32>" in line and "#bosc_ame.spm" not in line
+        for line in candidate_text.splitlines()
+        if re.search(r"memref\.(load|store)\b", line)
+    )
     assert (
         len(
             re.findall(

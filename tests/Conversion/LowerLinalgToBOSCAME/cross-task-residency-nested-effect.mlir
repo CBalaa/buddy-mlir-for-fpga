@@ -1,6 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
+// A generic payload with a hidden global store is outside the pure V1
+// arithmetic recipe and must not enter residency or placement planning.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   memref.global "private" @side_effect : memref<16xf32> = uninitialized
 
@@ -50,4 +51,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN-NOT: residency=cross-task
+// CHECK: kernel contract V25: generic requires one pure arithmetic operation

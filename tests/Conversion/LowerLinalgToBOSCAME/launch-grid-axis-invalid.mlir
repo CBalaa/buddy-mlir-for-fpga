@@ -1,5 +1,7 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t 2>&1 | FileCheck %s
-// RUN: not buddy-opt %s --lower-linalg-to-boscame -o %t 2>&1 | FileCheck %s
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 module {
   func.func @bad_axes(
@@ -9,5 +11,3 @@ module {
     return
   }
 }
-
-// CHECK-COUNT-2: invalid BOSCAME num_programs axis; expected unique axes in [0,2]

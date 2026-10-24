@@ -1,8 +1,11 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: cmp %t.default %t.reported
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1
+
+// Retain the historical source case as a precise v1 compatibility boundary.
+// The intermediate external write is followed by another read, so it cannot
+// be treated as a terminal boundary. New task/version and alias checks live
+// in KernelContract and PlanRoutes tests;
+// the removed legacy inventory/report must not imply those proofs succeeded.
+// V1: v1 does not support reading an external region after its terminal write
 
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @chain(
@@ -48,29 +51,3 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
     return
   }
 }
-
-// PLAN: BOSCAME plan report:
-// PLAN: compute-graph: status=complete tasks=2 dependencies=1 logical-values=3
-// PLAN: task[0]: op=linalg.generic kind=elementwise stage=0 predecessors=[] inputs=[10] outputs=[11] varying-axes=[] barrier-after=false rematerializable=true
-// PLAN: task[1]: op=linalg.generic kind=elementwise stage=0 predecessors=[0] inputs=[11] outputs=[12] varying-axes=[] barrier-after=false rematerializable=true
-// PLAN: dependency: 0 -> 1 resolved=true
-// PLAN: logical-value[10]: producer=function-argument consumers=[0] lifetime=known
-// PLAN: logical-value[11]: producer=0 consumers=[1] lifetime=known
-// PLAN: logical-value[12]: producer=1 consumers=[] lifetime=known
-// PLAN: buffer[0]: root=known root-id=0 views=[] shape=[16] strides=[1] effective-byte-offset-bytes=0 capacity=64 spm-lifetime=operation-local task=0..0 physical-users=[0] physical-lifetime=known tasks=0..0
-// PLAN: buffer[1]: root=known root-id=1 views=[memref.view] shape=[16] strides=[1] effective-byte-offset-bytes=64 capacity=64 spm-lifetime=cross-task task=0..1 physical-users=[0,1] physical-lifetime=known tasks=0..1
-// PLAN: buffer[2]: root=known root-id=2 views=[] shape=[16] strides=[1] effective-byte-offset-bytes=0 capacity=64 spm-lifetime=operation-local task=1..1 physical-users=[1] physical-lifetime=known tasks=1..1
-// PLAN: buffer-accesses: count=4 scope=post-planning
-// PLAN: buffer-access[0]: op=linalg.generic effect=read
-// PLAN-SAME: root=known root-id=0
-// PLAN-SAME: task=0 transfer=0 alias=unknown dma=planned-legal
-// PLAN-SAME: logical-value=10
-// PLAN: buffer-access[1]: op=linalg.generic effect=write
-// PLAN-SAME: task=0 transfer=1 alias=unknown dma=planned-legal logical-value=11
-// PLAN: buffer-access[2]: op=linalg.generic effect=read
-// PLAN-SAME: root=known root-id=1
-// PLAN-SAME: task=1 transfer=1 alias=unknown dma=planned-legal
-// PLAN-SAME: logical-value=11
-// PLAN: buffer-access[3]: op=linalg.generic effect=write
-// PLAN-SAME: task=1 transfer=2 alias=unknown dma=planned-legal logical-value=12
-// PLAN: resources: transfers=3 dma-packets=3 read-bytes=64 write-bytes=128 totals-exact=true latency=uncalibrated

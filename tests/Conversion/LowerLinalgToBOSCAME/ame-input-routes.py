@@ -32,11 +32,9 @@ def module(m, n, k):
 
 
 def lower(opt, input_path, report=True, spm_enabled=True):
-    options = (
-        ("enable-spm-dma=true " if spm_enabled else "")
-        + "enable-ame=true dma-abi=args_aligned64_nonalias "
-        "target=nr-fpga bm=64 bn=64 bk=64"
-    )
+    options = "dma-abi=args_aligned64_nonalias target=nr-fpga"
+    if not spm_enabled:
+        options += " enable-spm-dma=false"
     if report:
         options += " plan-report=true"
     return subprocess.run(
@@ -65,25 +63,19 @@ def main():
     opt = Path(buddy_opt_path())
 
     one_tile = write(work, "one-tile", 64, 64, 64)
-    spm = lower(opt, one_tile)
-    assert spm.returncode == 0, spm.stderr
-    assert "direct-A=direct-ddr (proven)" in spm.stderr, spm.stderr
-    assert "direct-B=direct-ddr (proven)" in spm.stderr, spm.stderr
-    assert "direct-C=direct-ddr (proven)" in spm.stderr, spm.stderr
-    assert "A=direct-byte-tie direct-bytes=4096 staged-bytes=4096" in spm.stderr
-    assert "B=direct-byte-tie direct-bytes=4096 staged-bytes=4096" in spm.stderr
-    assert (
-        "bosc_ame.tile.load_a" in spm.stdout
-        and "bosc_ame.direct_ddr" in spm.stdout
+    direct = lower(opt, one_tile)
+    assert direct.returncode == 0, direct.stderr
+    route = next(
+        line for line in direct.stderr.splitlines() if "plan.route=" in line
     )
-    assert (
-        "bosc_ame.tile.load_b" in spm.stdout
-        and "bosc_ame.direct_ddr" in spm.stdout
-    )
-    assert "bosc_ame.dma.start" not in spm.stdout
+    assert route.count('level = "ddr"') == 4, route
+    assert "bytes = 4096 : i64" in route
+    assert 'reason = "safe-terminal-forwarding"' in route
+    assert "bosc_ame.direct_ddr" in direct.stdout
+    assert "bosc_ame.dma.start" not in direct.stdout
     lowered = subprocess.run(
         [str(opt), "-", "--lower-bosc-ame", "-o", "-"],
-        input=spm.stdout,
+        input=direct.stdout,
         capture_output=True,
         text=True,
         check=False,
@@ -92,65 +84,61 @@ def main():
     assert "llvm.call @bosc_ame_dma_start" not in lowered.stdout
     plain = lower(opt, one_tile, report=False)
     assert plain.returncode == 0, plain.stderr
-    assert plain.stdout == spm.stdout
+    assert plain.stdout == direct.stdout
 
-    repeated = write(work, "repeated-reads", 128, 128, 64)
+    # M is already tiled by the frontend. Across two N subtiles, staging A
+    # moves its 4096-byte snapshot once; direct A would read 8192 bytes.
+    repeated = write(work, "repeated-a", 64, 128, 64)
     staged = lower(opt, repeated)
     assert staged.returncode == 0, staged.stderr
-    assert "direct-A=spm-dma (planned)" in staged.stderr, staged.stderr
-    assert "direct-B=spm-dma (planned)" in staged.stderr, staged.stderr
-    assert (
-        "A=staged-lower-read-bytes direct-bytes=8192 staged-bytes=8192"
-        not in staged.stderr
+    route = next(
+        line for line in staged.stderr.splitlines() if "plan.route=" in line
     )
-    assert (
-        "A=staged-lower-read-bytes direct-bytes=16384 staged-bytes=8192"
-        in staged.stderr
-    )
-    assert (
-        "B=staged-lower-read-bytes direct-bytes=16384 staged-bytes=8192"
-        in staged.stderr
-    )
-
-    mixed = write(work, "mixed-input-routes", 128, 64, 64)
-    mixed_routes = lower(opt, mixed)
-    assert mixed_routes.returncode == 0, mixed_routes.stderr
-    assert "direct-A=direct-ddr (proven)" in mixed_routes.stderr
-    assert "direct-B=spm-dma (planned)" in mixed_routes.stderr
-    assert "direct-C=direct-ddr (proven)" in mixed_routes.stderr
-    assert "A=direct-byte-tie direct-bytes=8192 staged-bytes=8192" in (
-        mixed_routes.stderr
-    )
-    assert "B=staged-lower-read-bytes direct-bytes=8192 staged-bytes=4096" in (
-        mixed_routes.stderr
-    )
+    assert 'a = {bank = 1 : i64, bytes = 4096 : i64, level = "spm"' in route
+    assert 'b = {bytes = 8192 : i64, level = "ddr"' in route
+    assert 'accumulator = {bytes = 32768 : i64, level = "ddr"' in route
+    assert 'reason = "legal-minimum-external-traffic"' in route
+    assert "chunks = {bytes = 64 : i64, count = 64 : i64" in staged.stderr
+    assert "high_water = array<i64: 0, 4096>" in staged.stderr
+    assert "bosc_ame.dma.start" in staged.stdout
     tile_loads = [
         line
-        for line in mixed_routes.stdout.splitlines()
+        for line in staged.stdout.splitlines()
         if "bosc_ame.tile.load_" in line
     ]
     assert any(
-        "bosc_ame.tile.load_a" in line and "bosc_ame.direct_ddr" in line
+        "load_a" in line and "bosc_ame.direct_ddr" not in line
         for line in tile_loads
     )
-    assert any("bosc_ame.tile.load_b" in line for line in tile_loads)
-    assert not any(
-        "bosc_ame.tile.load_b" in line and "bosc_ame.direct_ddr" in line
+    assert any(
+        "load_b" in line and "bosc_ame.direct_ddr" in line
         for line in tile_loads
     )
 
-    direct_only = lower(opt, one_tile, spm_enabled=False)
-    assert direct_only.returncode == 0, direct_only.stderr
-    assert "A=direct-spm-disabled" in direct_only.stderr, direct_only.stderr
-    assert "B=direct-spm-disabled" in direct_only.stderr, direct_only.stderr
-    assert "bosc_ame.dma.start" not in direct_only.stdout
-
-    capacity = write(work, "capacity-fallback", 256, 128, 640)
+    # This legal pre-tiled case needs 135168 bytes for A. Its direct route is
+    # address-safe, so capacity causes automatic forwarding rather than a
+    # request for a user-selected policy.
+    capacity = write(work, "capacity-fallback", 64, 128, 2112)
     fallback = lower(opt, capacity)
     assert fallback.returncode == 0, fallback.stderr
-    assert "A=direct-capacity-fallback" in fallback.stderr, fallback.stderr
-    assert "B=staged-lower-read-bytes" in fallback.stderr, fallback.stderr
-    assert "direct-C=direct-ddr (proven)" in fallback.stderr, fallback.stderr
+    assert 'reason = "capacity-fallback-safe-direct"' in fallback.stderr
+    assert "high_water = array<i64: 0, 0>" in fallback.stderr
+    assert "bosc_ame.dma.start" not in fallback.stdout
+
+    # Preserve the old untiled sources as explicit contract boundary cases.
+    for name, m, n, k in (
+        ("untiled-repeated", 128, 128, 64),
+        ("untiled-mixed", 128, 64, 64),
+        ("untiled-capacity", 256, 128, 640),
+    ):
+        rejected = lower(opt, write(work, name, m, n, k))
+        assert rejected.returncode != 0
+        assert "AME plan requires frontend tiling/padding" in rejected.stderr, (
+            rejected.stderr
+        )
+    disabled = lower(opt, one_tile, spm_enabled=False)
+    assert disabled.returncode != 0
+    assert "requires enabled target engines" in disabled.stderr, disabled.stderr
 
     # CHECK: PASS AME input route traffic and capacity choices
     print("PASS AME input route traffic and capacity choices")

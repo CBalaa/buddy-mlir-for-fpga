@@ -1,8 +1,9 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t.plain
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.reported 2> %t.facts
-// RUN: diff %t.plain %t.reported
-// RUN: FileCheck %s < %t.plain
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: call_lineage = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: select_second = complete
+// CONTRACT-CASE: select_second_with_two_generics = complete
 module {
   func.func private @select_second(%first: tensor<4xf32>,
       %second: tensor<4xf32>) -> tensor<4xf32> {
@@ -58,7 +59,7 @@ module {
         indexing_maps = [affine_map<(i) -> (i)>,
                          affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 10 : i64}}
+        contract.provenance = {origin_id = 10 : i64}}
         ins(%first : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %loaded_value = arith.addf %value, %one : f32
@@ -68,7 +69,7 @@ module {
         indexing_maps = [affine_map<(i) -> (i)>,
                          affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 20 : i64}}
+        contract.provenance = {origin_id = 20 : i64}}
         ins(%second : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %loaded_value = arith.addf %value, %one : f32
@@ -95,14 +96,14 @@ module {
     %output = bufferization.to_buffer %selected
         : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 30 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 30 : i64}
     } : memref<4xf32> to memref<4xf32>
     %aliased = func.call @select_second(%loop_value, %loop_value)
         : (tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>
     %alias_output = bufferization.to_buffer %aliased
         : tensor<4xf32> to memref<4xf32>
     memref.copy %alias_output, %alias_dst {
-      bosc_ame.memory = {kind = "store", origin_id = 40 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 40 : i64}
     } : memref<4xf32> to memref<4xf32>
     %conservative = func.call @select_second_with_two_generics(
         %first_load, %second_load)
@@ -110,17 +111,8 @@ module {
     %conservative_output = bufferization.to_buffer %conservative
         : tensor<4xf32> to memref<4xf32>
     memref.copy %conservative_output, %conservative_dst {
-      bosc_ame.memory = {kind = "store", origin_id = 50 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 50 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
 }
-
-// CHECK-LABEL: func.func @call_lineage
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: bosc_ame.loop_carried_slots = [{
-// CHECK-SAME: exit_consumer_compute_ids = array<i64: [[STORE_ID:[0-9]+]], [[ALIAS_STORE_ID:[0-9]+]]>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = [[STORE_ID]] : i64{{.*}}bosc_ame.compute_origin_id = 30 : i64{{.*}}bosc_ame.source_load_origin_ids = array<i64: 10>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = [[ALIAS_STORE_ID]] : i64{{.*}}bosc_ame.compute_origin_id = 40 : i64{{.*}}bosc_ame.source_load_origin_ids = array<i64: 10>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 50 : i64{{.*}}bosc_ame.source_load_origin_ids = array<i64: 20>

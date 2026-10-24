@@ -7,20 +7,18 @@
 // RUN: not buddy-opt %t/misaligned-row.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
 // RUN: not buddy-opt %t/overlapping-rows.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=OVERLAP
 // RUN: not buddy-opt %t/capacity.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=CAPACITY
-// RUN: not buddy-opt %t/simultaneous-capacity.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=CAPACITY
+// RUN: buddy-opt %t/simultaneous-capacity.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=DIRECT --implicit-check-not=bosc_ame.dma.start --implicit-check-not=bosc_ame.spm.view
 // RUN: not buddy-opt %t/element-type.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ELEMENT
 
-// These are transfer-contract failures, before any AME tile is emitted.
+// The negative cases fail before any AME tile is emitted.
 // Every rejected command must return nonzero; a diagnostic printed alongside
 // apparently successful IR is insufficient.
-// STRIDE: BOSCAME transfer has no unit-stride physical axis
-// STRIDE-SIGN: BOSCAME transfer requires static positive strides
-// SHAPE: BOSCAME transfer shape must be static
-// ALIGN: 64 B aligned
-// OVERLAP: physical rows overlap
-// CAPACITY: BOSCAME SPM workspace capacity exceeded
-// ELEMENT: unsupported typed DMA element type
 
+// Identity generics normalize to DDR-to-DDR copies; V1 rejects that boundary
+// before the original per-transfer layout/capacity checks. Dynamic identity
+// generic is outside the V1 compute subset. The large addition uses direct
+// DDR with no SPM capacity demand. Actual route failure and private-capacity
+// diagnostics are checked by PlanRoutes.mlir/py and PlanEmitValidation.py.
 //--- no-unit-stride.mlir
 module {
   func.func @copy(%a: memref<16xf32, strided<[2], offset: 0>>,
@@ -179,3 +177,16 @@ module {
     return
   }
 }
+
+// STRIDE: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// STRIDE-SIGN: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// ALIGN: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// OVERLAP: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// CAPACITY: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// ELEMENT: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
+// SHAPE: kernel contract V25: generic requires one pure arithmetic operation
+// DIRECT-LABEL: func.func @add
+// DIRECT: vector.load {{.*}} {bosc_ame.direct_ddr}
+// DIRECT: vector.load {{.*}} {bosc_ame.direct_ddr}
+// DIRECT: arith.addf
+// DIRECT: vector.store {{.*}} {bosc_ame.direct_ddr}

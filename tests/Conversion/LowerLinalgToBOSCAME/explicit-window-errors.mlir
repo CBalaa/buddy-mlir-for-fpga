@@ -13,4 +13,4 @@ module {
   }
 }
 
-// CHECK: overlapping explicit SPM windows in bank 0
+// CHECK: overlapping SPM input windows require a shared root or provably exclusive arms

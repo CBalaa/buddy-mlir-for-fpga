@@ -3,9 +3,10 @@
 
 The makefile owns the full lowering pipeline::
 
-    kernel.ttir --triton-to-linalg-experimental=boscame=true
-      -> kernel.frontend.mlir --one-shot-bufferize
-      -> kernel.bufferized.mlir --linalg-to-boscame
+    kernel.ttir --triton-to-linalg-experimental=contract=true
+      -> kernel.frontend.mlir --kernel-contract-verify
+      -> kernel.bufferized.mlir --bosc-ame-plan
+      -> kernel.planned.mlir --bosc-ame-emit
       -> kernel.boscame.mlir --lower-bosc-ame --buddy-to-llvmir -> kernel.ll
 
 This file owns the real Triton frontend export, the typed unranked ABI adapter
@@ -30,7 +31,7 @@ Build artifacts (``build/matmul_i8_196x768x768/``) are limited to IR and the
 final image:
 
     kernel.ttir  kernel.frontend.mlir  kernel.bufferized.mlir
-    kernel.boscame.mlir  kernel.llvm.mlir  kernel.ll
+    kernel.planned.mlir  kernel.boscame.mlir  kernel.llvm.mlir  kernel.ll
     matmul_i8_196x768x768.bin
 
 Generated C, assembly, objects, the ELF and the audit report are intermediates.

@@ -1,7 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true dma-abi=args_aligned64_nonalias' -o %t.ir 2>%t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o %t.default
-// RUN: cmp %t.default %t.ir
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: %python %S/Inputs/kernel-memory-cases.py %s buddy-opt
+
+// Original memory scenarios are retained below. The shared harness checks
+// neutral content dependencies and conservative alias boundaries, then
+// explicit v1 planner diagnostics instead of retired access/pair reports.
 
 module {
   func.func private @opaque()
@@ -539,56 +540,3 @@ module {
   }
 
 }
-
-// PLAN:   buffer-alias-pairs: count={{[1-9][0-9]*}} scope=known-roots-within-function unproven-pairs=unknown status=complete
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@shared_root_views accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@shared_root_views accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@memory_space_cast_disjoint_views accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@memory_space_cast_overlapping_views accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@select_different_views accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@direct_ddr_copy accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=abi-nonalias-entry-arguments
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@dynamic_view accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@dynamic_sibling_views accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@strided_disjoint_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@strided_overlapping_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@strided_dynamic_coefficients accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@strided_span_overflow accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@root_descriptor_offset_overflow accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank2_strided_disjoint_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank2_strided_overlapping_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank3_strided_disjoint_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank3_strided_overlapping_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank4_strided_disjoint_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank4_strided_overlapping_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank3_multiple_dynamic_offsets_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank3_distinct_dynamic_offsets accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank2_strided_columns accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@rank2_strided_dynamic_coefficients accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@select_same_view accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@transpose_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@transpose_overlapping accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reshape_disjoint_siblings accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@expand_shape_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@expand_shape_overlapping accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@collapse_shape_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@collapse_shape_overlapping accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@pitched_column_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-pitched-row-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@pitched_column_overlap accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN:   buffer-accesses: count=
-// PLAN: buffer-access[{{[0-9]+}}]: op=memref.load effect=read
-// PLAN-SAME: root=known root-id=[[ROOT:[0-9]+]]
-// PLAN-SAME: views=[memref.subview] shape=[16] logical-shape=[16] strides=[1]
-// PLAN: buffer-access[{{[0-9]+}}]: op=memref.load effect=read
-// PLAN-SAME: root=known root-id=[[ROOT]]
-// PLAN-SAME: views=[memref.subview] shape=[16] logical-shape=[16] strides=[1]
-// PLAN: buffer-access[{{[0-9]+}}]: op=memref.store effect=write
-// PLAN-SAME: root=known root-id=
-// PLAN: buffer-access[{{[0-9]+}}]: op=func.call effect=unknown
-// PLAN-SAME: type=<unknown> memory-space=<unknown> root=unknown
-// PLAN: buffer-access[{{[0-9]+}}]: op=linalg.generic effect=read
-// PLAN-SAME: root=known root-id=
-// PLAN: buffer-access[{{[0-9]+}}]: op=linalg.generic effect=write
-// PLAN-SAME: source-origin-id=77 type=memref<16xf32> memory-space=default root=known root-id={{[0-9]+}} views=[] shape=[16] logical-shape=[16]
-// PLAN-SAME: transfer=<none> alias=unknown dma=unassessed
-// PLAN: buffer-access[{{[0-9]+}}]: op=memref.load effect=read{{.*}}views=[memref.subview]{{.*}}effective-byte-offset-bytes=<unknown>
-// PLAN: buffer-access[{{[0-9]+}}]: op=memref.load effect=read{{.*}}root=known root-id={{[0-9]+}} views=[memref.subview, memref.reshape] shape=[1,4]

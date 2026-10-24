@@ -10,8 +10,9 @@ elementwise and select operations stay in Linalg and lower to SPM vector code.
 The only lowering route in this directory is:
 
 ```text
-TTIR -> triton-to-linalg-experimental -> one-shot bufferize
-     -> linalg-to-boscame -> lower-bosc-ame -> LLVM IR -> RVV assembly -> ELF
+TTIR -> triton-to-linalg-experimental (contract=true; includes bufferization)
+     -> neutral contract IR -> bosc-ame-plan -> verified planned IR
+     -> bosc-ame-emit -> lower-bosc-ame -> LLVM IR -> RVV assembly -> ELF
 ```
 
 ## Quick start
@@ -41,86 +42,78 @@ The conversion commands used by `make boscame llvm` are:
 
 ```bash
 buddy-opt build/layernorm_197x768/kernel.ttir \
-  --triton-to-linalg-experimental="boscame=true dma-abi=args_aligned64_nonalias" \
+  --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_layernorm_197x768:197,1,1" \
   -o build/layernorm_197x768/kernel.frontend.mlir
 buddy-opt build/layernorm_197x768/kernel.frontend.mlir \
-  --empty-tensor-to-alloc-tensor \
-  --one-shot-bufferize="bufferize-function-boundaries=true buffer-alignment=64" \
-  --canonicalize --cse -o build/layernorm_197x768/kernel.bufferized.mlir
+  --kernel-contract-verify -o build/layernorm_197x768/kernel.bufferized.mlir
 buddy-opt build/layernorm_197x768/kernel.bufferized.mlir \
-  --linalg-to-boscame \
-  --promote-buffers-to-stack -o build/layernorm_197x768/kernel.boscame.mlir
+  --bosc-ame-plan --bosc-ame-plan-verify \
+  -o build/layernorm_197x768/kernel.planned.mlir
+buddy-opt build/layernorm_197x768/kernel.planned.mlir \
+  --bosc-ame-emit -o build/layernorm_197x768/kernel.boscame.mlir
 buddy-opt build/layernorm_197x768/kernel.boscame.mlir \
   --lower-bosc-ame -o build/layernorm_197x768/kernel.llvm.mlir
 buddy-translate build/layernorm_197x768/kernel.llvm.mlir \
   --buddy-to-llvmir -o build/layernorm_197x768/kernel.ll
 ```
 
-`--triton-to-linalg-experimental` materializes the Triton source, mask and
-program-axis facts as `bosc_ame.*` attributes on the buffer-form Linalg IR.
-`--linalg-to-boscame` reads those facts, analyzes the Linalg computation and
-its memory facts, plans root-buffer placement and DMA transfers, then emits the
-BOSCAME dialect. `--lower-bosc-ame` lowers the DMA/SPM operations to the
-runtime ABI and the surrounding LLVM dialect. See
-[the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md) for
-the fact and plan reports, the DMA ABI and the supported accesses.
+Contract mode performs integer normalization, static mask specialization and
+safe bufferization inside the frontend. `kernel.frontend.mlir` already contains
+standard buffer-form Linalg/MemRef/SCF and target-neutral `contract.*` facts;
+`kernel.bufferized.mlir` is its verified copy, retained as a familiar artifact
+name. No second bufferization is needed. The planner binds actual operands,
+selects each DDR/SPM route, rebuilds content versions and dependencies, and
+records concrete `plan.*` decisions in `kernel.planned.mlir`. Emission verifies
+that plan and expands it mechanically. There is no global storage-policy option.
+
+The contract can be produced by another frontend without Triton or BOSCAME
+dialect dependencies. See the [pipeline guide](../../../docs/BOSCAMEKernelContractPipeline.md)
+and [regenerated-example validation](../../../docs/BOSCAMEKernelContractValidation.md)
+for the interface, resource counts and artifact hashes.
 
 ## Memory and DMA
 
-Placement plans six compiler-managed float32 roots in fixed SPM windows.
-Register forwarding removes the shared mean/invstd broadcast root, leaving
-five 4 KiB roots: zero padding, X/centered/normalized, Weight, Bias and squares.
-The surviving offsets keep each bank's high-water mark at 12 KiB; the unused
-window is not compacted. No lifetime overlap or spill search is used.
-X -> centered -> normalized -> weighted -> biased is computed in place in the
-same root. Logical frontend private buffers use automatic placement. The
-`buffer-placement` pass option is a physical-placement debug override; it
-does not select a computation fusion or external route.
+The planner places five 4 KiB float32 roots in SPM: a shared mean/invstd
+broadcast buffer, X/centered/normalized/output, Weight, Bias and squares.
+Bank 0 uses offsets 0, 4096 and 8192; bank 1 uses 0 and 4096. The bank
+high-water marks are 12288 B and 8192 B, totaling **20480 B**. Safe frontend
+bufferization preserves centered while squares is produced, then updates the
+X/output root in place. No general lifetime-based physical window overlap is
+assumed.
 
-The logical tensor has 1024 lanes while only the first 768 are valid, so each
+The logical tensor has 1024 lanes while only the first 768 are valid. Each
 external DMA moves the 3072-byte prefix: X, Weight and Bias read, and Out
-writes. The whole per-program traffic is four DMA events, 9216 read bytes and
-3072 write bytes; internal float arrays never round-trip through DDR. The
-automatic route planner keeps the output on SPM/DMA because only a valid
-prefix is written (`direct-store-coverage-or-address-unproven`).
+writes. Each load first fills all 1024 SPM lanes (X/Bias padding +0, Weight
+padding 1). The output stays on SPM/DMA because the store covers only the valid
+prefix of the private 1024-lane tile. Each program performs four DMA events,
+9216 read bytes and 3072 write bytes; private arrays do not round-trip through
+DDR.
 
 | Buffer | DDR location | External DMA |
 | --- | --- | --- |
-| X | row x 3072 bytes | 3072-byte read |
+| X | row × 3072 bytes | 3072-byte read |
 | Weight | 3072 bytes | 3072-byte read |
 | Bias | 3072 bytes | 3072-byte read |
-| Out | row x 3072 bytes | 3072-byte write |
+| Out | row × 3072 bytes | 3072-byte write |
 
-Each load first fills the full 1024-lane SPM buffer (invalid X lanes are 0,
-invalid Weight lanes are 1, invalid Bias lanes are 0) and then DMAs only the
-valid prefix. Both reductions still use all 1024 logical lanes and divide by
-768; the centered select zeros the padded lanes before squaring, so they
-contribute zero to the variance.
+Both reductions use all 1024 logical lanes and divide by 768. The centered
+prefix keeps the original subtraction; a subview fill writes exact +0 to
+`[768,1024)` before squaring. Two ordered f32 reductions use 16-lane chunks
+and `vfredosum.vs`, preserving the established reduction order and tolerance.
+They write two private host rank-zero buffers, which emission converts to
+aligned stack storage. Explicit scalar-load tasks capture the results before
+the div/rsqrt chains. Mean and invstd are broadcast through the same SPM root
+at different times; this version does not fuse those broadcasts into adjacent
+RVV computations.
 
-Both sums load `vector<16xf32>` and use ordered vector reduction, producing
-`vfredosum.vs`: each 1024-lane sum takes 64 loop iterations. Initial zero and
-reduction results stay in scalar SSA values; the generated kernel has no
-scalar scratch allocation or DDR-policy call. Mean and invstd feed reusable
-register broadcasts directly, avoiding 16 KiB of SPM reads/writes per row.
-The broadcast and reduction operations retain their task IDs and dependencies.
-The assembly filter's `--expand-f32-sub` option expands scalar-vector
-subtraction into supported instructions without extending the ISA allowlist.
-
-The centered select lowers to the fixed ranges `[0,768)` and `[768,1024)`.
-Its graph metadata drops the unused mask input and dependency. The private
-width, index and mask tasks are then removed, leaving 19 of the original 22
-tasks with their surviving IDs unchanged. A final DCE removes the unused
-integer/predicate arrays and lowering artifacts while preserving graph tasks.
-This cleanup keeps the floating-point operations and results bit for bit.
-
-Because the centered prefix already occupies the output root, lowering skips
-its `[0,768)` self-copy and keeps the `[768,1024)` tail clear. Squaring reuses
-one vector load for both operands. Together these remove 10 KiB of explicit
-SPM reads/writes per row from the BOSCAME IR. Task 14 retains the inherited
-prefix dependency, and task 15 retains its two logical input operands; the
-graph still has 19 tasks. These changes preserve the floating operations and
-their order. See [the validation record](../../../docs/validation/boscame-local-memory-redundancy/README.md)
-for output-byte comparison and generated assembly results.
+The plan has 21 tasks, versus 19 in the saved integrated baseline. The new
+contract explicitly records two scalar-load events, two host initializations
+and exact tail fill dependencies. Its five physical windows replace the
+baseline's five windows with a 4 KiB gap: total bank high-water drops from
+24576 B to 20480 B. The baseline's register broadcast forwarding is not part
+of the current mechanical emitter, so the internal vector traffic differs.
+External DMA ranges, floating-point operation order and output bytes remain
+unchanged for the recorded full-grid validation.
 
 ## ABI and image memory
 
@@ -148,27 +141,24 @@ Weight/Bias tail sentinels, and requires exactly the four listed DMA ranges per
 program. `--write-output FILE` saves the complete 605184-byte output and
 `--compare-output FILE` requires a byte-for-byte match with a previous run.
 
-`make check` builds `bin` and then verifies the typed entry LLVM ABI and
-the absence of heap allocation in `kernel.ll`, requires four
-`bosc_ame.dma.start` operations in `kernel.boscame.mlir`, and audits the
-complete ELF (1898 instructions, 54 RVV instructions, 24 vector memory
-instructions, zero AME instructions). The launcher runs two different inputs,
-all 197 rows in reverse order per round (394 programs), and checks 302592
-outputs against its independent C oracle with before/after DDR guards and
-input-change checks.
+`make check` builds `bin`, verifies the typed LLVM entry ABI and absence of
+heap allocation, requires four `bosc_ame.dma.start` operations, and audits the
+complete ELF. The regenerated image contains 1957 instructions, 54 RVV
+instructions, 26 vector memory instructions and zero AME instructions. These
+are static image counts, not executed instruction or latency measurements.
+The board launcher supports two different inputs and 394 row programs, with
+302592 independent C-oracle comparisons and DDR/input guards.
 
-The automatic-route build passes `make`, `make check` and `make simcheck`
-without changing the floating-point order or the tolerance. All 197 reversed
-programs have maximum absolute error zero. The complete output SHA256 is
-`ed6261ce27a36b49df83291fe18af274a0892e8db49f4a509957405cbebf8cbe`,
-matching the previous local-memory-redundancy build byte for byte. The final
-19 tasks, four DMA events per program and 12 KiB high-water mark in each SPM
-bank also remain unchanged. Across the grid, DMA reads 1815552 bytes and writes
-605184 bytes. Removing the explicit placement override reproduces the frontend,
-bufferized and BOSCAME IR, LLVM IR, NR assembly, ELF and binary byte for byte.
-The final-ELF call-chain stack audit includes DMA failure hooks and finds a
-992-byte peak within the unchanged 65536-byte stack. See
-[the accumulator-fusion validation record](../../../docs/validation/boscame-accumulator-routing/README.md).
+The regenerated build passes `make`, `make check` and `make simcheck` with
+`rtol=atol=2e-5`. All 197 reversed programs have maximum absolute error zero;
+the 605184 output bytes match the saved baseline exactly, SHA256
+`ed6261ce27a36b49df83291fe18af274a0892e8db49f4a509957405cbebf8cbe`.
+Across the grid, DMA reads 1815552 bytes and writes 605184 bytes. The new
+linked-ELF call-chain stack bound is **1168 B**, including aligned host scalar
+storage, DMA failure hooks and the trap path, within the unchanged 65536-byte
+stack. The reconstructed baseline's 992 B is a separate measurement. See the
+[validation record](../../../docs/BOSCAMEKernelContractValidation.md) for hashes
+and the audit's assumptions.
 
 ELF/RVV checks establish code generation; the functional simulator establishes
 BOSCAME IR execution semantics. Neither proves the absence of backend register
@@ -213,7 +203,5 @@ images. The current vector-reduction image has not been revalidated on a board.
 | `../tools/restrict_fpga_assembly.py` | Restricted NR instruction stream from the `llc` assembly |
 | `../tools/check_nr_elf.py` | Complete-ELF instruction audit |
 
-See [the compiler contract](../../../docs/TritonToLinalgExperimentalBOSCAME.md)
-and the [root buffer placement validation record](../../../docs/validation/boscame-buffer-placement/README.md).
-The [vector reduction validation record](../../../docs/validation/boscame-vector-reduction/README.md)
-describes the scalar SSA and register-broadcast changes.
+See the [pipeline guide](../../../docs/BOSCAMEKernelContractPipeline.md)
+and [current validation record](../../../docs/BOSCAMEKernelContractValidation.md).

@@ -14,4 +14,4 @@ module {
   }
 }
 
-// CHECK: BOSCAME DDR endpoint effective address cannot be proven 64 B aligned (descriptor offset in elements)
+// CHECK: no legal direct or staging route: external operand requires aligned endpoints, complete cache lines, and a DMA-compatible physical layout

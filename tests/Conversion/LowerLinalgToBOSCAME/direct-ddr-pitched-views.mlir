@@ -1,9 +1,12 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s --check-prefix=DISJOINT
+// RUN: not buddy-opt %t/disjoint.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=DISJOINT
 // RUN: not buddy-opt %t/overlap.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=OVERLAP
 
 // The two 8x16 views have 64-byte rows separated by a 256-byte pitch.
 // Their bounding spans overlap, while their individual row ranges do not.
+// V1 conservatively rejects both this unproved row separation and actual
+// overlap at the contract boundary. Legal pitched AME access remains covered
+// by pitched-transfer.mlir and PlanEmitValidation.py.
 
 //--- disjoint.mlir
 module {
@@ -30,12 +33,6 @@ module {
   }
 }
 
-// DISJOINT-LABEL: func.func @pitched_disjoint
-// DISJOINT: bosc_ame.dma.start
-// DISJOINT: vector.load
-// DISJOINT: vector.store
-// DISJOINT: return
-
 //--- overlap.mlir
 module {
   func.func @pitched_overlap(%root: memref<8x64xf32>) {
@@ -61,4 +58,5 @@ module {
   }
 }
 
-// OVERLAP: BOSCAME cannot prove distinct writable views of one DDR root do not alias
+// DISJOINT: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer
+// OVERLAP: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer

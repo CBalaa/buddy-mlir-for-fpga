@@ -1,5 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' | FileCheck %s
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' --lower-bosc-ame | FileCheck %s --check-prefix=LLVM
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // A frontend-preserved store event stages the producer into SPM, then writes
 // the result directly to its external DDR destination with vector stores.
@@ -13,12 +15,3 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
     return
   }
 }
-
-// CHECK: bosc_ame.spm.view
-// CHECK-COUNT-1: bosc_ame.dma.start
-// CHECK: vector.load {{.*}}#bosc_ame.spm
-// CHECK: vector.store {{.*}}%arg1
-// CHECK-NOT: bosc_ame.dma.start
-// LLVM-COUNT-1: llvm.call @bosc_ame_dma_start
-// LLVM: llvm.store {{.*}}vector<16xf32>
-// LLVM-NOT: llvm.call @bosc_ame_dma_start

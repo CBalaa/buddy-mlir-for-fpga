@@ -1,8 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// A producer barrier separates the write from the later read, so the planner
-// must not extend its SPM lifetime across that boundary.
+// The original module reads an external region after writing it. V1 treats
+// that write as terminal and rejects the later read before residency search.
+// Private producer/consumer lifetimes remain covered by PlanRoutes.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @barrier(
       %src: memref<16xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -48,5 +48,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN-NOT: residency=cross-task
-// PLAN: resources: transfers=4 dma-packets=4 read-bytes=128 write-bytes=128 totals-exact=true latency=uncalibrated
+// CHECK: kernel contract V23/V24: v1 does not support reading an external region after its terminal write

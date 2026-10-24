@@ -131,7 +131,8 @@ static LogicalResult verifyDirectDdrProvenance(Operation *op, Value endpoint) {
   ModuleOp module = op->getParentOfType<ModuleOp>();
   auto abi = module ? module->getAttrOfType<StringAttr>(spmdma::kDmaAbiAttrName)
                     : StringAttr();
-  if (!abi || abi.getValue() != spmdma::kDmaAbiAlignedNonAliasing)
+  if (!abi || (abi.getValue() != spmdma::kDmaAbiAlignedNonAliasing &&
+               abi.getValue() != spmdma::kDmaAbiAligned))
     return op->emitOpError()
            << "direct DDR tile endpoint requires module attribute `"
            << spmdma::kDmaAbiAttrName << " = \""

@@ -1,12 +1,12 @@
 // RUN: buddy-opt %s --lower-linalg-to-boscame -o %t.default
-// RUN: buddy-opt %s --lower-linalg-to-boscame='enable-spm-dma=false enable-ame=false' -o %t.disabled
-// RUN: diff %t.default %t.disabled
-// RUN: FileCheck %s --check-prefix=LEGACY < %t.default
-// RUN: buddy-opt %s --linalg-to-boscame | FileCheck %s --check-prefix=INDEPENDENT
+// RUN: buddy-opt %s --linalg-to-boscame -o %t.alias
+// RUN: diff %t.default %t.alias
+// RUN: FileCheck %s < %t.default
+// RUN: not buddy-opt %s --lower-linalg-to-boscame='enable-spm-dma=false enable-ame=false' 2>&1 | FileCheck %s --check-prefix=DISABLED
 
-// The historical entry point retains its AME lowering with all new features
-// disabled. The independent entry point uses ordinary loops for an unmarked
-// matmul, even without explicitly selecting a target or DMA configuration.
+// Both compatibility names use the same contract, planner and emitter.
+// Ordinary integer matmul retains its ordered scalar payload. Disabled legacy
+// engine overrides are diagnosed rather than silently selecting another path.
 module {
   func.func @unmarked(%a: memref<4x4xi32>, %b: memref<4x4xi32>,
                       %c: memref<4x4xi32>) {
@@ -16,17 +16,15 @@ module {
   }
 }
 
-// LEGACY-LABEL: func.func @unmarked
-// LEGACY: bosc_ame.msettype
-// LEGACY-NOT: bosc_ame.dma.start
-// LEGACY: return
-
-// INDEPENDENT-LABEL: func.func @unmarked
-// INDEPENDENT-NOT: bosc_ame.
-// INDEPENDENT: scf.for
-// INDEPENDENT: memref.load
-// INDEPENDENT: arith.muli
-// INDEPENDENT: arith.addi
-// INDEPENDENT: memref.store
-// INDEPENDENT-NOT: bosc_ame.
-// INDEPENDENT: return
+// CHECK-LABEL: func.func @unmarked
+// CHECK-NOT: bosc_ame.tile
+// CHECK: scf.for
+// CHECK: scf.for
+// CHECK: scf.for
+// CHECK: memref.load
+// CHECK: arith.muli
+// CHECK: arith.addi
+// CHECK: memref.store
+// CHECK-NOT: bosc_ame.tile
+// CHECK: return
+// DISABLED: remove disabled legacy feature overrides

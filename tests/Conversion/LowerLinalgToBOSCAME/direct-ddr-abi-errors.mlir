@@ -1,7 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='target=nr-fpga' 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='target=nr-fpga' 2>&1 | FileCheck %s
 
-// Without an aligned, non-aliasing caller promise the planner cannot prove
-// a direct forwarding route. Ordinary buffer loops retain the copy semantics.
+// The absent disjointness promise leaves source/destination aliasing unknown.
+// The contract rejects the potentially overlapping copy before route selection.
 module {
   func.func @store(%src: memref<64xf32>, %dst: memref<64xf32>) {
     memref.copy %src, %dst {
@@ -13,8 +13,4 @@ module {
   }
 }
 
-// CHECK-NOT: bosc_ame.direct_ddr
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: scf.for
-// CHECK: memref.load
-// CHECK: memref.store
+// CHECK: kernel contract V25: overlapping views must have identical element addresses; use a separate buffer

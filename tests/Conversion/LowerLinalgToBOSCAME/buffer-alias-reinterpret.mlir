@@ -1,5 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 module {
   func.func @reinterpret_disjoint(%root: memref<256xf32>) {
@@ -367,24 +369,3 @@ module {
     return
   }
 }
-
-// PLAN: buffer-alias-pairs: count={{[1-9][0-9]*}} scope=known-roots-within-function unproven-pairs=unknown status=complete
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_overlap accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_dynamic accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_dynamic_base_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_distinct_dynamic_bases accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_rank3 accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_dynamic_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_dynamic_overlap accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_rank2_dynamic_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_resets_source_offset accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_shifted_pointer_unknown accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_offset_overflow accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_nonzero_root_offset accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_nonzero_root_offset_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_nonzero_root_offset_overlap accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@mixed_root_reinterpret_disjoint accesses=[{{[0-9]+}},{{[0-9]+}}] relation=disjoint proof=same-root-symbolic-byte-intervals
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@mixed_root_reinterpret_overlap accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@mixed_root_reinterpret_equal accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root
-// PLAN-DAG: buffer-alias-pair[{{[0-9]+}}]: function=@reinterpret_dynamic_root_offset accesses=[{{[0-9]+}},{{[0-9]+}}] relation=may-alias proof=same-root

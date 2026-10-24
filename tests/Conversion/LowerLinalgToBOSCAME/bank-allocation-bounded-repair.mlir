@@ -1,11 +1,7 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o /dev/null 2>%t.plan
-// RUN: FileCheck %s --check-prefix=DIAG < %t.plan
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// This formerly exercised bounded bank repair by treating a projected generic
-// as a direct external store. Such a store lacks the identity/shape proof
-// required for direct writes. Automatic routing must account for its large
-// destination staging window and report the actual capacity limit before
-// reaching the unsupported heterogeneous SPM generic.
+// The projected legacy store is not a concrete buffer-copy boundary.
+// The adapter rejects its memory facts before a capacity or bank search.
 module {
   func.func @bounded_bank_repair(
       %x0: memref<4688xf32>, %x1: memref<4688xf32>,
@@ -56,4 +52,4 @@ module {
   }
 }
 
-// DIAG: error: BOSCAME SPM workspace capacity exceeded; per-bank capacity=131072 reserved=[0, 0] staged-bytes=[87609344, 18752
+// CHECK: legacy memory facts require a concrete buffer copy

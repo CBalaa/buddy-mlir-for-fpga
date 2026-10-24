@@ -1,17 +1,11 @@
-// RUN: split-file %s %t
-// RUN: not buddy-opt %t/shape.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SHAPE
-// RUN: not buddy-opt %t/bytes.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=BYTES
-// RUN: not buddy-opt %t/span.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPAN
-// RUN: not buddy-opt %t/span-bytes.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPAN-BYTES
-// RUN: not buddy-opt %t/offset-span.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPAN
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // A small packed SPM allocation does not make an overflowing physical DDR
 // range legal. Shape products, element widths, pitches and descriptor offsets
 // must all be checked before creating packets or performing byte arithmetic.
-// SHAPE: BOSCAME transfer shape overflows or is empty
-// BYTES: BOSCAME transfer byte count overflows
-// SPAN: BOSCAME transfer physical span overflows
-// SPAN-BYTES: BOSCAME transfer physical byte span overflows
 
 //--- shape.mlir
 module {

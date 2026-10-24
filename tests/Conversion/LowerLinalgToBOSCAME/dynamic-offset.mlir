@@ -1,23 +1,11 @@
-// RUN: split-file %s %t
-// RUN: buddy-opt %t/aligned.mlir --lower-linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s
-// RUN: not buddy-opt %t/unknown.mlir --lower-linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=UNKNOWN
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // Multiplying an f32 element offset by 16 proves 64-byte alignment. The
 // emitted descriptor must preserve that arithmetic proof through DMA checking.
 // An arbitrary runtime offset must fail instead of assuming the ABI covers it.
-// CHECK-LABEL: func.func @aligned
-// CHECK: arith.muli
-// CHECK: memref.subview
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK: %[[COPY:.*]] = bosc_ame.dma.start
-// CHECK-SAME: (memref<16xf32, {{.*}}#bosc_ame.spm<0>>, memref<16xf32, {{.*}}#bosc_ame.spm<1>>, index)
-// CHECK-NEXT: bosc_ame.dma.wait %[[COPY]]
-// CHECK: bosc_ame.dma.start
-// CHECK-NEXT: bosc_ame.dma.wait
-// CHECK-NOT: bosc_ame.dma.start
-// CHECK: return
-// UNKNOWN: endpoint effective address cannot be proven 64 B aligned
 
 //--- aligned.mlir
 module {

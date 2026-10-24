@@ -1,4 +1,4 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias ' 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s
 
 // A preexisting explicit SPM endpoint must retain the original execution
 // scope check when its identity copy becomes a planned boundary transfer.
@@ -24,4 +24,4 @@ module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   }
 }
 
-// CHECK: BOSCAME fixed SPM workspace requires serial execution inside func.func; unsupported ancestor scf.parallel
+// CHECK: invalid BOSCAME plan: fixed SPM workspace requires serial execution inside func.func; unsupported ancestor scf.parallel

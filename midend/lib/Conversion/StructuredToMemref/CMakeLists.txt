@@ -12,7 +12,6 @@ add_mlir_library(BuddyTritonStructuredToMemref
   BuddyTritonStructuredToMemrefPassIncGen
 
   LINK_LIBS PUBLIC
-  BuddyBOSCAME
   BuddyTPtrIR
   BuddyTritonIR
   BuddyTritonStructuredIR

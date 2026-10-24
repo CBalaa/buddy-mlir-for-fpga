@@ -1,6 +1,25 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' -o %t
-// RUN: FileCheck %s < %t
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly or retain an incomplete graph. Complete,
+// read-free private overwrites may recover local versions after an opaque
+// boundary; they do not make its control-flow summary complete.
+// CONTRACT-CASE: for_memref_slot_divergent_roots = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: for_memref_slot_same_root = complete
+// CONTRACT-CASE: for_zero_trip = incomplete
+// CONTRACT-CASE: if_else_writers = incomplete
+// CONTRACT-CASE: if_memref_divergent_roots = reject: kernel contract V23/V24: v1 does not support reading an external region after its terminal write
+// CONTRACT-CASE: if_memref_same_root = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: if_without_else = reject: kernel contract V17: v1 if requires explicit then and else scopes
+// CONTRACT-CASE: partial_view_writers = incomplete
+// CONTRACT-CASE: scalar_partial_writer = reject: kernel contract V22/V25: v1 private scalar stores require rank-zero storage
+// CONTRACT-CASE: switch_memref_divergent_roots = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: switch_memref_same_root = incomplete
+// CONTRACT-CASE: tensor_before_overwrite = complete
+// CONTRACT-CASE: tensor_buffer_full_overwrite = complete
+// CONTRACT-CASE: tensor_buffer_partial_overwrite = reject: kernel contract V22/V25: v1 private scalar stores require rank-zero storage
+// CONTRACT-CASE: tensor_buffer_roundtrip = complete
+// CONTRACT-CASE: while_memref_slot_divergent_roots = reject: kernel contract V22/V23: read or partial inheritance has no initialized content version
+// CONTRACT-CASE: while_memref_slot_same_root = complete
 // Structured side effects have no tensor result through which a later read
 // can discover both paths. Reaching writers must merge at the region exit.
 module {
@@ -8,19 +27,19 @@ module {
       %left: memref<4xf32>, %right: memref<4xf32>, %dst: memref<4xf32>) {
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 10 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 10 : i64}
     } : memref<4xf32> to memref<4xf32>
     scf.if %condition {
       memref.copy %left, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 20 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 20 : i64}
       } : memref<4xf32> to memref<4xf32>
     } else {
       memref.copy %right, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 30 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 30 : i64}
       } : memref<4xf32> to memref<4xf32>
     }
     memref.copy %buffer, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 40 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 40 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -29,15 +48,15 @@ module {
       %updated: memref<4xf32>, %dst: memref<4xf32>) {
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 50 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 50 : i64}
     } : memref<4xf32> to memref<4xf32>
     scf.if %condition {
       memref.copy %updated, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 60 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 60 : i64}
       } : memref<4xf32> to memref<4xf32>
     }
     memref.copy %buffer, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 70 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 70 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -48,15 +67,15 @@ module {
     %c1 = arith.constant 1 : index
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 80 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 80 : i64}
     } : memref<4xf32> to memref<4xf32>
     scf.for %iv = %c0 to %upper step %c1 {
       memref.copy %updated, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 90 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 90 : i64}
       } : memref<4xf32> to memref<4xf32>
     }
     memref.copy %buffer, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 100 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 100 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -69,19 +88,19 @@ module {
     %prefix = memref.subview %buffer[0] [2] [1]
       : memref<4xf32> to memref<2xf32, strided<[1]>>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 110 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 110 : i64}
     } : memref<4xf32> to memref<4xf32>
     scf.if %condition {
       memref.copy %left, %prefix {
-        bosc_ame.memory = {kind = "load", origin_id = 120 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 120 : i64}
       } : memref<2xf32> to memref<2xf32, strided<[1]>>
     } else {
       memref.copy %right, %prefix {
-        bosc_ame.memory = {kind = "load", origin_id = 130 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 130 : i64}
       } : memref<2xf32> to memref<2xf32, strided<[1]>>
     }
     memref.copy %buffer, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 140 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 140 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -93,25 +112,25 @@ module {
     %c0 = arith.constant 0 : index
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 150 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 150 : i64}
     } : memref<4xf32> to memref<4xf32>
     scf.if %condition {
       %value = memref.load %updated[%c0] {
-        bosc_ame.memory = {kind = "load", origin_id = 160 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 160 : i64}
       } : memref<1xf32>
       memref.store %value, %buffer[%c0] {
-        bosc_ame.memory = {kind = "store", origin_id = 170 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 170 : i64}
       } : memref<4xf32>
     } else {
       %value = memref.load %updated[%c0] {
-        bosc_ame.memory = {kind = "load", origin_id = 180 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 180 : i64}
       } : memref<1xf32>
       memref.store %value, %buffer[%c0] {
-        bosc_ame.memory = {kind = "store", origin_id = 190 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 190 : i64}
       } : memref<4xf32>
     }
     memref.copy %buffer, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 200 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 200 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -121,12 +140,12 @@ module {
     %one = arith.constant 1.0 : f32
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 210 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 210 : i64}
     } : memref<4xf32> to memref<4xf32>
     %snapshot = bufferization.to_tensor %buffer restrict
       : memref<4xf32> to tensor<4xf32>
     memref.copy %updated, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 220 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 220 : i64}
     } : memref<4xf32> to memref<4xf32>
     %empty = tensor.empty() : tensor<4xf32>
     %result = linalg.generic {
@@ -140,7 +159,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 230 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 230 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -152,7 +171,7 @@ module {
     %loaded = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 240 : i64}}
+        contract.provenance = {origin_id = 240 : i64}}
         ins(%initial : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -162,7 +181,7 @@ module {
       : tensor<4xf32> to memref<4xf32>
     // Keep the bridge pair separated so canonicalization cannot fold it.
     memref.copy %buffer, %keep {
-      bosc_ame.memory = {kind = "store", origin_id = 241 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 241 : i64}
     } : memref<4xf32> to memref<4xf32>
     %snapshot = bufferization.to_tensor %buffer restrict
       : memref<4xf32> to tensor<4xf32>
@@ -177,7 +196,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 250 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 250 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -190,7 +209,7 @@ module {
     %loaded = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 260 : i64}}
+        contract.provenance = {origin_id = 260 : i64}}
         ins(%initial : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -199,10 +218,10 @@ module {
     %buffer = bufferization.to_buffer %loaded
       : tensor<4xf32> to memref<4xf32>
     memref.copy %updated, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 270 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 270 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %buffer, %raw_dst {
-      bosc_ame.memory = {kind = "store", origin_id = 271 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 271 : i64}
     } : memref<4xf32> to memref<4xf32>
     %snapshot = bufferization.to_tensor %buffer restrict
       : memref<4xf32> to tensor<4xf32>
@@ -217,7 +236,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 280 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 280 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -231,7 +250,7 @@ module {
     %loaded = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
         iterator_types = ["parallel"],
-        bosc_ame.memory = {kind = "load", origin_id = 290 : i64}}
+        contract.provenance = {origin_id = 290 : i64}}
         ins(%initial : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -240,13 +259,13 @@ module {
     %buffer = bufferization.to_buffer %loaded
       : tensor<4xf32> to memref<4xf32>
     %replacement = memref.load %updated[%c0] {
-      bosc_ame.memory = {kind = "load", origin_id = 300 : i64}
+      contract.provenance = {origin_id = 300 : i64}
     } : memref<1xf32>
     memref.store %replacement, %buffer[%c0] {
-      bosc_ame.memory = {kind = "store", origin_id = 310 : i64}
+      contract.provenance = {origin_id = 310 : i64}
     } : memref<4xf32>
     memref.copy %buffer, %raw_dst {
-      bosc_ame.memory = {kind = "store", origin_id = 311 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 311 : i64}
     } : memref<4xf32> to memref<4xf32>
     %snapshot = bufferization.to_tensor %buffer restrict
       : memref<4xf32> to tensor<4xf32>
@@ -261,7 +280,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 320 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 320 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -272,7 +291,7 @@ module {
     %empty = tensor.empty() : tensor<4xf32>
     %buffer = memref.alloc() : memref<8xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 330 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 330 : i64}
     } : memref<8xf32> to memref<8xf32>
     %left_base = memref.subview %buffer[0] [4] [1]
       : memref<8xf32> to memref<4xf32, strided<[1]>>
@@ -286,12 +305,12 @@ module {
         to memref<4xf32, strided<[1], offset: ?>>
     %alias = scf.if %condition -> memref<4xf32, strided<[1], offset: ?>> {
       memref.copy %initial, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 331 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 331 : i64}
       } : memref<8xf32> to memref<8xf32>
       scf.yield %left : memref<4xf32, strided<[1], offset: ?>>
     } else {
       memref.copy %updated, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 332 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 332 : i64}
       } : memref<8xf32> to memref<8xf32>
       scf.yield %right : memref<4xf32, strided<[1], offset: ?>>
     }
@@ -299,7 +318,7 @@ module {
       : memref<4xf32, strided<[1], offset: ?>> to tensor<4xf32>
     %result = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 340 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 340 : i64}
         ins(%snapshot : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -308,7 +327,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 350 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 350 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -321,19 +340,19 @@ module {
     %left = memref.alloc() : memref<4xf32>
     %right = memref.alloc() : memref<4xf32>
     memref.copy %initial, %left {
-      bosc_ame.memory = {kind = "load", origin_id = 360 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 360 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %updated, %right {
-      bosc_ame.memory = {kind = "load", origin_id = 370 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 370 : i64}
     } : memref<4xf32> to memref<4xf32>
     %alias = scf.if %condition -> memref<4xf32> {
       memref.copy %left, %scratch {
-        bosc_ame.memory = {kind = "store", origin_id = 371 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 371 : i64}
       } : memref<4xf32> to memref<4xf32>
       scf.yield %left : memref<4xf32>
     } else {
       memref.copy %right, %scratch {
-        bosc_ame.memory = {kind = "store", origin_id = 372 : i64}
+        contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 372 : i64}
       } : memref<4xf32> to memref<4xf32>
       scf.yield %right : memref<4xf32>
     }
@@ -341,7 +360,7 @@ module {
       : memref<4xf32> to tensor<4xf32>
     %result = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 380 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 380 : i64}
         ins(%snapshot : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -350,7 +369,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 390 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 390 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -375,13 +394,13 @@ module {
         -> memref<4xf32, strided<[1], offset: ?>>
     case 0 {
       memref.copy %initial, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 401 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 401 : i64}
       } : memref<8xf32> to memref<8xf32>
       scf.yield %left : memref<4xf32, strided<[1], offset: ?>>
     }
     default {
       memref.copy %updated, %buffer {
-        bosc_ame.memory = {kind = "load", origin_id = 402 : i64}
+        contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 402 : i64}
       } : memref<8xf32> to memref<8xf32>
       scf.yield %right : memref<4xf32, strided<[1], offset: ?>>
     }
@@ -389,7 +408,7 @@ module {
       : memref<4xf32, strided<[1], offset: ?>> to tensor<4xf32>
     %result = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 403 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 403 : i64}
         ins(%snapshot : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -398,7 +417,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 404 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 404 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -411,10 +430,10 @@ module {
     %left = memref.alloc() : memref<4xf32>
     %right = memref.alloc() : memref<4xf32>
     memref.copy %initial, %left {
-      bosc_ame.memory = {kind = "load", origin_id = 411 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 411 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %updated, %right {
-      bosc_ame.memory = {kind = "load", origin_id = 412 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 412 : i64}
     } : memref<4xf32> to memref<4xf32>
     %alias = scf.index_switch %selector -> memref<4xf32>
     case 0 {
@@ -427,7 +446,7 @@ module {
       : memref<4xf32> to tensor<4xf32>
     %result = linalg.generic {
         indexing_maps = [affine_map<(i) -> (i)>, affine_map<(i) -> (i)>],
-        iterator_types = ["parallel"], bosc_ame.origin_id = 413 : i64}
+        iterator_types = ["parallel"], contract.origin_id = 413 : i64}
         ins(%snapshot : tensor<4xf32>) outs(%empty : tensor<4xf32>) {
       ^bb0(%value: f32, %unused: f32):
         %sum = arith.addf %value, %one : f32
@@ -436,7 +455,7 @@ module {
     %output = bufferization.to_buffer %result
       : tensor<4xf32> to memref<4xf32>
     memref.copy %output, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 414 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 414 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -447,14 +466,14 @@ module {
     %c1 = arith.constant 1 : index
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 501 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 501 : i64}
     } : memref<4xf32> to memref<4xf32>
     %result = scf.for %iv = %c0 to %upper step %c1
         iter_args(%slot = %buffer) -> memref<4xf32> {
       scf.yield %slot : memref<4xf32>
     }
     memref.copy %result, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 502 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 502 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -467,17 +486,17 @@ module {
     %left = memref.alloc() : memref<4xf32>
     %right = memref.alloc() : memref<4xf32>
     memref.copy %initial, %left {
-      bosc_ame.memory = {kind = "load", origin_id = 511 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 511 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %updated, %right {
-      bosc_ame.memory = {kind = "load", origin_id = 512 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 512 : i64}
     } : memref<4xf32> to memref<4xf32>
     %result = scf.for %iv = %c0 to %upper step %c1
         iter_args(%slot = %left) -> memref<4xf32> {
       scf.yield %right : memref<4xf32>
     }
     memref.copy %result, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 513 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 513 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -486,7 +505,7 @@ module {
       %initial: memref<4xf32>, %dst: memref<4xf32>) {
     %buffer = memref.alloc() : memref<4xf32>
     memref.copy %initial, %buffer {
-      bosc_ame.memory = {kind = "load", origin_id = 521 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 521 : i64}
     } : memref<4xf32> to memref<4xf32>
     %result = scf.while (%before = %buffer)
         : (memref<4xf32>) -> memref<4xf32> {
@@ -496,7 +515,7 @@ module {
       scf.yield %after : memref<4xf32>
     }
     memref.copy %result, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 522 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 522 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
@@ -507,10 +526,10 @@ module {
     %left = memref.alloc() : memref<4xf32>
     %right = memref.alloc() : memref<4xf32>
     memref.copy %initial, %left {
-      bosc_ame.memory = {kind = "load", origin_id = 531 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 531 : i64}
     } : memref<4xf32> to memref<4xf32>
     memref.copy %updated, %right {
-      bosc_ame.memory = {kind = "load", origin_id = 532 : i64}
+      contract.access = {kind = "load", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 532 : i64}
     } : memref<4xf32> to memref<4xf32>
     %result = scf.while (%before = %left)
         : (memref<4xf32>) -> memref<4xf32> {
@@ -520,124 +539,8 @@ module {
       scf.yield %right : memref<4xf32>
     }
     memref.copy %result, %dst {
-      bosc_ame.memory = {kind = "store", origin_id = 533 : i64}
+      contract.access = {kind = "store", boundary = "external_ddr", mask = {kind = "none"}, origin_id = 533 : i64}
     } : memref<4xf32> to memref<4xf32>
     return
   }
 }
-
-// CHECK-LABEL: func.func @if_else_writers
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = 1 : i64
-// CHECK-SAME: bosc_ame.compute_predecessors = array<i64: 0>
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 20>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_id = 2 : i64
-// CHECK-SAME: bosc_ame.compute_predecessors = array<i64: 0>
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 30>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_kind = "memory-store"
-// CHECK-SAME: bosc_ame.compute_predecessors = array<i64: 1, 2>
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 20, 30>
-// CHECK-LABEL: func.func @if_without_else
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_kind = "memory-store"
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 50, 60>
-// CHECK-LABEL: func.func @for_zero_trip
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_kind = "memory-store"
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 80, 90>
-// CHECK-LABEL: func.func @partial_view_writers
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_kind = "memory-store"
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 110, 120, 130>
-// CHECK-LABEL: func.func @scalar_partial_writer
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_kind = "memory-store"
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 150, 160, 180>
-// CHECK-LABEL: func.func @tensor_before_overwrite
-// CHECK: linalg.generic
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 210>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_kind = "memory-store"
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 210>
-// CHECK-LABEL: func.func @tensor_buffer_roundtrip
-// CHECK: bufferization.to_buffer
-// CHECK: memref.copy
-// CHECK: bufferization.to_tensor
-// CHECK: linalg.generic
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 240>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 250 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 240>
-// CHECK-LABEL: func.func @tensor_buffer_full_overwrite
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 271 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 270>
-// CHECK: bufferization.to_tensor
-// CHECK: linalg.generic
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 270>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 280 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 270>
-// CHECK-LABEL: func.func @tensor_buffer_partial_overwrite
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 311 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 290, 300>
-// CHECK: bufferization.to_tensor
-// CHECK: linalg.generic
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 290, 300>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 320 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 290, 300>
-// CHECK-LABEL: func.func @if_memref_same_root
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 331 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 331>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 332 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 332>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 340 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 331, 332>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 350 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 331, 332>
-// CHECK-LABEL: func.func @if_memref_divergent_roots
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 380 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 360, 370>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 390 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 360, 370>
-// CHECK-LABEL: func.func @switch_memref_same_root
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 401 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 401>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 402 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 402>
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 403 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 401, 402>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 404 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 401, 402>
-// CHECK-LABEL: func.func @switch_memref_divergent_roots
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: linalg.generic {{.*}}bosc_ame.compute_origin_id = 413 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 411, 412>
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 414 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 411, 412>
-// CHECK-LABEL: func.func @for_memref_slot_same_root
-// CHECK-SAME: bosc_ame.compute_graph_complete = true
-// CHECK-SAME: bosc_ame.source_lineage_complete = true
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 502 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 501>
-// CHECK-LABEL: func.func @for_memref_slot_divergent_roots
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 513 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 511, 512>
-// CHECK-LABEL: func.func @while_memref_slot_same_root
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 522 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 521>
-// CHECK-LABEL: func.func @while_memref_slot_divergent_roots
-// CHECK-SAME: bosc_ame.compute_graph_complete = false
-// CHECK-SAME: bosc_ame.source_lineage_complete = false
-// CHECK: memref.copy {{.*}}bosc_ame.compute_origin_id = 533 : i64
-// CHECK-SAME: bosc_ame.source_load_origin_ids = array<i64: 531, 532>

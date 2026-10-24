@@ -54,6 +54,55 @@ MODULE = """module {
 """
 
 
+# Keep the historical logical source above as a precise compatibility-negative
+# case. Independent DDR and SPM copies are outside the V1 planner recipe, but
+# the target DMA lowering still supports and must verify these real endpoints.
+TARGET_MODULE = """module attributes {bosc_ame.dma.abi = "args_aligned64_nonalias"} {
+  func.func @copy(%input: memref<256xi8>, %out: memref<256xi8>) {
+    %n = arith.constant 256 : index
+    %a = bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64} : memref<256xi8, #bosc_ame.spm<0>>
+    %b = bosc_ame.spm.view {bank = 1 : i32, offset = 0 : i64} : memref<256xi8, #bosc_ame.spm<1>>
+    %t0 = bosc_ame.dma.start %input, %a, %n {channel = 0 : i32} : (memref<256xi8>, memref<256xi8, #bosc_ame.spm<0>>, index) -> !bosc_ame.dma_token<0>
+    bosc_ame.dma.wait %t0 : !bosc_ame.dma_token<0>
+    %t1 = bosc_ame.dma.start %a, %b, %n {channel = 1 : i32} : (memref<256xi8, #bosc_ame.spm<0>>, memref<256xi8, #bosc_ame.spm<1>>, index) -> !bosc_ame.dma_token<1>
+    bosc_ame.dma.wait %t1 : !bosc_ame.dma_token<1>
+    %t2 = bosc_ame.dma.start %b, %out, %n {channel = 1 : i32} : (memref<256xi8, #bosc_ame.spm<1>>, memref<256xi8>, index) -> !bosc_ame.dma_token<1>
+    bosc_ame.dma.wait %t2 : !bosc_ame.dma_token<1>
+    return
+  }
+  func.func @fill(%out: memref<256xi8>) {
+    %zero = arith.constant 0 : index
+    %end = arith.constant 256 : index
+    %step = arith.constant 64 : index
+    %value = arith.constant -7 : i8
+    %vector = vector.broadcast %value : i8 to vector<64xi8>
+    scf.for %i = %zero to %end step %step {
+      vector.store %vector, %out[%i] : memref<256xi8>, vector<64xi8>
+    }
+    return
+  }
+  func.func @spm_copy() {
+    %n = arith.constant 256 : index
+    %input = bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64} : memref<256xi8, #bosc_ame.spm<0>>
+    %out = bosc_ame.spm.view {bank = 1 : i32, offset = 0 : i64} : memref<256xi8, #bosc_ame.spm<1>>
+    %t = bosc_ame.dma.start %input, %out, %n {channel = 1 : i32} : (memref<256xi8, #bosc_ame.spm<0>>, memref<256xi8, #bosc_ame.spm<1>>, index) -> !bosc_ame.dma_token<1>
+    bosc_ame.dma.wait %t : !bosc_ame.dma_token<1>
+    return
+  }
+  func.func @typed_spm_copy() {
+    %c64 = arith.constant 64 : index
+    %source = bosc_ame.spm.view {bank = 0 : i32, offset = 256 : i64} : memref<128xi8, #bosc_ame.spm<0>>
+    %target = bosc_ame.spm.view {bank = 1 : i32, offset = 256 : i64} : memref<128xi8, #bosc_ame.spm<1>>
+    %source_typed = memref.view %source[%c64][] : memref<128xi8, #bosc_ame.spm<0>> to memref<16xi32, #bosc_ame.spm<0>>
+    %target_typed = memref.view %target[%c64][] : memref<128xi8, #bosc_ame.spm<1>> to memref<16xi32, #bosc_ame.spm<1>>
+    %t = bosc_ame.dma.start %source_typed, %target_typed, %c64 {channel = 1 : i32} : (memref<16xi32, #bosc_ame.spm<0>>, memref<16xi32, #bosc_ame.spm<1>>, index) -> !bosc_ame.dma_token<1>
+    bosc_ame.dma.wait %t : !bosc_ame.dma_token<1>
+    return
+  }
+}
+"""
+
+
 def run(command):
     result = subprocess.run(
         [str(part) for part in command], capture_output=True, text=True
@@ -132,16 +181,35 @@ def main():
     )
     module.write_text(MODULE)
     opt = Path(buddy_opt_path())
-    run(
-        [
-            opt,
-            module,
-            "--linalg-to-boscame=enable-spm-dma=true "
-            "dma-abi=args_aligned64_nonalias target=nr-fpga",
-            "-o",
-            staged,
-        ]
-    )
+    for section in MODULE.split("  func.func ")[1:]:
+        body_start = section.index("{")
+        depth = 0
+        for position in range(body_start, len(section)):
+            depth += (section[position] == "{") - (section[position] == "}")
+            if not depth:
+                function = section[: position + 1]
+                break
+        legacy = subprocess.run(
+            [
+                str(opt),
+                "-",
+                "--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias",
+            ],
+            input="module {func.func " + function + "}",
+            text=True,
+            capture_output=True,
+        )
+        assert legacy.returncode != 0, function
+        diagnostic = (
+            "v1 has no independent DDR-to-DDR copy recipe"
+            if section.startswith("@copy(")
+            else "unplanned external fill"
+            if section.startswith("@fill(")
+            else "read or partial inheritance has no initialized content version"
+        )
+        assert diagnostic in legacy.stderr, legacy.stderr
+    staged.write_text(TARGET_MODULE)
+    run([opt, staged, "--bosc-ame-spm-dma-check", "-o", "/dev/null"])
     text = staged.read_text()
     assert "vector<64xi8>" in text
     run([opt, staged, "--lower-bosc-ame", "-o", lowered])

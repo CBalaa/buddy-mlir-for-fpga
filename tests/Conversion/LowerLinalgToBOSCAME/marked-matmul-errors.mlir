@@ -7,8 +7,8 @@
 // A marker is an explicit AME obligation.  Unsupported integer interpretation
 // and element types must fail instead of falling back to another arithmetic
 // operation while leaving an apparently completed marker behind.
-// DISABLED: marked matmul requires enable-ame=true
-// TYPE: marked AME matmul must be signed i8 x i8 -> i32 with rank-2 buffers
+// DISABLED: remove disabled legacy feature overrides
+// TYPE: legacy AME marker requires signed i8 x i8 -> i32 matmul
 
 //--- signed.mlir
 module {

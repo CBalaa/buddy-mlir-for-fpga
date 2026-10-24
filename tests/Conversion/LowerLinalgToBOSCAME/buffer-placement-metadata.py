@@ -107,57 +107,90 @@ def graph(text):
     return tasks, logical_descriptors, counts, dma_tasks
 
 
+def contract_tasks(text):
+    tasks = {}
+    for body in re.findall(r"contract\.task = \{([^{}]*)\}", text):
+        task = int(re.search(r"\bid = (\d+) : i64", body)[1])
+        assert task not in tasks, task
+        tasks[task] = body
+    for task, body in tasks.items():
+        predecessors = re.search(
+            r"predecessors = array<i64(?:: ([^>]+))?>", body
+        )
+        assert predecessors, body
+        for predecessor in map(
+            int, (predecessors[1] or "").split(",") if predecessors[1] else []
+        ):
+            assert predecessor in tasks and predecessor < task, (
+                task,
+                predecessor,
+            )
+    return tasks
+
+
 def main():
-    source = Path(sys.argv[2]).read_text()
-    result = subprocess.run(
-        [
-            sys.argv[1],
-            sys.argv[2],
-            "--linalg-to-boscame=buffer-placement=true ",
-        ],
+    binary = sys.argv[1]
+    historical = Path(sys.argv[2]).read_text()
+    before, _, counts, _ = graph(historical)
+    assert len(before) == 22 and counts == ["22 : i64"]
+    rejected = subprocess.run(
+        [binary, sys.argv[2], "--linalg-to-boscame=buffer-placement=true"],
+        text=True,
+        capture_output=True,
+    )
+    assert rejected.returncode != 0
+    assert "obsolete geometry attribute bosc_ame.bm" in rejected.stderr, (
+        rejected.stderr
+    )
+    # The old fixture remains a migration case. The neutral LayerNorm graph
+    # includes captured rank-zero loads and explicit broadcasts instead of
+    # relying on retired prefix-mask/scalar-forwarding metadata.
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "plan/examples/layernorm.contract.mlir"
+    )
+    planned = subprocess.run(
+        [binary, str(fixture), "--bosc-ame-plan", "--bosc-ame-plan-verify"],
         text=True,
         capture_output=True,
         check=True,
+    ).stdout
+    result = subprocess.run(
+        [binary, "-", "--bosc-ame-emit"],
+        input=planned,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    source_tasks = contract_tasks(fixture.read_text())
+    planned_tasks, emitted_tasks = (
+        contract_tasks(planned),
+        contract_tasks(result),
     )
-    before, descriptors, counts, _ = graph(source)
-    after, placed_descriptors, placed_counts, dma_tasks = graph(result.stdout)
-    # Routing decisions accompany the physical plan; they are independent of
-    # the logical compute graph that placement preserves.
-    for attributes in after.values():
-        attributes.pop("bosc_ame.store_staging_reason", None)
-        attributes.pop("bosc_ame.direct_ddr_store", None)
-    assert set(before) == set(range(22)), before
-    expected = {
-        task: dict(attributes)
-        for task, attributes in before.items()
-        if task not in {1, 2, 3}
-    }
-    # Fixed-prefix lowering consumes only the two data inputs. Its original
-    # predicate and the now-dead width/range/compare tasks must leave the graph.
-    expected[14]["bosc_ame.compute_input_values"] = "array<i64: 26, 1>"
-    expected[14]["bosc_ame.compute_predecessors"] = "array<i64: 0, 13>"
-    assert set(after) == set(expected), (set(expected), set(after))
-    for task in expected:
-        assert after[task] == expected[task], (
-            task,
-            expected[task],
-            after[task],
-        )
-    assert descriptors == placed_descriptors, (
-        descriptors - placed_descriptors,
-        placed_descriptors - descriptors,
+    assert len(source_tasks) == len(planned_tasks) == 21
+    assert planned_tasks == emitted_tasks
+    assert result.count("bosc_ame.dma.start ") == 4
+    assert result.count("bosc_ame.dma.wait ") == 4
+    assert result.count("bosc_ame.spm.view ") == 6
+    assert result.count("vector.reduction <add>") == 2
+    assert result.count('kind = "scalar-load"') == 2
+    assert "bosc_ame.source_task_count = 21 : i64" in result
+    assert result.count('action = "retained"') == 21
+    dma_tasks = [
+        line
+        for line in result.splitlines()
+        if "bosc_ame.dma.wait " in line and "contract.task" in line
+    ]
+    assert len(dma_tasks) == 4
+    assert all(
+        "contract.task" not in line
+        for line in result.splitlines()
+        if "bosc_ame.dma.start " in line
     )
-    assert counts == ["22 : i64"]
-    assert placed_counts == ["19 : i64"]
-    assert dma_tasks == {5, 7, 9, 21}, dma_tasks
-    assert result.stdout.count("bosc_ame.dma.start") == 4
-    assert "memref<1024xi32>" not in result.stdout
-    assert "memref<1024xi1>" not in result.stdout
-    assert not re.search(r"memref\.alloca?[^\n]*: memref<f32>", result.stdout)
-    assert not re.search(r"memref\.(?:load|store|copy)\b", result.stdout)
-    assert result.stdout.count("vector.reduction <add>") == 2
-    assert "vector<1xf32>" not in result.stdout
-    print("PASS root placement: 19 surviving graph tasks and four DMA events")
+    assert "linalg." not in result and "plan." not in result
+    print(
+        "PASS placement: 21 neutral tasks, captured scalars and four DMA completion events"
+    )
 
 
 if __name__ == "__main__":

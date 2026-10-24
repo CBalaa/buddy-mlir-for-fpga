@@ -1,8 +1,7 @@
-// RUN: buddy-opt %s --triton-to-linalg-experimental='boscame=true dump-facts=true dma-abi=args_aligned64_nonalias' -o %t.linalg 2> %t.facts
-// RUN: FileCheck %s --check-prefix=FACTS < %t.facts
-// RUN: FileCheck %s --check-prefix=IR < %t.linalg
-// RUN: not buddy-opt %s --triton-to-linalg-experimental='boscame=true dma-abi=args_aligned64_nonalias' --empty-tensor-to-alloc-tensor --one-shot-bufferize='bufferize-function-boundaries=true buffer-alignment=64' --canonicalize --cse --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' 2>&1 | FileCheck %s --check-prefix=NO-DYNAMIC-DMA
-
+// RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
+// Each function independently checks the v1 boundary; unsupported content or
+// control flow must fail explicitly instead of claiming a complete graph.
+// CONTRACT-CASE: dynamic_prefix = reject: kernel contract V4: static valid shape must match the access rank and be positive
 module {
   tt.func public @dynamic_prefix(%src: !tt.ptr<f32>, %dst: !tt.ptr<f32>, %limit: i32) {
     %range = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
@@ -19,10 +18,6 @@ module {
   }
 }
 
-// FACTS: event id=0 kind=load {{.*}}access-mask=arith.cmpi{{.*}}mask-cmp=slt mask-lhs=tt.make_range mask-rhs=tt.splat(arg#2)
-// FACTS: event id=1 kind=store {{.*}}access-mask=arith.cmpi mask-cmp=slt mask-lhs=tt.make_range mask-rhs=tt.splat(arg#2)
-// FACTS: memory-event {{.*}}kind = "load"{{.*}}origin_id = 0 : i64{{.*}}valid_shape = array<i64: -9223372036854775808>
-// FACTS: memory-event {{.*}}kind = "store"{{.*}}origin_id = 1 : i64{{.*}}valid_shape = array<i64: -9223372036854775808>
 
 // IR: %[[LIMIT:.*]] = arith.index_cast %arg2 : i32 to index
 // IR: %[[CLAMPED:.*]] = arith.minsi %[[LIMIT]], %{{.*}} : index

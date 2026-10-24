@@ -18,7 +18,7 @@ def product(initial=0):
   %empty = tensor.empty() : {C}
   %init = linalg.fill ins(%zero : i32) outs(%empty : {C}) -> {C}
   %product = linalg.matmul {{cast = #linalg.type_fn<cast_signed>,
-      bosc_ame.lower_to_ame, bosc_ame.origin_id = 731 : i64}}
+      contract.origin_id = 731 : i64}}
       ins(%a, %b : {A}, {B}) outs(%init : {C}) -> {C}
 """
 
@@ -62,8 +62,7 @@ def source():
             f"""
   %empty = tensor.empty() : {C}
   %zero = arith.constant dense<0> : {C}
-  %product = linalg.matmul {{cast = #linalg.type_fn<cast_signed>,
-      bosc_ame.lower_to_ame}}
+  %product = linalg.matmul {{cast = #linalg.type_fn<cast_signed>}}
       ins(%a, %b : {A}, {B}) outs(%zero : {C}) -> {C}
 """
             + add()
@@ -74,7 +73,8 @@ def source():
             product()
             + f"%updated = arith.addi %c, %c : {C}\n"
             + add("%updated")
-            + f"return %sum : {C}",
+            + f"return %c, %sum : {C}, {C}",
+            returns=f"({C}, {C})",
         ),
         function(
             "multiple_consumers",
@@ -133,7 +133,8 @@ func.func @loaded_accumulator(%a: {A}, %b: {B}, %c: memref<16x16xi32>)
     -> {C} {{
   %storage = memref.alloc() : memref<16x16xi32>
   memref.copy %c, %storage {{
-      bosc_ame.memory = {{kind = "load", origin_id = 732 : i64}}
+      contract.access = {{kind = "load", boundary = "external_ddr",
+        mask = {{kind = "none"}}, origin_id = 732 : i64}}
   }} : memref<16x16xi32> to memref<16x16xi32>
   %snapshot = bufferization.to_tensor %storage restrict writable
       : memref<16x16xi32> to {C}
@@ -175,99 +176,105 @@ def bodies(text):
     }
 
 
+def source_functions(text):
+    """Retain each original positive/negative case as an isolated module."""
+    pattern = r"(?:tt|func)\.func (?:public |private )?@(\w+)\("
+    matches = list(re.finditer(pattern, text))
+    for index, match in enumerate(matches):
+        limit = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(text)
+        )
+        opening = text.find("{", match.end(), limit)
+        if opening < 0:
+            continue
+        depth = 1
+        closing = opening + 1
+        while depth:
+            depth += (text[closing] == "{") - (text[closing] == "}")
+            closing += 1
+        yield match[1], text[match.start() : closing]
+
+
 def main():
     prefix, opt = sys.argv[1:]
     input_path = Path(prefix + ".mlir")
-    input_path.write_text(source())
-    command = [
-        opt,
-        str(input_path),
-        "--triton-to-linalg-experimental=boscame=true "
-        "dma-abi=args_aligned64_nonalias",
-    ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    Path(prefix + ".tensor.mlir").write_text(result.stdout)
-    functions = bodies(result.stdout)
+    outputs = {}
+    for name, function_text in source_functions(source()):
+        module = (
+            "module {\nfunc.func private @effect()\n" + function_text + "\n}\n"
+        )
+        input_path.write_text(module)
+        result = subprocess.run(
+            [
+                opt,
+                str(input_path),
+                "--triton-to-linalg-experimental=contract=true "
+                "caller-contract=args_aligned64_nonalias",
+                "--mlir-print-ir-after-failure",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if name == "broadcast":
+            assert result.returncode != 0 and "V25" in result.stderr, (
+                result.stderr
+            )
+            assert (
+                "linalg.matmul" in result.stderr
+                and "linalg.generic" in result.stderr
+            )
+            continue
+        assert result.returncode == 0, (name, result.stderr)
+        body = result.stdout
+        assert "bosc_ame." not in body and "plan." not in body, name
+        assert "tensor<" not in body and "bufferization." not in body, name
+        assert "contract.task" in body or (
+            name in ("dot_loop", "legacy_loop") and "complete = false" in body
+        ), name
+        outputs[name] = body
+        Path(prefix + "." + name + ".mlir").write_text(body)
+
     for name in ("fuse", "swapped", "dense_zero", "old_accumulator_live"):
-        body = functions[name]
+        body = outputs[name]
         assert body.count("linalg.matmul") == 1, name
         assert "linalg.generic" not in body and "linalg.fill" not in body, name
-        assert "outs(%arg2 : tensor<16x16xi32>)" in body, name
     for name in (
         "multiple_consumers",
-        "broadcast",
         "nonzero_product",
         "overflow_flags",
         "effect_barrier",
     ):
-        body = functions[name]
+        body = outputs[name]
         assert body.count("linalg.matmul") == 1, name
         assert "linalg.generic" in body and "linalg.fill" in body, name
-    late = functions["late_accumulator"]
+    late = outputs["late_accumulator"]
     assert late.count("linalg.generic") == 1
     assert late.index("linalg.generic") < late.index("linalg.matmul")
     assert "linalg.fill" not in late
-    assert functions["branches"].count("linalg.matmul") == 2
-    assert "linalg.generic" not in functions["branches"]
-    nonzero = functions["dot_nonzero"]
+    assert outputs["branches"].count("linalg.matmul") == 2
+    assert "linalg.generic" not in outputs["branches"]
+    nonzero = outputs["dot_nonzero"]
     assert "arith.constant 17 : i32" in nonzero and "linalg.matmul" in nonzero
-    # One fill materializes the specified nonzero C; no zero product exists.
     assert nonzero.count("linalg.fill") == 1 and "linalg.generic" not in nonzero
     for name in ("dot_loop", "legacy_loop"):
-        loop = functions[name]
-        assert "bosc_ame.loop_carried_slots" in loop
-        for field in (
-            "init_producer_compute_ids",
-            "backedge_producer_compute_ids",
-            "iter_arg_consumer_compute_ids",
-            "exit_consumer_compute_ids",
-        ):
-            assert field in loop, field
+        loop = outputs[name]
+        # Dynamic bounds are retained with an explicit incomplete scope; they
+        # must not gain a false static loop summary or a product-add sequence.
+        assert "complete = false" in loop and "contract.scope" in loop
         assert "linalg.generic" not in loop and "linalg.fill" not in loop
-        accumulator = re.search(r"iter_args\((%\w+) =", loop)[1]
-        assert f"outs({accumulator} : {C})" in loop
-    lineage = functions["loaded_accumulator"]
-    assert (
-        "bosc_ame.accumulator_source_load_origin_ids = array<i64: 732>"
-        in lineage
-    )
-    assert "bosc_ame.accumulator_origin_id = 732" in lineage
-    assert "bosc_ame.lower_to_ame" not in functions["floating"]
-    assert "arith.addf" in functions["floating"]
-    # The source dot's identity survives fusion, while graph IDs are rebuilt.
-    assert "bosc_ame.compute_origin_id = 731" in functions["fuse"]
-    assert "bosc_ame.compute_graph_node_count = 1" in functions["fuse"]
-    ids = re.findall(r"bosc_ame.compute_id = (\d+)", result.stdout)
-    assert len(ids) == len(set(ids))
-    # Returning the old C keeps it live after the fused update. Bufferization
-    # must copy it for the update instead of overwriting the argument storage.
-    isolated = (
-        "module {\n"
-        + function(
-            "old_accumulator_live",
-            product() + add() + f"return %c, %sum : {C}, {C}",
-            returns=f"({C}, {C})",
-        )
-        + "}\n"
-    )
-    input_path.write_text(isolated)
-    buffered = subprocess.run(
-        command
-        + [
-            "--empty-tensor-to-alloc-tensor",
-            "--one-shot-bufferize=bufferize-function-boundaries=true "
-            "buffer-alignment=64",
-            "--canonicalize",
-            "--cse",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    Path(prefix + ".buffer.mlir").write_text(buffered)
-    assert "memref.copy %arg2," in buffered
-    assert "outs(%arg2 : memref<16x16xi32" not in buffered
-    print("tensor accumulator fusion: all positive and negative cases passed")
+    lineage = outputs["loaded_accumulator"]
+    assert "accumulator_source_load_origin_ids = array<i64: 732>" in lineage
+    assert "accumulator_source_lineage_complete = true" in lineage
+    assert "linalg.matmul" in outputs["floating"]
+    assert "arith.addf" in outputs["floating"]
+    assert "origin_id = 731" in outputs["fuse"]
+    old = outputs["old_accumulator_live"]
+    # Returning old C keeps it live. One-Shot must copy before the update.
+    assert "memref.copy %arg2," in old
+    assert "outs(%arg2 : memref<16x16xi32" not in old
+    print("contract accumulator fusion: all positive and negative cases passed")
 
 
 if __name__ == "__main__":

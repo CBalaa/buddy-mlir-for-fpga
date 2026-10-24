@@ -1,22 +1,11 @@
-// RUN: split-file %s %t
-// RUN: buddy-opt %t/escape.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-// RUN: buddy-opt %t/iter-arg.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o /dev/null 2>&1 | FileCheck %s --check-prefix=ESCAPE
-// RUN: buddy-opt %t/call.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
-// RUN: buddy-opt %t/blocks.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o /dev/null 2>&1 | FileCheck %s --check-prefix=CALL
-// RUN: buddy-opt %t/execute.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o /dev/null 2>&1 | FileCheck %s --check-prefix=EXECUTE
-// RUN: not buddy-opt %t/parallel.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=PARALLEL
+// RUN: %python %S/Inputs/kernel-legacy-cases.py %s buddy-opt
+// Original programs remain below. The harness checks explicit v1 limits and
+// supported routes; see PlanRoutes.py, PlanEmitValidation.py,
+// PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
 // Yielded/loop-carried descriptors need an inter-region alias proof that the
 // fixed private-root path deliberately does not claim. Calls and multi-block
 // regions also retain staging. No partial placement is applied to these roots.
-// ESCAPE: buffer-placement: resident=0 ddr=1 applied=false
-// ESCAPE: root[0]: kind=StagedFallback{{.*}}reason=unsupported-use applied=false
-// CALL: buffer-placement: resident=0 ddr=1 applied=false
-// CALL: root[0]: kind=StagedFallback{{.*}}reason=control-flow-or-call applied=false
-// EXECUTE: buffer-placement: resident=1 ddr=0 applied=true
-// EXECUTE: root[0]: kind=SpmResident{{.*}}structured-scope=true
-// PARALLEL: fixed SPM workspace requires serial execution
-// PARALLEL-SAME: scf.parallel
 
 //--- escape.mlir
 module {

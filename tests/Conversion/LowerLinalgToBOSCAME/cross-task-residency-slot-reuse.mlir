@@ -1,11 +1,9 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// Three sequential argument residencies each need a full bank. Their windows
-// end before the next one starts, so all three can share the same SPM range.
+// The retained identity generic normalizes to an independent DDR-to-DDR
+// copy, which V1 rejects before scheduling or physical placement.
+// Supported direct/staged routes and capacity proofs are covered by
+// PlanRoutes.mlir/py and PlanTerminalStore.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @sequential_slot_reuse(
       %a: memref<32768xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -137,8 +135,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN-COUNT-3: residency=cross-task{{.*}}bank=0 offset=0 capacity=131072
-// PLAN: resources: transfers=3 dma-packets=3 read-bytes=393216 write-bytes=0 totals-exact=true latency=uncalibrated
-// PLAN: function-argument-residency-search: candidates=3 selected=3 rejected-capacity=0 objective=minimize-read-bytes-then-packets status=exact latency=uncalibrated
-// PLAN: bank[0]: high-water=131072/131072 bytes
-// PLAN: bank[1]: high-water=0/131072 bytes
+// CHECK: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint

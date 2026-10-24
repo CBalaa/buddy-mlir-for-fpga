@@ -1,5 +1,5 @@
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true enable-spm-dma=false enable-ame=false' -o %t.reported 2>%t.report
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=false enable-ame=false' -o %t.plain
+// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true dma-abi=args_aligned64_nonalias' -o %t.reported 2>%t.report
+// RUN: buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o %t.plain
 // RUN: cmp %t.reported %t.plain
 // RUN: FileCheck %s < %t.report
 
@@ -18,10 +18,10 @@ module {
   }
 }
 
-// The explicit SSA facts exist without frontend graph attributes. They do not
-// upgrade compute-graph completeness or enable cross-task residency.
-// CHECK: linalg-facts: scope=post-planning
-// CHECK: linalg-ssa-facts: scope=explicit-ssa operations={{[1-9][0-9]*}} values={{[1-9][0-9]*}} linalg-ops=1
-// CHECK: ir-node[{{[0-9]+}}]: op=linalg.generic {{.*}} results=[] kind=elementwise dps-input-operands=[0] dps-init-operands=[1] init-payload-reads=[false] maps=[{{.*}}] iterators=[parallel] reduction-dimensions=[] payload-ops=[{{[0-9, ]+}}] tensor=false buffer=true payload-memory-effect-free=true
-// CHECK: ssa-value[{{[0-9]+}}]: type=memref<16xf32> shape=[16] element-type=f32 source=ir-node#{{[0-9]+}}.region#0.block#0.arg#0 uses=[{{.*}}.operand#0]
-// CHECK: compute-graph: status=unavailable tasks=0 dependencies=0 logical-values=0
+// Standard Linalg semantics, rather than optional frontend graph attributes,
+// produce the graph. Reporting only reads the recorded execution decisions.
+// CHECK: linalg.generic plan.vector={elements = 16 : i64, engine = "rvv"
+// CHECK-SAME: fp_policy = "preserve"
+// CHECK-SAME: level = "ddr", operand = 0 : i64
+// CHECK-SAME: level = "ddr", operand = 1 : i64
+// CHECK-SAME: reason = "pointwise-memory-operand"

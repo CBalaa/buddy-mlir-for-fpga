@@ -1,12 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// The producer output saves one reload. The function argument saves two.
-// Both windows compete with the later 64 KiB transfer, so joint search must
-// choose the argument residency even though the producer appears first.
+// The original projected generic is outside the V1 compute subset.
+// This rejection precedes the former residency candidate search.
 module attributes {bosc_ame.compute_graph_version = 1 : i32,
                    bosc_ame.dma.abi = "args_aligned64_nonalias"} {
   func.func @producer_candidate(
@@ -152,8 +147,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32,
   }
 }
 
-// PLAN: function-argument-residency-search: candidates=1 selected=1 rejected-capacity=0 objective=minimize-read-bytes-then-packets status=exact latency=uncalibrated
-// PLAN-NEXT: argument-residency[0]: function=@argument_candidate arg#0 consumers=3 capacity=114688 resident-read-bytes=114688 resident-packets=1 reload-read-bytes=344064 reload-packets=3 decision=resident reason=traffic-benefit-and-capacity
-// PLAN: cross-task-residency-search: candidates=2 selected=1 rejected-capacity=1 objective=minimize-total-read-bytes-then-packets status=exact latency=uncalibrated
-// PLAN: producer-output-residency-search: candidates=1 selected=0 rejected-capacity=1 objective=maximize-read-bytes-then-packets-saved status=exact latency=uncalibrated
-// PLAN-NEXT: producer-output-residency[0]: function=@producer_candidate consumers=1 capacity=114688 saved-read-bytes=114688 saved-packets=1 decision=writeback-and-reload reason=spm-capacity
+// CHECK: kernel contract V25: pointwise update requires parallel identity indexing

@@ -1,14 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t.reported 2>%t.plan
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default 2>%t.default.stderr
-// RUN: test ! -s %t.default.stderr
-// RUN: cmp %t.reported %t.default
-// RUN: FileCheck %s --check-prefix=IR < %t.reported
-// RUN: FileCheck %s --check-prefix=IR-ORDER < %t.reported
+// RUN: not buddy-opt %s '--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
 
-// Keeping %tmp resident would reserve one 96 KiB bank across the function
-// boundary and prevent @pressure from staging both of its 96 KiB buffers.
-// Falling back writes %tmp after its producer and reloads it at the consumer.
+// The original module reads an external region after writing it. V1 treats
+// that write as terminal and rejects the later read before residency search.
+// Private producer/consumer lifetimes remain covered by PlanRoutes.py.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @produced(
       %src: memref<24576xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -79,14 +73,6 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// PLAN-COUNT-6: residency=operation-local
-// PLAN: resources: transfers=6 dma-packets=6 read-bytes=294912 write-bytes=294912 totals-exact=true
-
-// IR-COUNT-9: bosc_ame.dma.start
-// IR-NOT: bosc_ame.dma.start
-
 // The producer writes %tmp to DDR before the consumer reloads it.
-// IR-ORDER: bosc_ame.dma.start {{.*}}#bosc_ame.spm<1>>, memref<24576xf32, strided<[1], offset: ?>>, index)
-// IR-ORDER: bosc_ame.dma.wait
-// IR-ORDER: %[[TMP_RELOAD:.*]] = memref.reinterpret_cast %arg1 to
-// IR-ORDER: bosc_ame.dma.start %[[TMP_RELOAD]], {{.*}}#bosc_ame.spm<0>>
+
+// CHECK: kernel contract V23/V24: v1 does not support reading an external region after its terminal write

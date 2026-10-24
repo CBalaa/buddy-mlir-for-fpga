@@ -1,8 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t 2>%t.plan
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.default
-// RUN: cmp %t.default %t
-// RUN: FileCheck %s --check-prefix=PLAN < %t.plan
+// RUN: %PYTHON %S/Inputs/check_legacy_grid.py %s %t buddy-opt
 
+// Valid roles and known grid extents survive target-to-neutral adaptation.
+// Missing/invalid axes are explicit migration errors, never guessed from names.
 module {
   func.func @known(
       %grid_x: i32 {bosc_ame.program_axis = 0 : i32, bosc_ame.program_role = "num_programs"},
@@ -62,14 +61,3 @@ module {
       i32 {bosc_ame.program_axis = 1 : i32, bosc_ame.program_role = "num_programs"})
       attributes {gpu.known_grid_size = array<i32: 14, 15, 16>}
 }
-
-// PLAN: launch-grid: function=@known axis[0]=runtime(arg#0) extent=197 axis[1]=runtime(arg#1) extent=1 axis[2]=runtime(arg#2) extent=1
-// PLAN: launch-grid: function=@unknown axis[0]=runtime(arg#0) extent=<unknown> axis[1]=runtime(arg#1) extent=<unknown> axis[2]=runtime(arg#2) extent=<unknown>
-// PLAN: launch-grid: function=@partial_shuffled axis[0]=runtime(arg#2) extent=5 axis[2]=runtime(arg#1) extent=7
-// PLAN: launch-grid: function=@contract_only known-grid=[8,9,10]
-// PLAN: launch-grid: function=@missing_axis axis=<unknown>:runtime(arg#0) extent=<unknown>
-// PLAN: launch-grid: function=@missing_axis_with_contract axis=<unknown>:runtime(arg#0) extent=<unknown> known-grid=[11,12,13]
-// PLAN: launch-grid: function=@unannotated unavailable
-// PLAN: launch-grid: function=@program_id_only unavailable
-// PLAN: launch-grid: function=@unrecognized_role unavailable
-// PLAN: launch-grid: function=@declaration axis[1]=runtime(arg#0) extent=15
