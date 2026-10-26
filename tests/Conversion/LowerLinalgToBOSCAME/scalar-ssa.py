@@ -121,7 +121,7 @@ def main():
     # case. The neutral planner has no independent external scalar store or
     # private-to-private scalar copy recipe.
     for name, diagnostic in (
-        ("private_copy", "exactly one external DDR endpoint"),
+        ("private_copy", "requires matching static rank-two SPM storage"),
         (
             "external_result",
             "reading an external region after its terminal write",

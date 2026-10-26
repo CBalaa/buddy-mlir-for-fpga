@@ -1,7 +1,7 @@
 // RUN: %PYTHON %S/Inputs/contract_frontend_cases.py %s %t buddy-opt
 // Each function independently checks the v1 boundary; unsupported content or
 // control flow must fail explicitly instead of claiming a complete graph.
-// CONTRACT-CASE: hidden_memory_effect = reject: kernel contract V25: generic requires one pure arithmetic operation
+// CONTRACT-CASE: hidden_memory_effect = reject: kernel contract V25: generic requires pure scalar arithmetic operations
 module {
   memref.global "private" @side_effect : memref<16xf32> = uninitialized
 

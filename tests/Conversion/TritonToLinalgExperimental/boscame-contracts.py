@@ -76,19 +76,21 @@ def main():
         ("--triton-to-linalg-experimental=contract=true",),
     )
     assert "args_aligned_bytes = 64" in inherited
-    invoke(
+    short = invoke(
         "short-store",
         copy_kernel(mask=True),
-        expect="no legal DMA route: cache-line length/pitch constraint",
     )
+    assert "vector<15xf32>" in short and short.count("bosc_ame.dma.start") == 1
     unaligned = copy_kernel(
         prefix="%one = arith.constant dense<1> : tensor<16xi32>\n%shift = arith.addi %r, %one : tensor<16xi32>"
     ).replace("%s, %r", "%s, %shift")
-    invoke(
+    unaligned = invoke(
         "unaligned",
         unaligned,
-        expect="no legal DMA route: endpoint alignment",
     )
+    assert "vector.load" in unaligned
+    assert "bosc_ame.direct_ddr" in unaligned
+    assert unaligned.count("bosc_ame.dma.start") == 1
     invoke(
         "capacity",
         copy_kernel(size=131072),
@@ -153,9 +155,13 @@ def main():
         args=(MODE,),
     )
     assert "linalg.matmul" in floating and "bosc_ame.tile.mma" not in floating
-    # CHECK: PASS failures: old backend metadata, alignment, short store, gather/scatter, SPM capacity, dynamic target
+    # CHECK: PASS failures: old backend metadata, gather/scatter, SPM capacity, dynamic target
     print(
-        "PASS failures: old backend metadata, alignment, short store, gather/scatter, SPM capacity, dynamic target"
+        "PASS failures: old backend metadata, gather/scatter, SPM capacity, dynamic target"
+    )
+    # CHECK: PASS routes: exact short store and unaligned load use planned RVV boundaries
+    print(
+        "PASS routes: exact short store and unaligned load use planned RVV boundaries"
     )
     # CHECK: PASS defaults: optional neutral ABI, function/argument/result attributes, single program-ID conversion, floating dot
     print(

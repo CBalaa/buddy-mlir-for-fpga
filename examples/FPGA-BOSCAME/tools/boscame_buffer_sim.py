@@ -95,11 +95,16 @@ class Buffer:
         offset=0,
         bank=None,
         name=None,
+        spm_root=None,
+        spm_window=None,
     ):
         self.data, self.element, self.shape = data, element, shape
         self.strides = strides or strides_for(shape)
         self.base, self.offset, self.bank, self.name = base, offset, bank, name
         self.width = WIDTHS[element]
+        # Preserve the declared SpmView identity through descriptor aliases.
+        # A bank bytearray alone cannot prove independent logical windows.
+        self.spm_root, self.spm_window = spm_root, spm_window
 
     def address(self, indices):
         if len(indices) != len(self.shape) or any(
@@ -153,6 +158,10 @@ class Buffer:
 
 class Machine:
     def __init__(self, path, function):
+        with open(path) as source:
+            module_text = "\n".join(line.split("//", 1)[0] for line in source)
+        target = re.search(r'\bbosc_ame\.target\s*=\s*"([^"]*)"', module_text)
+        self.matrix_target = target[1] if target else None
         self.function = next(
             op
             for op in read_module(path)
@@ -169,6 +178,7 @@ class Machine:
         # never appear as a DMA destination; its destination is the user C
         # buffer and the operation is represented by a vector/AME store.
         self.dma_log = []
+        self.matrix_log = []
         self.values = {}
         self.pending = {}
         self.live_matrix = False
@@ -192,6 +202,214 @@ class Machine:
         else:
             self.values[name] = values[0]
 
+    def matrix_copy(self, op, body, operands):
+        """Execute one completed raw e32 accumulator load/store bundle.
+
+        The descriptor element type only defines the valid byte ranges. No
+        scalar conversion participates in this path, including for NaNs.
+        """
+        if self.matrix_target != "nr-fpga":
+            raise SimError("matrix copy requires the nr-fpga target profile")
+        if self.pending:
+            raise SimError("matrix copy before DMA wait")
+        if self.live_matrix:
+            raise SimError("matrix copy inside matrix live range")
+        if len(operands) != 2 or result_name(op.text):
+            raise SimError("matrix copy requires two endpoints and no result")
+
+        def integer(name):
+            matches = re.findall(rf"\b{name}\s*=\s*(-?\d+)\s*:\s*i64\b", body)
+            if len(matches) != 1:
+                raise SimError("matrix copy requires one i64 " + name)
+            value = int(matches[0])
+            if not -(1 << 63) <= value < (1 << 63):
+                raise SimError("matrix copy integer exceeds i64: " + name)
+            return value
+
+        names = (
+            "source_offset",
+            "target_offset",
+            "rows",
+            "row_bytes",
+            "source_pitch",
+            "target_pitch",
+            "instruction_bits",
+            "register_count",
+            "mtype",
+        )
+        attrs = {name: integer(name) for name in names}
+        register_class = re.findall(r'\bregister_class\s*=\s*"([^"]*)"', body)
+        rows, row_bytes = attrs["rows"], attrs["row_bytes"]
+        if (
+            attrs["instruction_bits"] != 32
+            or attrs["register_count"] != 1
+            or attrs["mtype"] != 65602
+            or register_class != ["acc"]
+            or not 1 <= rows <= 64
+            or not 0 < row_bytes <= 256
+            or row_bytes % 4
+            or rows * row_bytes > 16384
+        ):
+            raise SimError("unsupported raw32 accumulator copy configuration")
+        source, target = (self.value(value) for value in operands)
+        if not isinstance(source, Buffer) or not isinstance(target, Buffer):
+            raise SimError("matrix copy endpoints must be memrefs")
+        internal = source.bank is not None and target.bank is not None
+        if source.bank is None and target.bank is None:
+            raise SimError("matrix copy requires an SPM endpoint")
+        if internal and "?" in split_op_and_types(after_name(op.text))[1]:
+            raise SimError(
+                "internal matrix copy requires static endpoint ranges"
+            )
+        if (
+            source.element != target.element
+            or source.shape != target.shape
+            or len(source.shape) != 2
+            or source.element
+            not in (
+                "i8",
+                "i16",
+                "i32",
+                "i64",
+                "f32",
+                "f64",
+            )
+        ):
+            raise SimError(
+                "matrix copy requires matching static rank-two storage"
+            )
+        minor = next(
+            (
+                axis
+                for axis in (1, 0)
+                if source.strides[axis] == target.strides[axis] == 1
+            ),
+            None,
+        )
+        if minor is None:
+            raise SimError("matrix copy requires a common contiguous axis")
+        major = 1 - minor
+
+        def spans(endpoint, offset, pitch):
+            if (
+                offset < 0
+                or pitch <= 0
+                or pitch % 4
+                or offset % 4
+                or offset % endpoint.width
+                or row_bytes % endpoint.width
+                or any(size <= 0 for size in endpoint.shape)
+                or any(stride <= 0 for stride in endpoint.strides)
+            ):
+                raise SimError("invalid matrix copy endpoint geometry")
+            base = endpoint.address([0] * len(endpoint.shape))
+            if base % 4:
+                raise SimError(
+                    "matrix copy endpoint is not naturally e32 aligned"
+                )
+            width = endpoint.shape[minor] * endpoint.width
+            row_pitch = endpoint.strides[major] * endpoint.width
+            first_row, column = (
+                (0, offset)
+                if endpoint.shape[major] == 1
+                else divmod(offset, row_pitch)
+            )
+            if (
+                (endpoint.shape[major] > 1 and row_pitch < width)
+                or pitch != row_pitch
+                or first_row + rows > endpoint.shape[major]
+                or column + row_bytes > width
+            ):
+                raise SimError("matrix copy exceeds valid endpoint rows")
+            if endpoint.bank is None:
+                if endpoint.name is None:
+                    raise SimError("matrix DDR endpoint must be external")
+            elif (
+                not 0 <= endpoint.bank < len(self.spm)
+                or endpoint.data is not self.spm[endpoint.bank]
+            ):
+                raise SimError("matrix SPM endpoint has no valid bank")
+            addresses = [base + offset + row * pitch for row in range(rows)]
+            if any(
+                address < 0
+                or address + row_bytes > len(endpoint.data)
+                or address + row_bytes >= 1 << 63
+                for address in addresses
+            ):
+                raise SimError("matrix copy exceeds backing storage")
+            return addresses, (first_row, column)
+
+        source_rows, source_origin = spans(
+            source, attrs["source_offset"], attrs["source_pitch"]
+        )
+        target_rows, target_origin = spans(
+            target, attrs["target_offset"], attrs["target_pitch"]
+        )
+        if source_origin != target_origin:
+            raise SimError("matrix copy endpoint row/column origins differ")
+        if internal:
+
+            def complete_spm_range(endpoint):
+                window = endpoint.spm_window
+                begin = endpoint.base + endpoint.offset * endpoint.width
+                end = (
+                    begin
+                    + (endpoint.shape[major] - 1)
+                    * endpoint.strides[major]
+                    * endpoint.width
+                    + endpoint.shape[minor] * endpoint.width
+                )
+                if (
+                    endpoint.spm_root is None
+                    or window is None
+                    or endpoint.offset < 0
+                    or endpoint.base < window[0]
+                    or not 0 <= window[0] <= begin < end <= window[1]
+                    or window[1] > len(endpoint.data)
+                    or window[1] >= 1 << 63
+                ):
+                    raise SimError(
+                        "internal matrix copy requires complete endpoint ranges "
+                        "inside declared SPM windows and banks"
+                    )
+                return begin, end
+
+            source_range, target_range = (
+                complete_spm_range(endpoint) for endpoint in (source, target)
+            )
+            if source.spm_root is target.spm_root or (
+                source.bank == target.bank
+                and source_range[0] < target_range[1]
+                and target_range[0] < source_range[1]
+            ):
+                raise SimError(
+                    "internal matrix copy requires independent, nonoverlapping "
+                    "complete SPM endpoint ranges"
+                )
+        # One ACC32 load completes before the first store. Preserve the raw
+        # payload, including signaling NaNs, without scalar conversions.
+        accumulator = [
+            bytes(source.data[src : src + row_bytes]) for src in source_rows
+        ]
+        for src, dst, payload in zip(source_rows, target_rows, accumulator):
+            target.data[dst : dst + row_bytes] = payload
+            for endpoint, address, kind in (
+                (source, src, "read"),
+                (target, dst, "write"),
+            ):
+                if endpoint.bank is None:
+                    self.accesses.append(
+                        (endpoint.name, address, address + row_bytes, kind)
+                    )
+        self.matrix_log.append(
+            {
+                **attrs,
+                "source": source.name,
+                "target": target.name,
+                "register_class": "acc",
+            }
+        )
+
     def block(self, ops):
         for op in ops:
             yielded = self.run(op)
@@ -210,6 +428,10 @@ class Machine:
             element = element_type(types)
 
             def scalar(text):
+                if element == "f32" and re.fullmatch(r"0x[0-9A-Fa-f]{8}", text):
+                    return struct.unpack(
+                        "<f", struct.pack("<I", int(text, 16))
+                    )[0]
                 return rounded(
                     float(text)
                     if element.startswith("f")
@@ -244,7 +466,11 @@ class Machine:
             result_element = element_type(
                 _split_top_level(types.split(" to ")[-1])[-1]
             )
-            source_element = element_type(types.split(" to ")[0])
+            source_element = element_type(
+                _split_top_level(types.split(" to ")[0])[0]
+            )
+            if code in ("cmpi", "cmpf"):
+                result_element = "i1"
 
             def evaluate(values):
                 unsigned_codes = {
@@ -255,8 +481,14 @@ class Machine:
                     "extui",
                     "uitofp",
                 }
-                predicate = body.split()[1].strip(",") if code == "cmpi" else ""
-                if code in unsigned_codes or predicate.startswith("u"):
+                predicate = (
+                    body.split()[1].strip(",")
+                    if code in ("cmpi", "cmpf")
+                    else ""
+                )
+                if code in unsigned_codes or (
+                    code == "cmpi" and predicate.startswith("u")
+                ):
                     bits = (
                         64
                         if source_element == "index"
@@ -277,6 +509,11 @@ class Machine:
                         value = -value
                 elif code == "remui":
                     value = values[0] % values[1]
+                elif code == "remsi":
+                    quotient = abs(values[0]) // abs(values[1])
+                    if (values[0] < 0) != (values[1] < 0):
+                        quotient = -quotient
+                    value = values[0] - quotient * values[1]
                 elif code in ("minsi", "minui"):
                     value = min(values)
                 elif code in ("maxsi", "maxui"):
@@ -295,6 +532,43 @@ class Machine:
                         "sge": a >= b,
                         "uge": a >= b,
                     }[predicate]
+                elif code == "cmpf":
+                    a, b = values
+                    unordered = math.isnan(a) or math.isnan(b)
+                    relation = predicate[1:]
+                    comparison = {
+                        "eq": a == b,
+                        "ne": a != b,
+                        "lt": a < b,
+                        "le": a <= b,
+                        "gt": a > b,
+                        "ge": a >= b,
+                    }.get(relation, False)
+                    value = (
+                        False
+                        if predicate == "false"
+                        else True
+                        if predicate == "true"
+                        else unordered
+                        if predicate == "uno"
+                        else not unordered
+                        if predicate == "ord"
+                        else unordered or comparison
+                        if predicate.startswith("u")
+                        else not unordered and comparison
+                    )
+                elif code in ("maxnumf", "minnumf"):
+                    a, b = values
+                    if math.isnan(a):
+                        value = b
+                    elif math.isnan(b):
+                        value = a
+                    elif a == b == 0:
+                        signs = (math.copysign(1, a), math.copysign(1, b))
+                        sign = max(signs) if code == "maxnumf" else min(signs)
+                        value = math.copysign(0.0, sign)
+                    else:
+                        value = max(a, b) if code == "maxnumf" else min(a, b)
                 elif code == "select":
                     value = values[1] if values[0] else values[2]
                 elif code == "andi":
@@ -313,6 +587,31 @@ class Machine:
                     value = values[0]
                 elif code == "negf":
                     value = -values[0]
+                elif code == "absf":
+                    value = abs(values[0])
+                elif code == "bitcast":
+                    if source_element == "f32" and result_element == "i32":
+                        value = struct.unpack(
+                            "<I", struct.pack("<f", values[0])
+                        )[0]
+                    elif source_element == "i32" and result_element == "f32":
+                        value = struct.unpack(
+                            "<f", struct.pack("<I", int(values[0]) % (1 << 32))
+                        )[0]
+                    else:
+                        raise SimError(
+                            "unsupported arithmetic bitcast: " + op.text
+                        )
+                elif code == "fptosi":
+                    source = values[0]
+                    bits = int(result_element[1:])
+                    if not math.isfinite(source):
+                        raise SimError("undefined nonfinite fptosi conversion")
+                    value = math.trunc(source)
+                    if not -(1 << (bits - 1)) <= value < (1 << (bits - 1)):
+                        raise SimError(
+                            "undefined out-of-range fptosi conversion"
+                        )
                 elif code == "rsqrt":
                     # This pipeline lowers scalar rsqrt to the freestanding
                     # rsqrtf entry: round sqrtf, then round the f32 division.
@@ -360,8 +659,9 @@ class Machine:
                 )
             self.result(op, [list(range(shape[0]))])
         elif name == "vector.reduction":
-            if not re.match(r"vector.reduction\s+<add>,", body):
-                raise SimError("only ordered ADD vector reduction is supported")
+            reduction = re.match(r"vector.reduction\s+<(add|maxnumf)>,", body)
+            if not reduction:
+                raise SimError("unsupported vector reduction combining kind")
             if "reassoc" in body:
                 raise SimError("reassociated vector reduction is unsupported")
             element = types.split(" into ")[-1].strip()
@@ -377,7 +677,12 @@ class Machine:
             else:
                 value, values = values[0], values[1:]
             for lane in values:
-                value = rounded(value + lane, element)
+                if reduction[1] == "add":
+                    value = rounded(value + lane, element)
+                elif math.isnan(value):
+                    value = lane
+                elif not math.isnan(lane):
+                    value = rounded(max(value, lane), element)
             self.result(op, [value])
         elif name == "vector.extract":
             values = get(operands[0])
@@ -443,11 +748,18 @@ class Machine:
             bank = int(re.search(r"bank = (\d+)", body)[1])
             offset = int(re.search(r"offset = (\d+)", body)[1])
             shape, element = type_shape(types)
+            byte_count = math.prod(shape) * WIDTHS[element]
             self.result(
                 op,
                 [
                     Buffer(
-                        self.spm[bank], element, shape, base=offset, bank=bank
+                        self.spm[bank],
+                        element,
+                        shape,
+                        base=offset,
+                        bank=bank,
+                        spm_root=op,
+                        spm_window=(offset, offset + byte_count),
                     )
                 ],
             )
@@ -478,6 +790,8 @@ class Machine:
                         base=source.base + get(byte_shift),
                         bank=source.bank,
                         name=source.name,
+                        spm_root=source.spm_root,
+                        spm_window=source.spm_window,
                     )
                 ],
             )
@@ -497,6 +811,8 @@ class Machine:
                         offset=get(offset),
                         bank=source.bank,
                         name=source.name,
+                        spm_root=source.spm_root,
+                        spm_window=source.spm_window,
                     )
                 ],
             )
@@ -528,6 +844,8 @@ class Machine:
                         offset=offset,
                         bank=source.bank,
                         name=source.name,
+                        spm_root=source.spm_root,
+                        spm_window=source.spm_window,
                     )
                 ],
             )
@@ -562,6 +880,8 @@ class Machine:
                         offset=source.offset,
                         bank=source.bank,
                         name=source.name,
+                        spm_root=source.spm_root,
+                        spm_window=source.spm_window,
                     )
                 ],
             )
@@ -579,6 +899,8 @@ class Machine:
                         offset=source.offset,
                         bank=source.bank,
                         name=source.name,
+                        spm_root=source.spm_root,
+                        spm_window=source.spm_window,
                     )
                 ],
             )
@@ -591,6 +913,8 @@ class Machine:
                 base=source.base,
                 bank=source.bank,
                 name=source.name,
+                spm_root=source.spm_root,
+                spm_window=source.spm_window,
             )
             self.result(
                 op, [base, source.offset, *source.shape, *source.strides]
@@ -819,8 +1143,14 @@ class Machine:
                 self.block(op.blocks[branch]) if branch < len(op.blocks) else []
             )
             self.result(op, yielded or [])
+        elif name == "scf.execute_region":
+            if len(op.blocks) != 1:
+                raise SimError("execute_region requires one explicit block")
+            self.result(op, self.block(op.blocks[0]) or [])
         elif name in ("scf.yield", "func.return", "return"):
             return [get(v) for v in operands]
+        elif name == "bosc_ame.matrix.copy":
+            self.matrix_copy(op, body, operands)
         elif name == "bosc_ame.dma.start":
             if self.live_matrix:
                 raise SimError("DMA call inside matrix live range")
@@ -915,6 +1245,23 @@ class Machine:
                     ]
                 ],
             )
+            self.live_matrix = True
+        elif name == "bosc_ame.tile.zero_acc":
+            if self.matrix_target != "nr-fpga":
+                raise SimError("zero_acc requires the nr-fpga target profile")
+            shape, element = type_shape(types)
+            if (
+                operands
+                or element != "i32"
+                or len(shape) != 2
+                or any(not 1 <= size <= 64 for size in shape)
+            ):
+                raise SimError("zero_acc requires a 1..64 by 1..64 i32 result")
+            if self.pending:
+                raise SimError(
+                    "zero_acc cannot start a matrix lifetime before DMA wait"
+                )
+            self.result(op, [[[0] * shape[1] for _ in range(shape[0])]])
             self.live_matrix = True
         elif name == "bosc_ame.tile.mma":
             c, a, b = (get(v) for v in operands[:3])

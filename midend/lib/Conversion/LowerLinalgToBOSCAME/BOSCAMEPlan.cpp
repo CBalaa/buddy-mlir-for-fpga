@@ -9,8 +9,11 @@
 
 #include "Analysis/KernelContract.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPointwise.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMETargetInfo.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEZeroInit.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -230,7 +233,8 @@ private:
   llvm::DenseMap<Value, FixedSPMBuffer> fixedBuffers;
   PlanOptions options;
 
-  bool alignedArgument(Value value) const;
+  bool alignedArgument(Value value, int64_t alignmentBytes = 64) const;
+  bool alignedRoot(Value value, int64_t alignmentBytes = 64) const;
   bool disjoint(Value first, Value second) const;
   bool directLegal(Value value, unsigned role) const;
   bool sourceStable(Value source, Operation *begin, Operation *end) const;
@@ -252,22 +256,30 @@ private:
   DictionaryAttr binding(Value value, unsigned index, StringRef reason);
   LogicalResult decisions(func::FuncOp function);
   LogicalResult transfer(memref::CopyOp op);
+  LogicalResult internalTransfer(memref::CopyOp op, DictionaryAttr source,
+                                 DictionaryAttr target);
   std::array<int64_t, 2> reserved(func::FuncOp function) const;
 };
 
-bool Planner::alignedArgument(Value value) const {
+bool Planner::alignedRoot(Value value, int64_t alignmentBytes) const {
+  if (alignmentBytes <= 0)
+    return false;
   Value root = storageRoot(value);
   if (!isa<BlockArgument>(root))
-    return spmdma::isEndpointPointerAlignmentProven(value, 64);
+    return spmdma::isEndpointPointerAlignmentProven(root, alignmentBytes);
   if (!contract::hasEntryArgumentABI(
           root.getParentRegion()->getParentOfType<func::FuncOp>()))
     return false;
   auto abi = module->getAttrOfType<DictionaryAttr>("contract.abi");
   auto alignment =
       abi ? abi.getAs<IntegerAttr>("args_aligned_bytes") : IntegerAttr();
-  return alignment && alignment.getInt() >= 64 &&
-         alignment.getInt() % 64 == 0 &&
-         spmdma::isEndpointPointerAlignmentProven(value, 64);
+  return alignment && alignment.getInt() >= alignmentBytes &&
+         alignment.getInt() % alignmentBytes == 0;
+}
+
+bool Planner::alignedArgument(Value value, int64_t alignmentBytes) const {
+  return alignedRoot(value, alignmentBytes) &&
+         spmdma::isEndpointPointerAlignmentProven(value, alignmentBytes);
 }
 
 bool Planner::disjoint(Value first, Value second) const {
@@ -820,16 +832,17 @@ LogicalResult Planner::stageExternalOperands(linalg::MatmulOp op,
     int64_t minor = role == 1 ? 0 : 1;
     SmallVector<int64_t> strides;
     int64_t offset, rowBytes, pitch;
-    if (!alignedArgument(value) ||
+    if (!alignedArgument(value, elementBytes(value)) ||
         failed(type.getStridesAndOffset(strides, offset)) ||
         strides[minor] != 1 || strides[1 - minor] <= 0 ||
         llvm::MulOverflow(type.getDimSize(minor), elementBytes(value),
                           rowBytes) ||
         llvm::MulOverflow(strides[1 - minor], elementBytes(value), pitch) ||
-        rowBytes <= 0 || rowBytes % 64 || pitch <= 0 || pitch % 64)
+        rowBytes <= 0 || pitch <= 0 ||
+        (type.getDimSize(1 - minor) > 1 && pitch < rowBytes))
       return op.emitError("no legal direct or staging route: external operand "
-                          "requires aligned endpoints, complete cache lines, "
-                          "and a DMA-compatible physical layout");
+                          "requires natural endpoint alignment and a bounded "
+                          "nonoverlapping contiguous-row layout");
     OpBuilder builder(op);
     SmallVector<int64_t> packed =
         role == 1 ? SmallVector<int64_t>{1, type.getDimSize(0)}
@@ -1027,6 +1040,9 @@ std::array<int64_t, 2> Planner::reserved(func::FuncOp function) const {
 DictionaryAttr Planner::binding(Value value, unsigned index, StringRef reason) {
   NamedAttrList fields;
   fields.append(a.i("operand", index));
+  if (!isa<BaseMemRefType>(value.getType()))
+    return a.d({a.i("operand", index), a.s("level", "scalar"),
+                a.s("reason", "explicit-scalar-input")});
   Value root = storageRoot(value);
   auto placement = placements.lookup(root);
   fields.append(
@@ -1043,6 +1059,129 @@ DictionaryAttr Planner::binding(Value value, unsigned index, StringRef reason) {
   return fields.getDictionary(module.getContext());
 }
 
+LogicalResult Planner::internalTransfer(memref::CopyOp op,
+                                        DictionaryAttr sourcePlacement,
+                                        DictionaryAttr targetPlacement) {
+  auto source = cast<MemRefType>(op.getSource().getType());
+  auto target = cast<MemRefType>(op.getTarget().getType());
+  auto axis = matrixtransfer::getCommonUnitAxis(source, target);
+  if (!axis || source.getShape() != target.getShape() ||
+      sourcePlacement.getAs<StringAttr>("level").getValue() != "spm" ||
+      targetPlacement.getAs<StringAttr>("level").getValue() != "spm")
+    return op.emitError(
+        "no legal internal copy recipe: requires matching static rank-two "
+        "SPM storage of signless i8/i16/i32/i64 or f32/f64 with a common "
+        "physical contiguous axis; physical TR/ACC conversion is unsupported");
+  auto sourceLayout = *matrixtransfer::getLayout(source, *axis);
+  auto targetLayout = *matrixtransfer::getLayout(target, *axis);
+  for (MemRefType type : {source, target}) {
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    if (failed(type.getStridesAndOffset(strides, offset)) ||
+        offset == ShapedType::kDynamic)
+      return op.emitError(
+          "no legal internal copy recipe: requires static descriptor offsets");
+  }
+  int64_t count = sourceLayout.rows, width = sourceLayout.rowBytes;
+  if (width % 4 || sourceLayout.pitch % 4 || targetLayout.pitch % 4 ||
+      !spmdma::isEndpointPointerAlignmentProven(op.getSource(), 4) ||
+      !spmdma::isEndpointPointerAlignmentProven(op.getTarget(), 4))
+    return op.emitError("no legal internal copy recipe: raw ACC32 requires "
+                        "exact word-aligned rows, pitches and endpoints");
+  auto endpoint = [&](Value value, DictionaryAttr placement,
+                      const matrixtransfer::Layout &layout,
+                      unsigned operand) -> DictionaryAttr {
+    auto origin = spmdma::getStaticPointerOrigin(value);
+    auto offset = spmdma::getStaticDescriptorOffset(value);
+    auto field = [&](StringRef name) {
+      return placement.getAs<IntegerAttr>(name).getInt();
+    };
+    int64_t begin, end, relative, span;
+    if (!origin || !offset || *offset < 0 || origin->byteShift < 0 ||
+        origin->root != storageRoot(value) ||
+        llvm::MulOverflow(*offset, layout.elementBytes, relative) ||
+        llvm::AddOverflow(relative, origin->byteShift, relative) ||
+        relative < 0 || llvm::MulOverflow(count - 1, layout.pitch, span) ||
+        llvm::AddOverflow(span, width, span) ||
+        llvm::AddOverflow(relative, span, end) || end > field("capacity") ||
+        llvm::AddOverflow(field("offset"), relative, begin) ||
+        llvm::AddOverflow(field("offset"), end, end))
+      return {};
+    return a.d({a.i("operand", operand), a.s("level", "spm"),
+                a.i("bank", field("bank")),
+                a.i("window_offset", field("offset")),
+                a.i("capacity", field("capacity")), a.i("begin", begin),
+                a.i("end", end)});
+  };
+  auto src = endpoint(op.getSource(), sourcePlacement, sourceLayout, 0);
+  auto dst = endpoint(op.getTarget(), targetPlacement, targetLayout, 1);
+  if (!src || !dst)
+    return op.emitError("internal copy endpoint exceeds its planned SPM "
+                        "window or lacks an exact static byte range");
+  auto integer = [](DictionaryAttr p, StringRef name) {
+    return p.getAs<IntegerAttr>(name).getInt();
+  };
+  if (storageRoot(op.getSource()) == storageRoot(op.getTarget()) ||
+      (integer(src, "bank") == integer(dst, "bank") &&
+       integer(src, "begin") < integer(dst, "end") &&
+       integer(dst, "begin") < integer(src, "end")))
+    return op.emitError("internal copy requires distinct nonaliasing roots "
+                        "and nonoverlapping physical SPM ranges");
+  auto layout = [&](MemRefType type, const matrixtransfer::Layout &geometry) {
+    SmallVector<int64_t> strides;
+    int64_t offset;
+    (void)type.getStridesAndOffset(strides, offset);
+    return a.d(
+        {a.b.getNamedAttr("shape", a.b.getDenseI64ArrayAttr(type.getShape())),
+         a.b.getNamedAttr("strides", a.b.getDenseI64ArrayAttr(strides)),
+         a.i("element_bits", geometry.elementBytes * 8),
+         a.i("descriptor_offset", offset), a.i("contiguous_axis", *axis),
+         a.i("rows", count), a.i("row_bytes", width),
+         a.i("row_pitch", geometry.pitch), a.s("origin", "effective-pointer")});
+  };
+  SmallVector<Attribute> tiles;
+  for (int64_t row = 0; row < count; row += matrixtransfer::kMaxRows)
+    for (int64_t column = 0; column < width;
+         column += matrixtransfer::kMaxRowBytes) {
+      int64_t id = tiles.size();
+      tiles.push_back(
+          a.d({a.i("id", id), a.i("predecessor", id - 1),
+               a.i("source_offset", row * sourceLayout.pitch + column),
+               a.i("target_offset", row * targetLayout.pitch + column),
+               a.i("rows", std::min(matrixtransfer::kMaxRows, count - row)),
+               a.i("row_bytes",
+                   std::min(matrixtransfer::kMaxRowBytes, width - column)),
+               a.i("source_pitch", sourceLayout.pitch),
+               a.i("target_pitch", targetLayout.pitch),
+               a.i("instruction_bits", matrixtransfer::kInstructionBits),
+               a.i("register_count", matrixtransfer::kRegisterCount),
+               a.s("register_class", matrixtransfer::kRegisterClass),
+               a.i("mtype", matrixtransfer::kMtype)}));
+    }
+  int64_t total;
+  if (llvm::MulOverflow(count, width, total))
+    return op.emitError("internal copy byte accounting overflows");
+  op->setAttr(
+      "plan.transfer",
+      a.d({a.s("role", "internal"), a.s("engine", "matrix"),
+           a.s("recipe", "spm-acc32-spm"), a.s("from", "spm"), a.s("to", "spm"),
+           a.s("temporary_window", "none"),
+           a.s("ordering", "synchronous-fenced-tiles"),
+           a.b.getNamedAttr("source_endpoint", src),
+           a.b.getNamedAttr("target_endpoint", dst),
+           a.b.getNamedAttr("source_layout", layout(source, sourceLayout)),
+           a.b.getNamedAttr("target_layout", layout(target, targetLayout)),
+           a.b.getNamedAttr("chunks",
+                            a.d({a.i("count", count), a.i("bytes", width),
+                                 a.i("source_stride", sourceLayout.pitch),
+                                 a.i("target_stride", targetLayout.pitch)})),
+           a.b.getNamedAttr("tiles", a.b.getArrayAttr(tiles)),
+           a.i("total_bytes", total), a.i("temp_bytes", 0),
+           a.i("completion", tiles.size() - 1), a.s("wait", "after-each-tile"),
+           a.s("reason", "nonoverlapping-spm-exact-acc32-rectangle")}));
+  return success();
+}
+
 LogicalResult Planner::transfer(memref::CopyOp op) {
   Value source = op.getSource(), target = op.getTarget();
   auto src = dyn_cast<MemRefType>(source.getType());
@@ -1051,6 +1190,8 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
     return op.emitError("DMA planning requires ranked endpoint views");
   auto srcPlacement = placements.lookup(storageRoot(source));
   auto dstPlacement = placements.lookup(storageRoot(target));
+  if (srcPlacement && dstPlacement)
+    return internalTransfer(op, srcPlacement, dstPlacement);
   bool load = !srcPlacement && dstPlacement;
   bool store = srcPlacement && !dstPlacement;
   if (!srcPlacement && !dstPlacement)
@@ -1061,22 +1202,26 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
         "v1 planned copy requires exactly one external DDR endpoint");
   Value external = load ? source : target, local = load ? target : source;
   auto placement = load ? dstPlacement : srcPlacement;
-  if (placement.getAs<StringAttr>("level").getValue() != "spm" ||
-      !alignedArgument(external) ||
-      !spmdma::isEndpointPointerAlignmentProven(local, 64))
+  int64_t element = spmdma::getSpmElementByteWidth(src.getElementType());
+  if (!element || src.getElementType() != dst.getElementType() ||
+      placement.getAs<StringAttr>("level").getValue() != "spm" ||
+      !alignedArgument(external, element) ||
+      !spmdma::isEndpointPointerAlignmentProven(local, element))
     return op.emitError(
-        "no legal DMA route: endpoint alignment or SPM placement is unproven");
+        "no legal boundary route: natural endpoint alignment, element type, "
+        "or SPM placement is unproven");
   SmallVector<int64_t> ss, ds;
   int64_t so, destOffset;
-  if (src.getShape() != dst.getShape() ||
+  if (!src.hasStaticShape() || src.getShape() != dst.getShape() ||
       elementBytes(source) != elementBytes(target) ||
       failed(src.getStridesAndOffset(ss, so)) ||
       failed(dst.getStridesAndOffset(ds, destOffset)) || src.getRank() < 1 ||
-      src.getRank() > 2)
+      src.getRank() > 2 || llvm::any_of(ss, [](int64_t s) { return s < 0; }) ||
+      llvm::any_of(ds, [](int64_t s) { return s < 0; }))
     return op.emitError(
         "DMA plan needs matching static rank-one/rank-two rectangles");
   unsigned minor = src.getRank() - 1;
-  if (ss[minor] != 1 && src.getRank() == 2)
+  if ((ss[minor] != 1 || ds[minor] != 1) && src.getRank() == 2)
     minor = 0;
   if (ss[minor] != 1 || ds[minor] != 1)
     return op.emitError("no legal DMA route: source/destination physical "
@@ -1090,13 +1235,171 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
       llvm::MulOverflow(dst.getRank() == 1 ? dst.getDimSize(0) : ds[1 - minor],
                         elementBytes(target), targetStride))
     return op.emitError("DMA geometry exceeds the supported byte range");
-  if (count <= 0 || width <= 0 || width % 64 || sourceStride < width ||
-      targetStride < width || sourceStride % 64 || targetStride % 64)
-    return op.emitError("no legal DMA route: cache-line length/pitch "
-                        "constraint is not satisfied");
+  int64_t last;
+  if (count <= 0 || width <= 0 || sourceStride < 0 || targetStride < 0 ||
+      (count > 1 && (sourceStride < width || targetStride < width)) ||
+      llvm::MulOverflow(count - 1, sourceStride, last) ||
+      llvm::AddOverflow(last, width, last) ||
+      llvm::MulOverflow(count - 1, targetStride, last) ||
+      llvm::AddOverflow(last, width, last))
+    return op.emitError("boundary geometry exceeds the supported byte range "
+                        "or has overlapping rows");
   auto chunks = a.d({a.i("count", count), a.i("bytes", width),
                      a.i("ddr_stride", load ? sourceStride : targetStride),
                      a.i("spm_stride", load ? targetStride : sourceStride)});
+  if (width % 64 || !alignedArgument(external) ||
+      !spmdma::isEndpointPointerAlignmentProven(local, 64) ||
+      (count > 1 && (sourceStride % 64 || targetStride % 64))) {
+    // Ordinary ACC32 memory instructions have their own natural-alignment
+    // contract. They copy raw words, without interpreting the logical element
+    // type, and do not inherit DMA's cache-line pitch/length restriction.
+    bool matrixType =
+        matrixtransfer::isSupportedElementType(src.getElementType());
+    StringRef matrixRejection = matrixType
+                                    ? "matrix-requires-rank-two-rectangle"
+                                    : "matrix-logical-element-type-unsupported";
+    bool matrixLayout = matrixType && src.getRank() == 2 &&
+                        matrixtransfer::getLayout(src, minor) &&
+                        matrixtransfer::getLayout(dst, minor);
+    if (matrixType && src.getRank() == 2 && !matrixLayout)
+      matrixRejection = "matrix-physical-layout-unsupported";
+    if (matrixLayout) {
+      matrixRejection = "matrix-requires-exact-four-byte-rows-and-pitches";
+      if (width % 4 == 0 && sourceStride % 4 == 0 && targetStride % 4 == 0) {
+        matrixRejection = "matrix-effective-four-byte-alignment-unproven";
+        if (alignedArgument(external, 4) &&
+            spmdma::isEndpointPointerAlignmentProven(local, 4)) {
+          auto layout = [&](MemRefType type, ArrayRef<int64_t> strides,
+                            int64_t offset, int64_t pitch) {
+            return a.d(
+                {a.b.getNamedAttr("shape",
+                                  a.b.getDenseI64ArrayAttr(type.getShape())),
+                 a.b.getNamedAttr("strides", a.b.getDenseI64ArrayAttr(strides)),
+                 a.i("element_bits", element * 8),
+                 a.i("descriptor_offset", offset),
+                 a.i("contiguous_axis", minor), a.i("rows", count),
+                 a.i("row_bytes", width), a.i("row_pitch", pitch),
+                 a.s("origin", "effective-pointer")});
+          };
+          SmallVector<Attribute> tiles;
+          for (int64_t row = 0; row < count; row += matrixtransfer::kMaxRows)
+            for (int64_t column = 0; column < width;
+                 column += matrixtransfer::kMaxRowBytes) {
+              int64_t rows = std::min(matrixtransfer::kMaxRows, count - row);
+              int64_t rowBytes =
+                  std::min(matrixtransfer::kMaxRowBytes, width - column);
+              int64_t id = tiles.size();
+              tiles.push_back(a.d(
+                  {a.i("id", id), a.i("predecessor", id - 1),
+                   a.i("source_offset", row * sourceStride + column),
+                   a.i("target_offset", row * targetStride + column),
+                   a.i("rows", rows), a.i("row_bytes", rowBytes),
+                   a.i("source_pitch", sourceStride),
+                   a.i("target_pitch", targetStride),
+                   a.i("instruction_bits", matrixtransfer::kInstructionBits),
+                   a.i("register_count", matrixtransfer::kRegisterCount),
+                   a.s("register_class", matrixtransfer::kRegisterClass),
+                   a.i("mtype", matrixtransfer::kMtype)}));
+            }
+          op->setAttr(
+              "plan.transfer",
+              a.d({a.s("role", load ? "input" : "output"),
+                   a.s("engine", "matrix"),
+                   a.i("channel",
+                       placement.getAs<IntegerAttr>("bank").getInt()),
+                   a.s("from", load ? "ddr" : "spm"),
+                   a.s("to", load ? "spm" : "ddr"),
+                   a.b.getNamedAttr("chunks", chunks),
+                   a.b.getNamedAttr("source_layout",
+                                    layout(src, ss, so, sourceStride)),
+                   a.b.getNamedAttr("target_layout",
+                                    layout(dst, ds, destOffset, targetStride)),
+                   a.b.getNamedAttr("tiles", a.b.getArrayAttr(tiles)),
+                   a.i("total_bytes", count * width), a.i("temp_bytes", 0),
+                   a.i("completion", tiles.size() - 1),
+                   a.s("wait", "after-each-tile"),
+                   a.s("reason", "dma-illegal-exact-acc32-rectangle")}));
+          return success();
+        }
+      }
+    }
+    // The NR target currently permits ordinary vle/vse8,32,64, not 16-bit
+    // vector memory instructions. A wholly DMA copy remains type agnostic.
+    if (element == 2)
+      return op.emitError("no legal boundary route: nr-fpga has no exact "
+                          "16-bit RVV boundary-copy recipe");
+    auto sourceResidue = spmdma::getEndpointByteRemainder(source);
+    auto targetResidue = spmdma::getEndpointByteRemainder(target);
+    // A weaker naturally aligned ABI permits RVV but cannot authorize DMA.
+    if (!alignedRoot(external)) {
+      if (load)
+        sourceResidue.reset();
+      else
+        targetResidue.reset();
+    }
+    SmallVector<Attribute> segments;
+    auto append = [&](StringRef engine, int64_t srcOffset, int64_t dstOffset,
+                      int64_t length, StringRef reason,
+                      int64_t vectorBytes = 0) {
+      int64_t id = segments.size();
+      NamedAttrList fields;
+      fields.append(a.i("id", id));
+      fields.append(a.i("predecessor", id - 1));
+      fields.append(a.s("engine", engine));
+      fields.append(a.i("source_offset", srcOffset));
+      fields.append(a.i("target_offset", dstOffset));
+      fields.append(a.i("bytes", length));
+      fields.append(a.s("reason", reason));
+      if (vectorBytes)
+        fields.append(a.i("vector_bytes", vectorBytes));
+      segments.push_back(fields.getDictionary(module.getContext()));
+    };
+    auto rvv = [&](int64_t srcOffset, int64_t dstOffset, int64_t length,
+                   StringRef reason) {
+      if (int64_t full = length / 64 * 64) {
+        append("rvv", srcOffset, dstOffset, full, reason, 64);
+        srcOffset += full;
+        dstOffset += full;
+        length -= full;
+      }
+      if (length)
+        append("rvv", srcOffset, dstOffset, length, reason, length);
+    };
+    for (int64_t row = 0; row < count; ++row) {
+      int64_t srcOffset = row * sourceStride, dstOffset = row * targetStride;
+      auto sr = sourceResidue, tr = targetResidue;
+      if (sr)
+        *sr = (*sr + srcOffset % 64) % 64;
+      if (tr)
+        *tr = (*tr + dstOffset % 64) % 64;
+      if (!sr || !tr || sr != tr) {
+        rvv(srcOffset, dstOffset, width,
+            !sr || !tr ? "dma-endpoint-residue-unproven"
+                       : "dma-endpoint-residues-differ");
+        continue;
+      }
+      int64_t head = std::min(width, (64 - *sr) % 64);
+      int64_t body = (width - head) / 64 * 64;
+      rvv(srcOffset, dstOffset, head, "exact-unaligned-prefix");
+      if (body)
+        append("dma", srcOffset + head, dstOffset + head, body,
+               "both-endpoints-cache-line-aligned");
+      rvv(srcOffset + head + body, dstOffset + head + body, width - head - body,
+          "exact-short-suffix");
+    }
+    op->setAttr(
+        "plan.transfer",
+        a.d({a.s("role", load ? "input" : "output"), a.s("engine", "segmented"),
+             a.i("channel", placement.getAs<IntegerAttr>("bank").getInt()),
+             a.s("from", load ? "ddr" : "spm"), a.s("to", load ? "spm" : "ddr"),
+             a.b.getNamedAttr("chunks", chunks),
+             a.b.getNamedAttr("segments", a.b.getArrayAttr(segments)),
+             a.i("completion", segments.size() - 1),
+             a.s("wait", "after-each-segment"),
+             a.s("matrix_rejection", matrixRejection),
+             a.s("reason", "exact-boundary-segments")}));
+    return success();
+  }
   op->setAttr(
       "plan.transfer",
       a.d({a.s("role", load ? "input" : "output"), a.s("engine", "dma"),
@@ -1153,6 +1456,17 @@ LogicalResult Planner::decisions(func::FuncOp function) {
                a.b.getNamedAttr(
                    "output",
                    binding(op->getOperand(2), 2, "same-accumulator-window"))}));
+      if (auto init = getZeroAccumulatorInit(matmul)) {
+        NamedAttrList route(op->getAttrOfType<DictionaryAttr>("plan.route"));
+        auto task = init->fill->getAttrOfType<DictionaryAttr>("contract.task");
+        if (task && op->hasAttr("contract.task")) {
+          route.set(
+              "initialization",
+              a.d({a.s("kind", init->loop ? "first-iteration-zero" : "zero"),
+                   a.i("task", task.getAs<IntegerAttr>("id").getInt())}));
+          op->setAttr("plan.route", route.getDictionary(module.getContext()));
+        }
+      }
     } else if (auto fill = dyn_cast<linalg::FillOp>(op)) {
       Value out = fill.getOutputs()[0];
       auto type = cast<MemRefType>(out.getType());
@@ -1160,6 +1474,17 @@ LogicalResult Planner::decisions(func::FuncOp function) {
       if (!placement)
         return op->emitError("unplanned external fill"),
                WalkResult::interrupt();
+      if (auto consumer = getZeroAccumulatorConsumer(fill);
+          consumer && geometries.contains(consumer) &&
+          consumer->hasAttr("contract.task") && op->hasAttr("contract.task")) {
+        auto task = consumer->getAttrOfType<DictionaryAttr>("contract.task");
+        op->setAttr(
+            "plan.fill",
+            a.d({a.s("level", "spm"), a.s("engine", "ame"),
+                 a.s("kind", "deferred-zero"),
+                 a.i("consumer", task.getAs<IntegerAttr>("id").getInt())}));
+        return WalkResult::advance();
+      }
       if (type.getRank() == 0) {
         op->setAttr("plan.fill",
                     a.d({a.s("level", "host"), a.s("engine", "scalar"),
@@ -1167,9 +1492,13 @@ LogicalResult Planner::decisions(func::FuncOp function) {
       } else {
         auto size = bytes(out);
         int64_t rows = type.getRank() == 2 ? type.getDimSize(0) : 1;
-        if (!size || type.getRank() > 2 || *size / rows % 64)
-          return op->emitError(
-                     "RVV fill requires complete static 64-byte rows"),
+        if (!size || type.getRank() > 2)
+          return op->emitError("RVV fill requires complete static rows"),
+                 WalkResult::interrupt();
+        int64_t vectorBytes =
+            int64_t{1} << llvm::Log2_64(std::min<int64_t>(64, *size / rows));
+        if (*size / rows % vectorBytes || vectorBytes < elementBytes(out))
+          return op->emitError("RVV fill row has no exact vector width"),
                  WalkResult::interrupt();
         auto padding = op->getAttrOfType<DictionaryAttr>("contract.fill");
         bool isPadding = padding && padding.getAs<BoolAttr>("padding") &&
@@ -1181,27 +1510,67 @@ LogicalResult Planner::decisions(func::FuncOp function) {
                 : "broadcast";
         op->setAttr("plan.fill",
                     a.d({a.s("level", "spm"), a.s("engine", "rvv"),
-                         a.i("vector_bytes", 64), a.i("rows", rows),
+                         a.i("vector_bytes", vectorBytes), a.i("rows", rows),
                          a.i("row_bytes", *size / rows), a.s("kind", kind)}));
       }
     } else if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
-      if (generic.getNumLoops() != 1 || generic.getNumParallelLoops() != 1 ||
-          llvm::any_of(generic.getIndexingMapsArray(),
-                       [](AffineMap map) { return !map.isIdentity(); }))
+      auto output = dyn_cast<MemRefType>(generic.getOutputs()[0].getType());
+      if (!output || !output.hasStaticShape() || output.getRank() != 1 ||
+          generic.getNumLoops() != 1 || generic.getNumParallelLoops() != 1)
         return op->emitError(
                    "v1 vector plan requires rank-one identity pointwise"),
                WalkResult::interrupt();
       SmallVector<Attribute> operands;
-      int64_t elements = -1;
-      for (auto [index, value] : llvm::enumerate(op->getOperands())) {
-        auto type = dyn_cast<MemRefType>(value.getType());
-        if (!type || !type.hasStaticShape() || type.getRank() != 1 ||
-            (elements != -1 && type.getDimSize(0) != elements) ||
-            !bytes(value) || *bytes(value) % 64)
-          return op->emitError("v1 vector plan requires matching complete "
-                               "64-byte vectors"),
+      SmallVector<Attribute> scalarOperands;
+      Block &body = generic.getRegion().front();
+      for (auto [operationIndex, payload] : llvm::enumerate(body)) {
+        // A generic may yield an external constant directly. Its use needs
+        // the same explicit broadcast as a scalar arithmetic operand.
+        if (!isa<linalg::YieldOp>(payload) &&
+            !supportedPointwiseOperation(payload))
+          return op->emitError("unsupported lane-wise scalar expression"),
                  WalkResult::interrupt();
-        elements = type.getDimSize(0);
+        for (auto [index, value] : llvm::enumerate(payload.getOperands())) {
+          auto argument = dyn_cast<BlockArgument>(value);
+          if ((argument && argument.getOwner() == &body) ||
+              (value.getDefiningOp() &&
+               value.getDefiningOp()->getBlock() == &body))
+            continue;
+          auto constant = value.getDefiningOp<arith::ConstantOp>();
+          if (!constant || constant->getBlock() == &body ||
+              !isa<IntegerAttr, FloatAttr>(constant.getValue()))
+            return op->emitError("pointwise scalar capture requires a proven "
+                                 "scalar constant broadcast"),
+                   WalkResult::interrupt();
+          NamedAttrList scalar(
+              a.d({a.i("operand", index), a.s("kind", "constant-broadcast"),
+                   a.b.getNamedAttr("value", constant.getValue())}));
+          if (operationIndex)
+            scalar.set("operation", a.b.getI64IntegerAttr(operationIndex));
+          scalarOperands.push_back(scalar.getDictionary(module.getContext()));
+        }
+      }
+      int64_t elements = output.getDimSize(0);
+      int64_t lanes = pointwiseLanes(generic);
+      if (elements <= 0 || elements % lanes)
+        return op->emitError(
+                   "pointwise plan requires complete common-lane vectors"),
+               WalkResult::interrupt();
+      for (auto [index, pair] : llvm::enumerate(
+               llvm::zip(op->getOperands(), generic.getIndexingMapsArray()))) {
+        auto [value, map] = pair;
+        auto type = dyn_cast<MemRefType>(value.getType());
+        if (!type && supportedPointwiseScalar(value.getType()) &&
+            map.getNumResults() == 0) {
+          operands.push_back(binding(value, index, "explicit-scalar-input"));
+          continue;
+        }
+        if (!type || !type.hasStaticShape() || type.getRank() != 1 ||
+            type.getDimSize(0) != elements || !map.isIdentity() ||
+            !supportedPointwiseScalar(type.getElementType()))
+          return op->emitError("pointwise plan requires matching contiguous "
+                               "memrefs or explicit scalar inputs"),
+                 WalkResult::interrupt();
         operands.push_back(binding(
             value, index,
             terminalForwarded.contains(op) &&
@@ -1211,9 +1580,15 @@ LogicalResult Planner::decisions(func::FuncOp function) {
       }
       op->setAttr("plan.vector",
                   a.d({a.s("engine", "rvv"), a.i("vector_bytes", 64),
-                       a.i("elements", elements), a.s("tail", "none"),
+                       a.i("elements", elements), a.i("lanes", lanes),
+                       a.s("tail", "none"),
                        a.b.getNamedAttr("operands", a.b.getArrayAttr(operands)),
                        a.s("fp_policy", "preserve")}));
+      if (!scalarOperands.empty()) {
+        NamedAttrList fields(op->getAttrOfType<DictionaryAttr>("plan.vector"));
+        fields.set("scalar_operands", a.b.getArrayAttr(scalarOperands));
+        op->setAttr("plan.vector", fields.getDictionary(module.getContext()));
+      }
     } else if (auto reduce = dyn_cast<linalg::ReduceOp>(op)) {
       Value input = reduce.getInputs()[0];
       auto type = dyn_cast<MemRefType>(input.getType());
@@ -1226,7 +1601,10 @@ LogicalResult Planner::decisions(func::FuncOp function) {
           "plan.reduce",
           a.d({a.s("engine", "rvv"), a.i("vector_bytes", 64),
                a.i("elements", type.getDimSize(0)), a.i("axis", 0),
-               a.s("strategy", "ordered-vector-add"),
+               a.s("strategy",
+                   isa<arith::MaxNumFOp>(reduce.getRegion().front().front())
+                       ? "ordered-vector-maxnum"
+                       : "ordered-vector-add"),
                a.b.getNamedAttr("input",
                                 binding(input, 0, "ordered-reduction-input")),
                a.b.getNamedAttr("output", binding(reduce.getInits()[0], 1,
@@ -1235,6 +1613,22 @@ LogicalResult Planner::decisions(func::FuncOp function) {
     } else if (isa<linalg::LinalgOp>(op)) {
       return op->emitError("unsupported Linalg operation in BOSCAME plan"),
              WalkResult::interrupt();
+    } else if (auto load = dyn_cast<memref::LoadOp>(op)) {
+      auto type = cast<MemRefType>(load.getMemRef().getType());
+      if (type.getRank() == 1) {
+        auto placement = placements.lookup(storageRoot(load.getMemRef()));
+        if (type.getShape() != ArrayRef<int64_t>{1} ||
+            !matchPattern(load.getIndices()[0], m_Zero()) || !placement ||
+            placement.getAs<StringAttr>("level").getValue() != "spm")
+          return op->emitError(
+                     "scalar snapshot load requires a private SPM singleton"),
+                 WalkResult::interrupt();
+        op->setAttr(
+            "plan.scalar",
+            a.d({a.s("engine", "rvv"), a.s("kind", "load"), a.i("elements", 1),
+                 a.b.getNamedAttr("input", binding(load.getMemRef(), 0,
+                                                   "singleton-snapshot"))}));
+      }
     } else if (auto store = dyn_cast<memref::StoreOp>(op)) {
       auto p = placements.lookup(storageRoot(store.getMemRef()));
       if (!p || p.getAs<StringAttr>("level").getValue() != "host" ||
@@ -1487,9 +1881,9 @@ LogicalResult planBOSCAME(ModuleOp module,
 
 void printBOSCAMEPlan(ModuleOp module, llvm::raw_ostream &stream) {
   module.walk([&](Operation *op) {
-    for (StringRef attr :
-         {"plan.budget", "plan.route", "plan.compute", "plan.transfer",
-          "plan.buffer", "plan.vector", "plan.reduce", "plan.fill"})
+    for (StringRef attr : {"plan.budget", "plan.route", "plan.compute",
+                           "plan.transfer", "plan.buffer", "plan.vector",
+                           "plan.reduce", "plan.fill", "plan.scalar"})
       if (Attribute decision = op->getAttr(attr))
         stream << op->getName() << " " << attr << "=" << decision << "\n";
   });

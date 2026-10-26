@@ -8,8 +8,11 @@
 
 #include "Analysis/KernelContract.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPointwise.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMETargetInfo.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEZeroInit.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -25,6 +28,7 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/Support/MathExtras.h"
 #include <optional>
+#include <tuple>
 
 using namespace mlir;
 using namespace ::buddy::boscame;
@@ -288,6 +292,7 @@ private:
           (name == "plan.fill" && isa<linalg::FillOp>(op)) ||
           (name == "plan.vector" && isa<linalg::GenericOp>(op)) ||
           (name == "plan.reduce" && isa<linalg::ReduceOp>(op)) ||
+          (name == "plan.scalar" && isa<memref::LoadOp>(op)) ||
           (name == "plan.loop" && isa<scf::ForOp>(op)) ||
           (name == "plan.scope" && isa<scf::IfOp>(op));
       require(op, carrier, "unknown plan or unsupported carrier: " + name);
@@ -322,9 +327,11 @@ private:
       fields(op, p,
              {"bank", "offset", "capacity", "channel", "vector_bytes", "rows",
               "row_bytes", "elements", "axis", "trips", "spm_banks",
-              "bank_capacity"},
+              "bank_capacity", "completion", "total_bytes", "temp_bytes",
+              "consumer", "lanes"},
              {"level", "role", "engine", "from", "to", "guard", "wait", "kind",
-              "tail", "fp_policy", "strategy", "reason", "order"},
+              "tail", "fp_policy", "strategy", "reason", "order",
+              "matrix_rejection", "recipe", "temporary_window", "ordering"},
              {"spm_window_reuse", "share_spm_windows"});
       if (!p)
         continue;
@@ -334,17 +341,129 @@ private:
       if (name == "plan.budget")
         require(op, bool(p.getAs<DenseI64ArrayAttr>("high_water")),
                 "plan budget high_water must be an i64 array");
+      if (name == "plan.vector" && p.get("scalar_operands")) {
+        auto scalars = p.getAs<ArrayAttr>("scalar_operands");
+        require(op, bool(scalars),
+                "pointwise scalar_operands must be an array");
+        if (scalars)
+          for (Attribute entry : scalars) {
+            auto scalar = dyn_cast<DictionaryAttr>(entry);
+            fields(op, scalar, {"operation", "operand"}, {"kind"});
+            require(op,
+                    scalar && scalar.getAs<IntegerAttr>("operand") &&
+                        scalar.getAs<StringAttr>("kind") &&
+                        isa_and_nonnull<IntegerAttr, FloatAttr>(
+                            scalar.get("value")),
+                    "pointwise scalar broadcast requires operand, kind and "
+                    "a scalar typed constant value");
+          }
+      }
       if (name == "plan.transfer")
         fields(op, dict(p, "chunks"),
-               {"count", "bytes", "ddr_stride", "spm_stride"});
+               {"count", "bytes", "ddr_stride", "spm_stride", "source_stride",
+                "target_stride"});
       if (name == "plan.transfer")
         require(op, bool(p.getAs<StringAttr>("role")),
                 "transfer plan requires a role");
+      if (name == "plan.transfer" && string(p, "engine") == "matrix") {
+        if (string(p, "role") == "internal")
+          for (StringRef key : {"source_endpoint", "target_endpoint"}) {
+            auto endpoint = dict(p, key);
+            fields(op, endpoint,
+                   {"operand", "bank", "window_offset", "capacity", "begin",
+                    "end"},
+                   {"level"});
+            bool complete = bool(endpoint);
+            if (endpoint) {
+              for (StringRef field : {"operand", "bank", "window_offset",
+                                      "capacity", "begin", "end"})
+                complete &= bool(endpoint.getAs<IntegerAttr>(field));
+              complete &= bool(endpoint.getAs<StringAttr>("level"));
+            }
+            require(op, complete,
+                    "internal copy requires complete physical endpoints");
+          }
+        auto tiles = p.getAs<ArrayAttr>("tiles");
+        require(
+            op,
+            tiles && !tiles.empty() && p.getAs<IntegerAttr>("completion") &&
+                p.getAs<IntegerAttr>("total_bytes") &&
+                p.getAs<IntegerAttr>("temp_bytes"),
+            "matrix transfer requires tiles, completion and byte accounting");
+        for (StringRef key : {"source_layout", "target_layout"}) {
+          auto layout = dict(p, key);
+          fields(op, layout,
+                 {"element_bits", "descriptor_offset", "contiguous_axis",
+                  "rows", "row_bytes", "row_pitch"},
+                 {"origin"});
+          require(op,
+                  layout && layout.getAs<DenseI64ArrayAttr>("shape") &&
+                      layout.getAs<DenseI64ArrayAttr>("strides"),
+                  "matrix layout requires logical shape and strides");
+          if (layout)
+            for (StringRef field :
+                 {"element_bits", "descriptor_offset", "contiguous_axis",
+                  "rows", "row_bytes", "row_pitch"})
+              require(op, bool(layout.getAs<IntegerAttr>(field)),
+                      "matrix layout is missing a required field");
+        }
+        if (tiles)
+          for (Attribute attribute : tiles) {
+            auto tile = dyn_cast<DictionaryAttr>(attribute);
+            fields(op, tile,
+                   {"id", "predecessor", "source_offset", "target_offset",
+                    "rows", "row_bytes", "source_pitch", "target_pitch",
+                    "instruction_bits", "register_count", "mtype"},
+                   {"register_class"});
+            bool complete = bool(tile);
+            if (tile) {
+              for (StringRef field :
+                   {"id", "predecessor", "source_offset", "target_offset",
+                    "rows", "row_bytes", "source_pitch", "target_pitch",
+                    "instruction_bits", "register_count", "mtype"})
+                complete &= bool(tile.getAs<IntegerAttr>(field));
+              complete &= bool(tile.getAs<StringAttr>("register_class"));
+            }
+            require(op, complete, "matrix tile is missing a required field");
+          }
+      }
+      if (name == "plan.transfer" && string(p, "engine") == "segmented") {
+        auto segments = p.getAs<ArrayAttr>("segments");
+        require(op,
+                segments && !segments.empty() &&
+                    p.getAs<IntegerAttr>("completion"),
+                "segmented transfer requires segments and completion");
+        if (segments)
+          for (Attribute attribute : segments) {
+            auto segment = dyn_cast<DictionaryAttr>(attribute);
+            fields(op, segment,
+                   {"id", "predecessor", "source_offset", "target_offset",
+                    "bytes", "vector_bytes"},
+                   {"engine", "reason"});
+            require(op,
+                    segment && segment.getAs<IntegerAttr>("id") &&
+                        segment.getAs<IntegerAttr>("predecessor") &&
+                        segment.getAs<IntegerAttr>("source_offset") &&
+                        segment.getAs<IntegerAttr>("target_offset") &&
+                        segment.getAs<IntegerAttr>("bytes") &&
+                        segment.getAs<StringAttr>("engine") &&
+                        segment.getAs<StringAttr>("reason"),
+                    "transfer segment is missing a required field");
+          }
+      }
       if (name == "plan.route") {
         fields(op, dict(p, "tile"), {"m", "n", "k"});
         fields(op, dict(p, "subtiles"), {"n", "k"});
         for (StringRef key : {"a", "b", "accumulator", "output"})
           selectionSchema(op, dict(p, key));
+        if (p.get("initialization")) {
+          auto init = dict(p, "initialization");
+          fields(op, init, {"task"}, {"kind"});
+          require(op,
+                  init && init.getAs<IntegerAttr>("task") &&
+                      init.getAs<StringAttr>("kind"),
+                  "zero initialization requires kind and producer task");
+        }
       }
       if (name == "plan.compute")
         require(op, bool(p.getAs<DenseI64ArrayAttr>("shape")),
@@ -360,6 +479,8 @@ private:
         selectionSchema(op, dict(p, "input"));
         selectionSchema(op, dict(p, "output"));
       }
+      if (name == "plan.scalar")
+        selectionSchema(op, dict(p, "input"));
     }
   }
   DictionaryAttr placement(Value value) {
@@ -374,20 +495,26 @@ private:
            llvm::all_of(strides, [](int64_t s) { return s > 0; }) &&
            bytes(type.getElementType()) > 0;
   }
-  bool aligned(Value value) {
-    auto type = dyn_cast<MemRefType>(value.getType());
-    if (!type || !spmdma::isEndpointPointerAlignmentProven(value, 64))
+  bool alignedRoot(Value value, int64_t alignmentBytes = 64) {
+    if (alignmentBytes <= 0)
       return false;
     Value storage = root(value);
     if (privateRoot(storage)) {
       auto p = placement(value);
-      return string(p, "level") == "spm" && integer(p, "offset") % 64 == 0;
+      return string(p, "level") == "spm" &&
+             integer(p, "offset") % alignmentBytes == 0;
     }
     auto abi = dict(module, "contract.abi");
     int64_t alignment = integer(abi, "args_aligned_bytes");
-    return argumentRoot(storage) && alignment >= 64 && alignment % 64 == 0 &&
+    return argumentRoot(storage) && alignment >= alignmentBytes &&
+           alignment % alignmentBytes == 0 &&
            buddy::contract::hasEntryArgumentABI(
                storage.getParentRegion()->getParentOfType<func::FuncOp>());
+  }
+  bool aligned(Value value, int64_t alignmentBytes = 64) {
+    return isa<MemRefType>(value.getType()) &&
+           spmdma::isEndpointPointerAlignmentProven(value, alignmentBytes) &&
+           alignedRoot(value, alignmentBytes);
   }
   void bounds(Operation *op, Value value) {
     auto p = placement(value);
@@ -420,7 +547,12 @@ private:
     Value value = op->getOperand(index);
     auto p = placement(value);
     StringRef level = string(selection, "level");
-    if (level == "ddr") {
+    if (level == "scalar") {
+      require(op,
+              supportedPointwiseScalar(value.getType()) &&
+                  string(selection, "reason") == "explicit-scalar-input",
+              "scalar route requires an explicit scalar operand");
+    } else if (level == "ddr") {
       require(op, argumentRoot(root(value)),
               "direct DDR operand must refer to an external argument");
       require(op, aligned(value),
@@ -620,7 +752,24 @@ private:
       auto p = dict(op, "plan.fill");
       Value value = fill.getOutputs()[0];
       auto type = cast<MemRefType>(value.getType());
-      if (string(p, "level") == "host") {
+      if (string(p, "engine") == "ame") {
+        auto consumer = getZeroAccumulatorConsumer(fill);
+        auto route = consumer ? dict(consumer, "plan.route") : DictionaryAttr();
+        auto init = dict(route, "initialization");
+        require(
+            op,
+            consumer && string(p, "level") == "spm" &&
+                string(p, "kind") == "deferred-zero" &&
+                string(placement(value), "level") == "spm" &&
+                dict(consumer, "contract.task") && dict(op, "contract.task") &&
+                integer(p, "consumer") ==
+                    integer(consumer ? dict(consumer, "contract.task")
+                                     : DictionaryAttr(),
+                            "id") &&
+                integer(init, "task") ==
+                    integer(dict(op, "contract.task"), "id"),
+            "deferred zero fill requires a unique complete matmul consumer");
+      } else if (string(p, "level") == "host") {
         require(op,
                 type.getRank() == 0 && string(p, "engine") == "scalar" &&
                     string(p, "kind") == "init" &&
@@ -634,24 +783,27 @@ private:
             type.getRank() &&
             !llvm::MulOverflow(type.getShape().back(),
                                bytes(type.getElementType()), rowBytes);
-        require(
-            op,
-            p && string(p, "level") == "spm" && string(p, "engine") == "rvv" &&
-                integer(p, "vector_bytes") == 64 &&
-                (string(p, "kind") == "padding" ||
-                 string(p, "kind") == "broadcast" ||
-                 string(p, "kind") == "overwrite") &&
-                type.getRank() >= 1 && type.getRank() <= 2 &&
-                integer(p, "rows") == rows && rowSize &&
-                integer(p, "row_bytes") == rowBytes && rowBytes > 0 &&
-                rowBytes % 64 == 0 && staticType(value, strides) &&
-                strides.back() == 1 &&
-                (strides.size() == 1 ||
-                 (!llvm::MulOverflow(strides[0], bytes(type.getElementType()),
-                                     pitch) &&
-                  pitch % 64 == 0)) &&
-                string(placement(value), "level") == "spm" && aligned(value),
-            "unsupported RVV fill shape, layout, or plan");
+        int64_t vectorBytes = integer(p, "vector_bytes");
+        require(op,
+                p && string(p, "level") == "spm" &&
+                    string(p, "engine") == "rvv" && vectorBytes > 0 &&
+                    vectorBytes <= 64 && llvm::isPowerOf2_64(vectorBytes) &&
+                    vectorBytes >= bytes(type.getElementType()) &&
+                    (string(p, "kind") == "padding" ||
+                     string(p, "kind") == "broadcast" ||
+                     string(p, "kind") == "overwrite") &&
+                    type.getRank() >= 1 && type.getRank() <= 2 &&
+                    integer(p, "rows") == rows && rowSize &&
+                    integer(p, "row_bytes") == rowBytes && rowBytes > 0 &&
+                    rowBytes % vectorBytes == 0 && staticType(value, strides) &&
+                    strides.back() == 1 &&
+                    (strides.size() == 1 || rows == 1 ||
+                     (!llvm::MulOverflow(strides[0],
+                                         bytes(type.getElementType()), pitch) &&
+                      pitch % 64 == 0)) &&
+                    string(placement(value), "level") == "spm" &&
+                    aligned(value),
+                "unsupported RVV fill shape, layout, or plan");
         bounds(op, value);
       }
       return;
@@ -664,67 +816,91 @@ private:
       auto p = dict(op, "plan.vector");
       auto operands = p ? p.getAs<ArrayAttr>("operands") : ArrayAttr();
       int64_t elements = integer(p, "elements");
-      Type elementType;
+      int64_t lanes = integer(p, "lanes");
       require(op,
               p && string(p, "engine") == "rvv" &&
                   integer(p, "vector_bytes") == 64 &&
+                  lanes == pointwiseLanes(generic) && lanes > 0 &&
+                  elements > 0 && elements % lanes == 0 &&
                   string(p, "tail") == "none" &&
                   string(p, "fp_policy") == "preserve" && operands &&
                   operands.size() == op->getNumOperands(),
               "missing or unsupported pointwise vector plan");
       if (operands)
-        for (auto [i, selection] : llvm::enumerate(operands))
-          if (i < op->getNumOperands()) {
-            binding(op, dyn_cast<DictionaryAttr>(selection), i);
-            auto type = dyn_cast<MemRefType>(op->getOperand(i).getType());
-            SmallVector<int64_t> strides;
-            int64_t extentBytes = 0;
-            if (!elementType && type)
-              elementType = type.getElementType();
-            require(
-                op,
-                type && type.getRank() == 1 && elements > 0 &&
-                    type.getDimSize(0) == elements &&
-                    type.getElementType() == elementType &&
-                    staticType(op->getOperand(i), strides) && strides[0] == 1 &&
-                    !llvm::MulOverflow(elements, bytes(type.getElementType()),
-                                       extentBytes) &&
-                    extentBytes % 64 == 0,
-                "pointwise plan requires equal-shaped, same-type contiguous "
-                "complete 64-byte vectors");
+        for (auto [i, selection] : llvm::enumerate(operands)) {
+          if (i >= op->getNumOperands())
+            break;
+          binding(op, dyn_cast<DictionaryAttr>(selection), i);
+          Value value = op->getOperand(i);
+          auto type = dyn_cast<MemRefType>(value.getType());
+          AffineMap map = generic.getIndexingMapsArray()[i];
+          if (!type) {
+            require(op,
+                    i < static_cast<size_t>(generic.getNumDpsInputs()) &&
+                        supportedPointwiseScalar(value.getType()) &&
+                        map.getNumResults() == 0,
+                    "pointwise scalar input requires an empty indexing map");
+            continue;
           }
+          SmallVector<int64_t> strides;
+          require(op,
+                  type.getRank() == 1 && type.getDimSize(0) == elements &&
+                      supportedPointwiseScalar(type.getElementType()) &&
+                      bytes(type.getElementType()) > 0 && map.isIdentity() &&
+                      staticType(value, strides) && strides[0] == 1,
+                  "pointwise memory operands require equal-shaped contiguous "
+                  "identity indexing and supported element types");
+        }
       Block &body = generic.getRegion().front();
-      bool payload =
-          body.getOperations().size() == 2 &&
-          isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::AddFOp,
-              arith::SubFOp, arith::MulFOp, arith::DivFOp, arith::NegFOp>(
-              body.front());
-      require(op,
-              payload && generic.getOutputs().size() == 1 &&
-                  llvm::all_of(generic.getIndexingMapsArray(),
-                               [](AffineMap m) { return m.isIdentity(); }) &&
-                  llvm::all_of(generic.getIteratorTypesArray(),
-                               [](utils::IteratorType i) {
-                                 return i == utils::IteratorType::parallel;
-                               }),
-              "pointwise emission requires a single arith operation and "
-              "identity parallel indexing");
-      if (payload) {
-        Operation &arithmetic = body.front();
-        auto yield = dyn_cast<linalg::YieldOp>(body.getTerminator());
+      auto yield = dyn_cast<linalg::YieldOp>(body.getTerminator());
+      auto output =
+          generic.getOutputs().size() == 1
+              ? dyn_cast<MemRefType>(generic.getOutputs()[0].getType())
+              : MemRefType();
+      require(
+          op,
+          output && yield && yield.getValues().size() == 1 &&
+              yield.getValues()[0].getType() == output.getElementType() &&
+              generic.getNumLoops() == 1 && generic.getNumParallelLoops() == 1,
+          "pointwise expression must yield one element with parallel indexing");
+      auto scalarOperands =
+          p ? p.getAs<ArrayAttr>("scalar_operands") : ArrayAttr();
+      unsigned scalarIndex = 0;
+      for (auto [operationIndex, arithmetic] : llvm::enumerate(body)) {
         require(op,
-                arithmetic.getNumResults() == 1 &&
-                    arithmetic.getResult(0).getType() == elementType && yield &&
-                    yield.getValues().size() == 1 &&
-                    yield.getValues()[0] == arithmetic.getResult(0),
-                "generic must yield its arithmetic result");
-        for (Value operand : arithmetic.getOperands())
-          require(
-              op,
-              isa<BlockArgument>(operand) &&
-                  cast<BlockArgument>(operand).getOwner() == &body,
-              "generic scalar captures must be passed as explicit operands");
+                isa<linalg::YieldOp>(arithmetic) ||
+                    supportedPointwiseOperation(arithmetic),
+                "unsupported lane-wise scalar expression");
+        for (auto [index, operand] :
+             llvm::enumerate(arithmetic.getOperands())) {
+          auto argument = dyn_cast<BlockArgument>(operand);
+          if ((argument && argument.getOwner() == &body) ||
+              (operand.getDefiningOp() &&
+               operand.getDefiningOp()->getBlock() == &body))
+            continue;
+          auto constant = operand.getDefiningOp<arith::ConstantOp>();
+          auto selection =
+              scalarOperands && scalarIndex < scalarOperands.size()
+                  ? dyn_cast<DictionaryAttr>(scalarOperands[scalarIndex])
+                  : DictionaryAttr();
+          int64_t recordedOp = selection && selection.get("operation")
+                                   ? integer(selection, "operation")
+                                   : 0;
+          require(op,
+                  constant && constant->getBlock() != &body &&
+                      isa<IntegerAttr, FloatAttr>(constant.getValue()) &&
+                      supportedPointwiseScalar(operand.getType()) &&
+                      selection && recordedOp == int64_t(operationIndex) &&
+                      integer(selection, "operand") == int64_t(index) &&
+                      string(selection, "kind") == "constant-broadcast" &&
+                      selection.get("value") == constant.getValue(),
+                  "generic scalar capture requires an exact explicit constant "
+                  "broadcast plan");
+          ++scalarIndex;
+        }
       }
+      require(op, scalarIndex == (scalarOperands ? scalarOperands.size() : 0),
+              "pointwise scalar broadcast plan has extraneous operands");
       return;
     }
     if (auto reduce = dyn_cast<linalg::ReduceOp>(op)) {
@@ -732,7 +908,8 @@ private:
       require(
           op,
           string(p, "engine") == "rvv" && integer(p, "vector_bytes") == 64 &&
-              string(p, "strategy") == "ordered-vector-add" &&
+              (string(p, "strategy") == "ordered-vector-add" ||
+               string(p, "strategy") == "ordered-vector-maxnum") &&
               string(p, "fp_policy") == "preserve" && integer(p, "axis") == 0 &&
               reduce.getDimensions() == ArrayRef<int64_t>{0} &&
               reduce.getInputs().size() == 1 && reduce.getInits().size() == 1,
@@ -754,29 +931,49 @@ private:
               string(placement(reduce.getInits()[0]), "level") == "host",
           "reduction requires contiguous f32 input and host rank-zero output");
       Block &body = reduce.getRegion().front();
-      auto add = body.empty() ? arith::AddFOp()
-                              : dyn_cast<arith::AddFOp>(body.front());
+      Operation *combine = body.empty() ? nullptr : &body.front();
+      bool validCombine = false;
+      if (auto add = dyn_cast_or_null<arith::AddFOp>(combine))
+        validCombine = string(p, "strategy") == "ordered-vector-add" &&
+                       add.getFastmath() == arith::FastMathFlags::none;
+      if (auto max = dyn_cast_or_null<arith::MaxNumFOp>(combine))
+        validCombine = string(p, "strategy") == "ordered-vector-maxnum" &&
+                       max.getFastmath() == arith::FastMathFlags::none;
       auto yield = dyn_cast<linalg::YieldOp>(body.getTerminator());
       require(op,
               body.getOperations().size() == 2 && body.getNumArguments() == 2 &&
-                  add && yield && yield.getValues().size() == 1 &&
-                  yield.getValues()[0] == add.getResult() &&
-                  add.getFastmath() == arith::FastMathFlags::none &&
-                  ((add.getLhs() == body.getArgument(0) &&
-                    add.getRhs() == body.getArgument(1)) ||
-                   (add.getRhs() == body.getArgument(0) &&
-                    add.getLhs() == body.getArgument(1))),
-              "reduction payload must yield one ordered add of input and "
+                  validCombine && yield && yield.getValues().size() == 1 &&
+                  yield.getValues()[0] == combine->getResult(0) &&
+                  ((combine->getOperand(0) == body.getArgument(0) &&
+                    combine->getOperand(1) == body.getArgument(1)) ||
+                   (combine->getOperand(1) == body.getArgument(0) &&
+                    combine->getOperand(0) == body.getArgument(1))),
+              "reduction payload must yield one planned ordered combine of "
+              "input and "
               "accumulator");
       return;
     }
     if (isa<linalg::LinalgOp>(op))
       require(op, false, "unplanned Linalg operation");
-    if (auto load = dyn_cast<memref::LoadOp>(op))
-      require(op,
-              cast<MemRefType>(load.getMemRefType()).getRank() == 0 &&
-                  string(placement(load.getMemRef()), "level") == "host",
-              "scalar load must access planned host rank-zero storage");
+    if (auto load = dyn_cast<memref::LoadOp>(op)) {
+      auto type = cast<MemRefType>(load.getMemRefType());
+      if (auto p = dict(op, "plan.scalar")) {
+        SmallVector<int64_t> strides;
+        require(op,
+                string(p, "engine") == "rvv" && string(p, "kind") == "load" &&
+                    integer(p, "elements") == 1 && type.getRank() == 1 &&
+                    type.getShape() == ArrayRef<int64_t>{1} &&
+                    matchPattern(load.getIndices()[0], m_Zero()) &&
+                    staticType(load.getMemRef(), strides) && strides[0] == 1 &&
+                    string(placement(load.getMemRef()), "level") == "spm",
+                "scalar snapshot requires a complete private SPM singleton");
+        binding(op, dict(p, "input"), 0);
+      } else
+        require(op,
+                type.getRank() == 0 &&
+                    string(placement(load.getMemRef()), "level") == "host",
+                "scalar load must access planned host rank-zero storage");
+    }
     if (auto store = dyn_cast<memref::StoreOp>(op))
       require(op,
               cast<MemRefType>(store.getMemRef().getType()).getRank() == 0 &&
@@ -808,20 +1005,201 @@ private:
               "if requires an exclusive-arms scope plan");
     }
   }
+  void verifyMatrixTransfer(memref::CopyOp copy, DictionaryAttr p,
+                            int64_t count, int64_t size, int64_t sourceStride,
+                            int64_t targetStride, bool internal = false) {
+    Operation *op = copy;
+    auto source = cast<MemRefType>(copy.getSource().getType());
+    auto target = cast<MemRefType>(copy.getTarget().getType());
+    int64_t element = bytes(source.getElementType());
+    bool geometry =
+        matrixtransfer::isSupportedElementType(source.getElementType()) &&
+        matrixtransfer::getCommonUnitAxis(source, target).has_value() &&
+        source.getRank() == 2 && target.getRank() == 2 && size % 4 == 0 &&
+        sourceStride % 4 == 0 && targetStride % 4 == 0;
+    require(op, geometry,
+            "matrix transport requires exact rank-two raw32 rows");
+    if (!geometry)
+      return;
+    int64_t total;
+    require(op,
+            !llvm::MulOverflow(count, size, total) &&
+                integer(p, "total_bytes") == total &&
+                integer(p, "temp_bytes") == 0 &&
+                string(p, "reason") ==
+                    (internal ? "nonoverlapping-spm-exact-acc32-rectangle"
+                              : "dma-illegal-exact-acc32-rectangle"),
+            "matrix transfer byte accounting or selection reason is invalid");
+    for (auto [type, key, pitch] :
+         {std::tuple{source, StringRef("source_layout"), sourceStride},
+          std::tuple{target, StringRef("target_layout"), targetStride}}) {
+      auto layout = dict(p, key);
+      SmallVector<int64_t> strides;
+      int64_t offset;
+      auto shape = layout ? layout.getAs<DenseI64ArrayAttr>("shape")
+                          : DenseI64ArrayAttr();
+      auto recorded = layout ? layout.getAs<DenseI64ArrayAttr>("strides")
+                             : DenseI64ArrayAttr();
+      int64_t axis = integer(layout, "contiguous_axis");
+      bool exact = succeeded(type.getStridesAndOffset(strides, offset)) &&
+                   shape && recorded && shape.asArrayRef() == type.getShape() &&
+                   recorded.asArrayRef() == ArrayRef<int64_t>(strides) &&
+                   axis >= 0 && axis < 2 && strides[axis] == 1 &&
+                   type.getDimSize(axis) == size / element &&
+                   type.getDimSize(1 - axis) == count &&
+                   integer(layout, "element_bits") == element * 8 &&
+                   integer(layout, "descriptor_offset") == offset &&
+                   integer(layout, "rows") == count &&
+                   integer(layout, "row_bytes") == size &&
+                   integer(layout, "row_pitch") == pitch &&
+                   string(layout, "origin") == "effective-pointer";
+      require(op, exact, "matrix layout evidence disagrees with its endpoint");
+    }
+    auto tiles = p.getAs<ArrayAttr>("tiles");
+    if (!tiles || tiles.empty())
+      return;
+    require(op, integer(p, "completion") == int64_t(tiles.size()) - 1,
+            "matrix completion must name the final tile");
+    int64_t row = 0, column = 0;
+    for (auto [index, attribute] : llvm::enumerate(tiles)) {
+      auto tile = dyn_cast<DictionaryAttr>(attribute);
+      int64_t rows = std::min(matrixtransfer::kMaxRows, count - row);
+      int64_t width = std::min(matrixtransfer::kMaxRowBytes, size - column);
+      bool exact =
+          tile && row < count && integer(tile, "id") == int64_t(index) &&
+          integer(tile, "predecessor") == int64_t(index) - 1 &&
+          integer(tile, "source_offset") == row * sourceStride + column &&
+          integer(tile, "target_offset") == row * targetStride + column &&
+          integer(tile, "source_pitch") == sourceStride &&
+          integer(tile, "target_pitch") == targetStride &&
+          integer(tile, "rows") == rows &&
+          integer(tile, "row_bytes") == width &&
+          integer(tile, "instruction_bits") ==
+              matrixtransfer::kInstructionBits &&
+          integer(tile, "register_count") == matrixtransfer::kRegisterCount &&
+          integer(tile, "mtype") == matrixtransfer::kMtype &&
+          string(tile, "register_class") == matrixtransfer::kRegisterClass;
+      require(op, exact,
+              "matrix tiles must exactly cover the rectangle in dependency "
+              "order with the supported ACC32 configuration");
+      if (!exact)
+        return;
+      column += width;
+      if (column == size) {
+        column = 0;
+        row += rows;
+      }
+    }
+    require(op, row == count && column == 0,
+            "matrix tiles leave required elements uncovered");
+  }
+  void verifyInternalTransfer(memref::CopyOp copy, DictionaryAttr p) {
+    Operation *op = copy;
+    auto source = dyn_cast<MemRefType>(copy.getSource().getType());
+    auto target = dyn_cast<MemRefType>(copy.getTarget().getType());
+    auto axis = matrixtransfer::getCommonUnitAxis(source, target);
+    bool geometry = axis && source.getShape() == target.getShape();
+    require(op, geometry,
+            "internal copy requires equally shaped supported rank-two "
+            "storage with a common physical contiguous axis");
+    if (!geometry)
+      return;
+    for (MemRefType type : {source, target}) {
+      SmallVector<int64_t> strides;
+      int64_t offset;
+      if (failed(type.getStridesAndOffset(strides, offset)) ||
+          offset == ShapedType::kDynamic) {
+        require(op, false, "internal copy requires static descriptor offsets");
+        return;
+      }
+    }
+    auto sourceLayout = *matrixtransfer::getLayout(source, *axis);
+    auto targetLayout = *matrixtransfer::getLayout(target, *axis);
+    auto chunks = dict(p, "chunks");
+    require(op,
+            string(p, "role") == "internal" &&
+                string(p, "engine") == "matrix" && string(p, "from") == "spm" &&
+                string(p, "to") == "spm" &&
+                string(p, "recipe") == "spm-acc32-spm" &&
+                string(p, "temporary_window") == "none" &&
+                string(p, "ordering") == "synchronous-fenced-tiles" &&
+                string(p, "wait") == "after-each-tile" &&
+                integer(chunks, "count") == sourceLayout.rows &&
+                integer(chunks, "bytes") == sourceLayout.rowBytes &&
+                integer(chunks, "source_stride") == sourceLayout.pitch &&
+                integer(chunks, "target_stride") == targetLayout.pitch,
+            "internal copy recipe, effective geometry or completion policy "
+            "disagrees with the supported synchronous SPM-ACC32-SPM path");
+    SmallVector<std::tuple<int64_t, int64_t, int64_t>> ranges;
+    for (auto [index, value] :
+         llvm::enumerate(ValueRange{copy.getSource(), copy.getTarget()})) {
+      auto selected =
+          dict(p, index == 0 ? "source_endpoint" : "target_endpoint");
+      auto window = placement(value);
+      auto range = byteBounds(value);
+      auto origin = spmdma::getStaticPointerOrigin(value);
+      auto offset = spmdma::getStaticDescriptorOffset(value);
+      int64_t begin, end;
+      bool valid =
+          privateRoot(root(value)) && string(window, "level") == "spm" &&
+          origin && origin->byteShift >= 0 && offset && *offset >= 0 && range &&
+          range->first >= 0 && range->second <= integer(window, "capacity") &&
+          aligned(value, 4) &&
+          !llvm::AddOverflow(integer(window, "offset"), range->first, begin) &&
+          !llvm::AddOverflow(integer(window, "offset"), range->second, end);
+      require(op, valid,
+              "internal copy endpoint requires a static bounded and aligned "
+              "private SPM window");
+      if (!valid)
+        return;
+      require(
+          op,
+          integer(selected, "operand") == int64_t(index) &&
+              string(selected, "level") == "spm" &&
+              integer(selected, "bank") == integer(window, "bank") &&
+              integer(selected, "window_offset") == integer(window, "offset") &&
+              integer(selected, "capacity") == integer(window, "capacity") &&
+              integer(selected, "begin") == begin &&
+              integer(selected, "end") == end,
+          "internal copy endpoint evidence disagrees with its physical "
+          "SPM placement and full effective range");
+      ranges.emplace_back(integer(window, "bank"), begin, end);
+    }
+    auto [sourceBank, sourceBegin, sourceEnd] = ranges[0];
+    auto [targetBank, targetBegin, targetEnd] = ranges[1];
+    require(op,
+            root(copy.getSource()) != root(copy.getTarget()) &&
+                (sourceBank != targetBank || sourceEnd <= targetBegin ||
+                 targetEnd <= sourceBegin),
+            "internal copy requires distinct nonaliasing roots and "
+            "nonoverlapping physical SPM ranges");
+    verifyMatrixTransfer(copy, p, sourceLayout.rows, sourceLayout.rowBytes,
+                         sourceLayout.pitch, targetLayout.pitch, true);
+  }
   void verifyTransfer(memref::CopyOp copy) {
     Operation *op = copy;
     auto p = dict(op, "plan.transfer"), chunks = dict(p, "chunks");
+    if (string(p, "role") == "internal" ||
+        (string(p, "from") == "spm" && string(p, "to") == "spm")) {
+      verifyInternalTransfer(copy, p);
+      return;
+    }
     bool load = string(p, "from") == "ddr" && string(p, "to") == "spm";
     bool store = string(p, "from") == "spm" && string(p, "to") == "ddr";
     int64_t count = integer(chunks, "count"), size = integer(chunks, "bytes");
     int64_t ddrStride = integer(chunks, "ddr_stride"),
             spmStride = integer(chunks, "spm_stride");
+    bool segmented = string(p, "engine") == "segmented";
+    bool matrix = string(p, "engine") == "matrix";
     bool legal =
-        p && chunks && (load || store) && string(p, "engine") == "dma" &&
-        string(p, "wait") == "after-each-chunk" && count > 0 && size > 0 &&
-        size % 64 == 0 && ddrStride >= 0 && spmStride >= 0 &&
-        (count == 1 || (ddrStride >= size && spmStride >= size &&
-                        ddrStride % 64 == 0 && spmStride % 64 == 0));
+        p && chunks && (load || store) && count > 0 && size > 0 &&
+        ddrStride >= 0 && spmStride >= 0 &&
+        (count == 1 || (ddrStride >= size && spmStride >= size)) &&
+        ((matrix && string(p, "wait") == "after-each-tile") ||
+         (segmented && string(p, "wait") == "after-each-segment") ||
+         (string(p, "engine") == "dma" &&
+          string(p, "wait") == "after-each-chunk" && size % 64 == 0 &&
+          (count == 1 || (ddrStride % 64 == 0 && spmStride % 64 == 0))));
     require(op, legal,
             "unsupported DMA direction, chunks, stride, or wait policy");
     if (!legal)
@@ -829,10 +1207,15 @@ private:
     Value spm = load ? copy.getTarget() : copy.getSource();
     Value ddr = load ? copy.getSource() : copy.getTarget();
     auto window = placement(spm);
+    auto sourceType = dyn_cast<MemRefType>(copy.getSource().getType());
+    auto targetType = dyn_cast<MemRefType>(copy.getTarget().getType());
+    int64_t element = sourceType ? bytes(sourceType.getElementType()) : 0;
+    int64_t alignment = matrix ? 4 : segmented ? element : 64;
     require(op,
-            string(window, "level") == "spm" &&
+            alignment > 0 && string(window, "level") == "spm" &&
                 integer(window, "bank") == integer(p, "channel") &&
-                argumentRoot(root(ddr)) && aligned(ddr) && aligned(spm),
+                argumentRoot(root(ddr)) && aligned(ddr, alignment) &&
+                aligned(spm, alignment),
             "DMA endpoints, channel/bank, or alignment disagree with the plan");
     bounds(op, spm);
     bounds(op, ddr);
@@ -870,14 +1253,84 @@ private:
               "DMA chunks do not exactly cover the operand physical layout");
       axes.push_back(axis);
     }
-    auto sourceType = cast<MemRefType>(copy.getSource().getType());
-    auto targetType = cast<MemRefType>(copy.getTarget().getType());
-    require(
-        op,
+    bool matching =
+        sourceType && targetType &&
         sourceType.getShape() == targetType.getShape() &&
-            sourceType.getElementType() == targetType.getElementType() &&
-            axes.size() == 2 && axes[0] >= 0 && axes[0] == axes[1],
+        sourceType.getElementType() == targetType.getElementType() &&
+        axes.size() == 2 && axes[0] >= 0 && axes[0] == axes[1];
+    require(
+        op, matching,
         "DMA cannot change the logical shape or transpose its contiguous axis");
+    if (matrix && matching && element) {
+      verifyMatrixTransfer(copy, p, count, size, load ? ddrStride : spmStride,
+                           load ? spmStride : ddrStride);
+      return;
+    }
+    if (!segmented || !matching || !element)
+      return;
+    auto segments = p.getAs<ArrayAttr>("segments");
+    if (!segments || segments.empty())
+      return;
+    require(op, integer(p, "completion") == int64_t(segments.size()) - 1,
+            "transfer completion must name the final segment");
+    auto sourceResidue = spmdma::getEndpointByteRemainder(copy.getSource());
+    auto targetResidue = spmdma::getEndpointByteRemainder(copy.getTarget());
+    int64_t sourceStride = load ? ddrStride : spmStride;
+    int64_t targetStride = load ? spmStride : ddrStride;
+    int64_t row = 0, cursor = 0;
+    for (auto [index, attribute] : llvm::enumerate(segments)) {
+      auto segment = cast<DictionaryAttr>(attribute);
+      int64_t srcOffset = integer(segment, "source_offset");
+      int64_t dstOffset = integer(segment, "target_offset");
+      int64_t length = integer(segment, "bytes");
+      int64_t srcBegin = 0, dstBegin = 0, end = 0;
+      bool coverage = row < count && length > 0 && srcOffset >= 0 &&
+                      dstOffset >= 0 && srcOffset % element == 0 &&
+                      dstOffset % element == 0 && length % element == 0 &&
+                      !llvm::MulOverflow(row, sourceStride, srcBegin) &&
+                      !llvm::AddOverflow(srcBegin, cursor, srcBegin) &&
+                      !llvm::MulOverflow(row, targetStride, dstBegin) &&
+                      !llvm::AddOverflow(dstBegin, cursor, dstBegin) &&
+                      srcOffset == srcBegin && dstOffset == dstBegin &&
+                      !llvm::AddOverflow(cursor, length, end) && end <= size;
+      require(
+          op, coverage,
+          "transfer segments must exactly cover each physical row in order");
+      if (!coverage)
+        return;
+      require(op,
+              integer(segment, "id") == int64_t(index) &&
+                  integer(segment, "predecessor") == int64_t(index) - 1 &&
+                  !string(segment, "reason").empty(),
+              "transfer segment dependency, id, or reason is invalid");
+      StringRef engine = string(segment, "engine");
+      if (engine == "dma") {
+        require(op,
+                length % 64 == 0 && alignedRoot(ddr) && alignedRoot(spm) &&
+                    sourceResidue && targetResidue &&
+                    (*sourceResidue + srcOffset % 64) % 64 == 0 &&
+                    (*targetResidue + dstOffset % 64) % 64 == 0 &&
+                    !segment.get("vector_bytes"),
+                "DMA segment requires both actual endpoints and length "
+                "to be 64-byte aligned");
+      } else if (engine == "rvv") {
+        int64_t vectorBytes = integer(segment, "vector_bytes");
+        require(op,
+                element != 2 && vectorBytes > 0 && vectorBytes <= 64 &&
+                    vectorBytes % element == 0 && length % vectorBytes == 0 &&
+                    aligned(ddr, element) && aligned(spm, element),
+                "RVV segment requires naturally aligned exact element vectors");
+      } else {
+        require(op, false, "unknown transfer segment engine");
+      }
+      cursor = end;
+      if (cursor == size) {
+        ++row;
+        cursor = 0;
+      }
+    }
+    require(op, row == count && cursor == 0,
+            "transfer segments leave required elements uncovered");
   }
   void verifyMatmul(linalg::MatmulOp matmul) {
     Operation *op = matmul;
@@ -906,6 +1359,25 @@ private:
     binding(op, dict(p, "b"), 1);
     binding(op, dict(p, "accumulator"), 2);
     binding(op, dict(p, "output"), 2);
+    if (auto init = dict(p, "initialization")) {
+      auto proof = getZeroAccumulatorInit(matmul);
+      auto fillPlan = proof ? dict(proof->fill, "plan.fill") : DictionaryAttr();
+      require(op,
+              proof && dict(op, "contract.task") &&
+                  dict(proof->fill, "contract.task") &&
+                  string(init, "kind") ==
+                      (proof->loop ? "first-iteration-zero" : "zero") &&
+                  integer(init, "task") ==
+                      integer(proof ? dict(proof->fill, "contract.task")
+                                    : DictionaryAttr(),
+                              "id") &&
+                  string(fillPlan, "engine") == "ame" &&
+                  string(fillPlan, "kind") == "deferred-zero" &&
+                  integer(fillPlan, "consumer") ==
+                      integer(dict(op, "contract.task"), "id"),
+              "zero accumulator initialization lacks an exact private zero "
+              "fill, complete coverage, or first-iteration lifetime proof");
+    }
     require(op, matmul.getCast() == linalg::TypeFn::cast_signed,
             "AME requires signed i8 multiplication");
     auto a = cast<MemRefType>(matmul.getInputs()[0].getType());

@@ -25,6 +25,7 @@
 #include "Dialect/BOSCAME/TileOps.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
@@ -315,6 +316,143 @@ buddy::boscame::verifyTileMatrixValue(Operation *op, Value value, TileRole role,
 // Op verifiers
 //===----------------------------------------------------------------------===//
 
+/// Resolve the complete logical endpoint against its declared SPM window,
+/// rather than just one register-sized tile. Checking the complete ranges
+/// prevents an early tile's store from destroying a later tile's source.
+struct MatrixSpmRange {
+  Value root;
+  int64_t bank;
+  int64_t begin;
+  int64_t end;
+};
+
+static std::optional<MatrixSpmRange>
+getMatrixSpmRange(Value endpoint, const matrixtransfer::Layout &layout) {
+  auto type = dyn_cast<MemRefType>(endpoint.getType());
+  auto bank = spmdma::getSpmBank(type);
+  auto origin = spmdma::getStaticPointerOrigin(endpoint);
+  auto window = origin ? origin->root.getDefiningOp<SpmViewOp>() : SpmViewOp();
+  if (!bank || !origin || !window || origin->byteShift < 0 ||
+      window.getBank() != *bank)
+    return std::nullopt;
+  auto windowBytes = spmdma::getContiguousZeroOffsetByteSize(window.getType());
+  SmallVector<int64_t> strides;
+  int64_t offset, begin, end, windowEnd;
+  if (!windowBytes || failed(type.getStridesAndOffset(strides, offset)) ||
+      offset == ShapedType::kDynamic || offset < 0 ||
+      llvm::MulOverflow(offset, layout.elementBytes, begin) ||
+      llvm::AddOverflow(begin, origin->byteShift, begin) ||
+      llvm::AddOverflow(begin, static_cast<int64_t>(window.getOffset()),
+                        begin) ||
+      llvm::MulOverflow(layout.rows - 1, layout.pitch, end) ||
+      llvm::AddOverflow(end, layout.rowBytes, end) ||
+      llvm::AddOverflow(end, begin, end) ||
+      llvm::AddOverflow(static_cast<int64_t>(window.getOffset()), *windowBytes,
+                        windowEnd) ||
+      begin < static_cast<int64_t>(window.getOffset()) || end > windowEnd ||
+      begin < 0 || end > spmdma::kSpmBankCapacityBytes)
+    return std::nullopt;
+  return MatrixSpmRange{origin->root, *bank, begin, end};
+}
+
+LogicalResult MatrixCopyOp::verify() {
+  ModuleOp module = getOperation()->getParentOfType<ModuleOp>();
+  auto target = module ? module->getAttrOfType<StringAttr>("bosc_ame.target")
+                       : StringAttr();
+  if (!target || target.getValue() != "nr-fpga")
+    return emitOpError("requires the explicit bosc_ame.target=nr-fpga "
+                       "raw ACC32 memory contract");
+  auto sourceType = dyn_cast<MemRefType>(getSource().getType());
+  auto targetType = dyn_cast<MemRefType>(getTarget().getType());
+  if (!sourceType || !targetType ||
+      !matrixtransfer::isSupportedElementType(sourceType.getElementType()) ||
+      !matrixtransfer::isSupportedElementType(targetType.getElementType()))
+    return emitOpError(
+        "supports only signless i8/i16/i32/i64 or f32/f64 logical "
+        "storage through the raw ACC32 memory path");
+  auto axis = matrixtransfer::getCommonUnitAxis(sourceType, targetType);
+  if (!axis || sourceType.getShape() != targetType.getShape())
+    return emitOpError("requires equally shaped static rank-2 endpoints of the "
+                       "same element type with a common physical unit axis");
+  if (getInstructionBits() != matrixtransfer::kInstructionBits ||
+      getRegisterCount() != matrixtransfer::kRegisterCount ||
+      getRegisterClass() != matrixtransfer::kRegisterClass ||
+      getMtype() != matrixtransfer::kMtype)
+    return emitOpError("supports only one raw ACC32 register with "
+                       "instruction_bits=32, register_class=acc and "
+                       "mtype=65602 on the NR target");
+
+  auto sourceLayout = matrixtransfer::getLayout(sourceType, *axis);
+  auto targetLayout = matrixtransfer::getLayout(targetType, *axis);
+  auto sourceOrigin = matrixtransfer::getBlockOrigin(
+      *sourceLayout, getSourceOffset(), getRows(), getRowBytes(),
+      getSourcePitch());
+  auto targetOrigin = matrixtransfer::getBlockOrigin(
+      *targetLayout, getTargetOffset(), getRows(), getRowBytes(),
+      getTargetPitch());
+  if (!sourceOrigin || !targetOrigin || sourceOrigin != targetOrigin)
+    return emitOpError("requires matching in-bounds row/column origins, exact "
+                       "word-aligned ranges and pitches, at most 64 rows and "
+                       "256 bytes per row; copying through pitch padding is "
+                       "forbidden");
+
+  bool sourceSpm = isa_and_nonnull<SPMAttr>(sourceType.getMemorySpace());
+  bool targetSpm = isa_and_nonnull<SPMAttr>(targetType.getMemorySpace());
+  if ((!sourceSpm && !targetSpm) ||
+      (!sourceSpm && sourceType.getMemorySpace()) ||
+      (!targetSpm && targetType.getMemorySpace()))
+    return emitOpError("requires an SPM/external DDR boundary or two proven "
+                       "independent SPM endpoints; physical TR/ACC values are "
+                       "not memory endpoints");
+
+  if (sourceSpm && targetSpm) {
+    auto source = getMatrixSpmRange(getSource(), *sourceLayout);
+    auto destination = getMatrixSpmRange(getTarget(), *targetLayout);
+    if (!source || !destination)
+      return emitOpError("internal matrix copy requires static endpoint ranges "
+                         "bounded by their declared SPM windows and banks");
+    if (source->root == destination->root ||
+        (source->bank == destination->bank &&
+         source->begin < destination->end && destination->begin < source->end))
+      return emitOpError("internal matrix copy requires independent, "
+                         "nonoverlapping complete SPM endpoint ranges");
+    for (Value endpoint : {getSource(), getTarget()})
+      if (failed(spmdma::verifyEndpointPointerAlignment(*this, endpoint,
+                                                        "matrix copy", 4)))
+        return failure();
+    return success();
+  }
+
+  Value ddr = sourceSpm ? getTarget() : getSource();
+  auto root = dyn_cast_or_null<BlockArgument>(getDirectDdrRoot(ddr));
+  auto rootType =
+      root ? dyn_cast<BaseMemRefType>(root.getType()) : BaseMemRefType();
+  auto function = root ? dyn_cast<func::FuncOp>(root.getOwner()->getParentOp())
+                       : func::FuncOp();
+  if (!root || !root.getOwner()->isEntryBlock() || !function || !rootType ||
+      rootType.getMemorySpace() || !module ||
+      !SymbolTable::symbolKnownUseEmpty(function, module))
+    return emitOpError("DDR endpoint must trace to an external entry argument "
+                       "whose caller alignment contract applies");
+  auto abi = module->getAttrOfType<DictionaryAttr>("contract.abi");
+  auto alignment =
+      abi ? abi.getAs<IntegerAttr>("args_aligned_bytes") : IntegerAttr();
+  auto legacy = module->getAttrOfType<StringAttr>(spmdma::kDmaAbiAttrName);
+  bool aligned =
+      alignment && alignment.getInt() >= 4 && alignment.getInt() % 4 == 0;
+  if (!aligned && !abi && legacy)
+    aligned = legacy.getValue() == spmdma::kDmaAbiAligned ||
+              legacy.getValue() == spmdma::kDmaAbiAlignedNonAliasing;
+  if (!aligned)
+    return emitOpError("requires an entry ABI proving at least 4-byte root "
+                       "alignment divisible by 4");
+  for (Value endpoint : {getSource(), getTarget()})
+    if (failed(spmdma::verifyEndpointPointerAlignment(*this, endpoint,
+                                                      "matrix copy", 4)))
+      return failure();
+  return success();
+}
+
 /// Shape and element type of the memory operand and of the matrix value must
 /// describe the same logical tile.
 static LogicalResult verifyLoadShape(Operation *op, TileRole role,
@@ -360,6 +498,12 @@ LogicalResult TileLoadAccOp::verify() {
                                    shape)))
     return failure();
   return verifyLoadShape(*this, TileRole::Accumulator, layout, shape);
+}
+
+LogicalResult TileZeroAccOp::verify() {
+  std::array<int64_t, 2> shape;
+  return verifyTileMatrixValue(*this, getMatrix(), TileRole::Accumulator,
+                               shape);
 }
 
 LogicalResult TileStoreAccOp::verify() {
@@ -419,6 +563,12 @@ LogicalResult TileMmaOp::verify() {
 //===----------------------------------------------------------------------===//
 // Memory effects
 //===----------------------------------------------------------------------===//
+
+void MatrixCopyOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  effects.emplace_back(MemoryEffects::Read::get(), &getSourceMutable());
+  effects.emplace_back(MemoryEffects::Write::get(), &getTargetMutable());
+}
 
 void TileLoadAOp::getEffects(
     SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {

@@ -239,6 +239,11 @@ text = annotated(
         + load("%c", "recovered-load")
         + load("%healthy", "unaffected"),
         arguments="%bound: index",
+    ).replace(
+        # Keep this a real copy: an immutable zero source is now safely
+        # rematerialized as a fill before graph construction.
+        fill("%healthy", "unaffected-initial"),
+        fill("%healthy", "unaffected-initial", "%one"),
     ),
     present=("recover-copy", "recovered-load", "unaffected"),
     absent=("unknown-load", "unknown-source"),

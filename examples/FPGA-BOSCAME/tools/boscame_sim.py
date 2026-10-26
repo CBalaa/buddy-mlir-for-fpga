@@ -1064,6 +1064,24 @@ def interpret_tile_op(op, machine, op_body, op_types):
             for i in range(shape[0])
         ]
         return
+    if name == "bosc_ame.tile.zero_acc":
+        zero_type = parse_result_type(op_types)
+        if not isinstance(zero_type, VectorType):
+            raise SimError("zero_acc requires a 1..64 by 1..64 i32 result")
+        shape = zero_type.shape
+        if (
+            operands
+            or zero_type.element != "i32"
+            or len(shape) != 2
+            or any(not 1 <= size <= 64 for size in shape)
+        ):
+            raise SimError("zero_acc requires a 1..64 by 1..64 i32 result")
+        if machine.outstanding:
+            raise SimError(
+                "zero_acc cannot start a matrix lifetime before DMA wait"
+            )
+        machine.values[result] = [[0] * shape[1] for _ in range(shape[0])]
+        return
     if name == "bosc_ame.tile.mma":
         accumulator = value_of(machine, operands[0])
         lhs = value_of(machine, operands[1])

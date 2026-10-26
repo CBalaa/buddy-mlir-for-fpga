@@ -13,7 +13,8 @@ from pathlib import Path
 SOURCE = Path(sys.argv[1])
 TOOL = sys.argv[2]
 SCALAR_STORE = "v1 has no independent external or SPM scalar-store recipe"
-SCALAR_LOAD = "scalar load must access planned host rank-zero storage"
+SCALAR_LOAD = "scalar snapshot load requires a private SPM singleton"
+HOST_SCALAR_LOAD = "scalar load must access planned host rank-zero storage"
 
 
 def functions(source):
@@ -151,7 +152,13 @@ def memory_cases(cases):
             "disjoint_static_views",
             "unknown_barrier",
         }:
-            reject(output, SCALAR_STORE, "--bosc-ame-plan")
+            reject(
+                output,
+                SCALAR_STORE
+                if name in {"waw", "disjoint_static_views"}
+                else SCALAR_LOAD,
+                "--bosc-ame-plan",
+            )
         elif name == "read_read":
             reject(output, SCALAR_LOAD, "--bosc-ame-plan")
         if name in {"caller", "multiblock_function"}:
@@ -265,9 +272,10 @@ def buffer_cases(cases):
             assert ids(records[0], "input_values") == ids(
                 records[1], "input_values"
             ), (name, output)
+            indices = LOAD.search(source)[1].rsplit("[", 1)[1].split("]", 1)[0]
             reject(
                 output,
-                SCALAR_STORE if name == "shared_root_views" else SCALAR_LOAD,
+                SCALAR_LOAD if "," not in indices else HOST_SCALAR_LOAD,
                 "--bosc-ame-plan",
             )
         # Convert the first original load into a write, preserving its exact

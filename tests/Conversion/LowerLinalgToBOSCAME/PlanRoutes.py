@@ -152,6 +152,41 @@ def main():
     assert "plan.transfer =" in result.stdout
     assert "capacity-fallback-safe-direct" not in result.stdout
 
+    # Non-cache-line A pitches use exact RVV rows in the selected staging
+    # window; B and C retain their independently legal direct DDR routes.
+    result = raw_case(
+        "unaligned_pitch_staging",
+        spacious.replace(
+            "memref<32x128xi8>", "memref<32x128xi8, strided<[129, 1]>>"
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    planned = result.stdout
+    route = next(
+        line for line in planned.splitlines() if "plan.route =" in line
+    )
+    assert 'level = "spm"' in selection(route, "a")
+    assert 'level = "ddr"' in selection(route, "b")
+    assert 'level = "ddr"' in selection(route, "accumulator")
+    assert 'engine = "segmented"' in planned
+    assert 'engine = "rvv"' in planned
+    assert "dma-endpoint-residues-differ" in planned
+    planned_path = work / "unaligned_pitch_staging.planned.mlir"
+    planned_path.write_text(planned)
+    verified = invoke(planned_path, "--bosc-ame-plan-verify")
+    assert verified.returncode == 0, verified.stderr
+    emitted = invoke(planned_path, "--bosc-ame-emit")
+    assert emitted.returncode == 0, emitted.stderr
+    assert "bosc_ame.spm.view" in emitted.stdout
+    assert "vector.load" in emitted.stdout
+    assert "bosc_ame.direct_ddr" in emitted.stdout
+    emitted_path = work / "unaligned_pitch_staging.emitted.mlir"
+    emitted_path.write_text(emitted.stdout)
+    checked = invoke(
+        emitted_path, "--bosc-ame-spm-dma-check", "--lower-bosc-ame"
+    )
+    assert checked.returncode == 0, checked.stderr
+
     for name, bad_source, message in (
         (
             "external_scalar_store",
@@ -169,13 +204,6 @@ def main():
             "capacity_still_exceeded",
             source.replace("memref<131072xi8>", "memref<131136xi8>"),
             "SPM workspace capacity exceeded after legal direct/staging alternatives",
-        ),
-        (
-            "both_routes_unaligned",
-            spacious.replace(
-                "memref<32x128xi8>", "memref<32x128xi8, strided<[129, 1]>>"
-            ),
-            "no legal direct or staging route",
         ),
     ):
         result = raw_case(name, bad_source)

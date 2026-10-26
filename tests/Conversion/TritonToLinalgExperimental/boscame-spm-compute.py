@@ -255,12 +255,15 @@ def main():
     Machine(loop_path, "rank_two_add").launch({"%arg0": matrix_bytes})
     assert struct.unpack("<32I", matrix_bytes) == (0x80000000,) * 32
     for source, error in (
-        (SUPPORTED_SOURCE.replace("1024xf32", "1007xf32"), "complete"),
+        (
+            SUPPORTED_SOURCE.replace("1024xf32", "1007xf32"),
+            "exact vector width",
+        ),
         (
             SUPPORTED_SOURCE.replace(
                 "arith.mulf %in, %in", "math.powf %in, %in"
             ),
-            "generic requires one pure arithmetic operation",
+            "unsupported lane-wise scalar expression",
         ),
         (
             SUPPORTED_SOURCE.replace(

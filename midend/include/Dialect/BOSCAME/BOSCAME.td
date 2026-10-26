@@ -347,6 +347,30 @@ def TileLoadAccOp : BOSCAME_Op<"tile.load_acc",
   let hasVerifier = 1;
 }
 
+def TileZeroAccOp : BOSCAME_Op<"tile.zero_acc", [Pure]> {
+  let summary = "Create an i32 zero accumulator without reading memory or old contents";
+  let description = [{
+    Returns an `M x N` all-zero i32 accumulator. The operation has no input
+    accumulator or memory operand, so it introduces no old-content dependency.
+    It initializes a reduction; it must not replace an accumulated value at
+    a later K block.
+
+    ```mlir
+    %zero = bosc_ame.tile.zero_acc : vector<64x64xi32>
+    ```
+
+    The NR backend configures the effective M/N and 16-bit widening mode, then
+    emits only the verified `mwsub.mm` or `mwsub.h.mm` self-clear with
+    `dst == src1 == src2`. Register choice is a backend detail. This operation
+    does not expose general accumulator subtraction and reads no zero buffer.
+    Subsequent MMA and stores program their own mtype. First version:
+    `i32`, `1 <= M, N <= 64`.
+  }];
+  let results = (outs BOSCAME_MatrixType:$matrix);
+  let assemblyFormat = "attr-dict `:` type($matrix)";
+  let hasVerifier = 1;
+}
+
 def TileMmaOp : BOSCAME_Op<"tile.mma", [Pure]> {
   let summary = "Accumulate A x B into C on the AME matrix multiply-accumulate unit";
   let description = [{
@@ -428,6 +452,43 @@ def TileStoreAccOp : BOSCAME_Op<"tile.store_acc",
   let arguments = (ins BOSCAME_MatrixType:$matrix, AnyMemRef:$dest);
   let assemblyFormat = "$matrix `,` $dest attr-dict `:` type($matrix) `,` "
                        "type($dest)";
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
+// Exact matrix-register memory transport
+//===----------------------------------------------------------------------===//
+
+def MatrixCopyOp : BOSCAME_Op<"matrix.copy",
+    [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Copy an exact rectangle through one raw NR ACC32 register";
+  let description = [{
+    Copies an exact byte rectangle between DDR and SPM, or between independent
+    nonoverlapping SPM windows, without arithmetic,
+    conversion or transposition. Offsets are bytes from each original
+    endpoint's effective pointer; pitches and row_bytes are also bytes.
+    Logical i8/i16/i32/i64 and floating-point storage can share the raw e32
+    memory path only when every address and row range is word aligned.
+
+    The bounded NR subset requires instruction_bits=32, register_count=1,
+    register_class="acc", mtype=65602, at most 64 rows and 256 bytes per row.
+    It reserves ACC0 for a single ordered config/load/store bundle enclosed
+    by fence rw,rw. No matrix value or runtime call crosses the bundle.
+    The ordinary mlce32/msce32 pair accesses only its configured effective
+    rectangle; whole-register operations and rounded-up tails are forbidden.
+    Internal copies retain both logical buffers in SPM and use ACC0 only for
+    the duration of this bundle. They allocate no additional SPM window.
+    Complete endpoint ranges, rather than just each tile, must be disjoint.
+    Physical TR/ACC SSA values are not memref endpoints; this operation does
+    not implement register-class conversion or persistent register copies.
+  }];
+  let arguments = (ins AnyMemRef:$source, AnyMemRef:$target,
+                       I64Attr:$source_offset, I64Attr:$target_offset,
+                       I64Attr:$rows, I64Attr:$row_bytes,
+                       I64Attr:$source_pitch, I64Attr:$target_pitch,
+                       I64Attr:$instruction_bits, I64Attr:$register_count,
+                       I64Attr:$mtype, StrAttr:$register_class);
+  let assemblyFormat = "$source `,` $target attr-dict `:` type($source) `,` type($target)";
   let hasVerifier = 1;
 }
 

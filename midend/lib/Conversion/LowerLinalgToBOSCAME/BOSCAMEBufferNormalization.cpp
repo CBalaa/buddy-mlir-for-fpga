@@ -153,6 +153,12 @@ linalg::GenericOp normalizeTailSelect(linalg::GenericOp generic) {
 void normalizeArithmetic(linalg::GenericOp generic) {
   Block &body = generic.getRegion().front();
   auto yield = cast<linalg::YieldOp>(body.getTerminator());
+  // Dynamic scalar inputs have explicit content dependencies and are
+  // broadcast by the selected vector recipe. Materializing one full buffer
+  // per scalar would recreate the storage eliminated by tensor fusion.
+  if (llvm::any_of(generic.getInputs(),
+                   [](Value input) { return input.getType().isIntOrFloat(); }))
+    return;
   if (generic.getNumDpsInputs() == 1 && body.getOperations().size() == 1 &&
       yield.getValues()[0] == body.getArgument(0) &&
       isa<MemRefType>(generic.getInputs()[0].getType())) {
@@ -184,8 +190,21 @@ void normalizeArithmetic(linalg::GenericOp generic) {
       return (!arg || arg.getOwner() != &body) && value.getDefiningOp() != last;
     });
   });
-  if (body.getOperations().size() == 2 && !scalar && !captures)
-    return;
+  if (body.getOperations().size() == 2 && !scalar) {
+    bool constantCaptures = llvm::all_of(last->getOperands(), [&](Value value) {
+      auto argument = dyn_cast<BlockArgument>(value);
+      if (argument && argument.getOwner() == &body)
+        return true;
+      auto constant = value.getDefiningOp<arith::ConstantOp>();
+      return constant && constant->getBlock() != &body &&
+             isa<IntegerAttr, FloatAttr>(constant.getValue());
+    });
+    // Constants can be broadcast directly into vector registers. In
+    // particular, a strict +0 left after tensor storage normalization must
+    // not recreate an entire zero matrix and its SPM window here.
+    if (!captures || constantCaptures)
+      return;
+  }
   if (!independentLanes(generic))
     return;
   OpBuilder builder(generic);

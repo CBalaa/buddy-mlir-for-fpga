@@ -48,10 +48,12 @@
 #include "Dialect/BOSCAME/BOSCAMEAttrs.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
+#include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "Dialect/BOSCAME/TileOps.h"
 
 #include "BOSCAMEConversionUtils.h"
 
+#include "mlir/Analysis/Liveness.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -198,6 +200,44 @@ public:
                         TileRole::Accumulator, converter, context) {}
 };
 
+/// No accumulator input or memory read is introduced. The output constraint
+/// makes the physical destination explicit to LLVM, and spelling the same
+/// output three times enforces the only board-verified subtraction subset.
+class TileZeroAccOpConversion : public ConvertToLLVMPattern {
+public:
+  TileZeroAccOpConversion(const LLVMTypeConverter &converter,
+                          MLIRContext *context)
+      : ConvertToLLVMPattern(TileZeroAccOp::getOperationName(), context,
+                             converter, tilePatternBenefit()) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto zero = cast<TileZeroAccOp>(op);
+    auto type = cast<VectorType>(zero.getMatrix().getType());
+    Type resultType = buddy::boscame::detail::getBOSCAMERegisterType(type);
+    if (!resultType)
+      return rewriter.notifyMatchFailure(op, "unsupported accumulator type");
+    SmallVector<Value> arguments;
+    // The standalone clear_acc probe uses TYPE_I16=0x21 for both tested
+    // widening clear forms, then TYPE_I8=0x10 for signed-i8 MMA.
+    for (int64_t value :
+         {type.getShape()[0], type.getShape()[1], int64_t(0x21)})
+      arguments.push_back(buddy::boscame::detail::createI64Constant(
+          rewriter, op->getLoc(), value));
+    auto clear = LLVM::InlineAsmOp::create(
+        rewriter, op->getLoc(), resultType, arguments,
+        "fence rw, rw\n\tmsettilem zero, $1\n\tmsettilen zero, $2\n\t"
+        "msettype zero, $3\n\tmwsub.h.mm $0, $0, $0\n\tfence rw, rw",
+        "={acc0},r,r,r,~{memory}",
+        /*has_side_effects=*/true, /*is_align_stack=*/false,
+        LLVM::TailCallKind::None, /*convergent=*/false, LLVM::AsmDialectAttr(),
+        ArrayAttr());
+    rewriter.replaceOp(op, clear.getResults());
+    return success();
+  }
+};
+
 /// `bosc_ame.tile.mma` -> `bosc_ame.intr.mqma.b.mm`.
 ///
 /// The accumulator is carried by SSA, so the MMA itself only has to guarantee
@@ -304,14 +344,67 @@ public:
   }
 };
 
+/// A matrix copy is one indivisible side-effecting operation. The memory
+/// clobber preserves its dependencies; the ACC0 clobber is visible to LLVM's
+/// allocator. No matrix value or runtime call is introduced between the load
+/// and store. The leading fence orders prior CPU/RVV accesses; the final fence
+/// completes the store before later DMA/AME consumers.
+class MatrixCopyOpConversion : public ConvertToLLVMPattern {
+public:
+  MatrixCopyOpConversion(const LLVMTypeConverter &converter,
+                         MLIRContext *context)
+      : ConvertToLLVMPattern(MatrixCopyOp::getOperationName(), context,
+                             converter, tilePatternBenefit()) {}
+
+  LogicalResult
+  matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto copy = cast<MatrixCopyOp>(op);
+    Location loc = copy.getLoc();
+    auto pointer = [&](unsigned index, int64_t offset) -> Value {
+      Value base = buddy::boscame::detail::extractPointerFromDescriptor(
+          rewriter, loc, operands[index], op->getOperand(index).getType(),
+          *getTypeConverter());
+      if (!base || !offset)
+        return base;
+      Value shift =
+          buddy::boscame::detail::createI64Constant(rewriter, loc, offset);
+      return LLVM::GEPOp::create(rewriter, loc, base.getType(),
+                                 rewriter.getI8Type(), base, ValueRange{shift});
+    };
+    Value source = pointer(0, copy.getSourceOffset());
+    Value target = pointer(1, copy.getTargetOffset());
+    if (!source || !target)
+      return rewriter.notifyMatchFailure(
+          op, "cannot decode matrix copy endpoint descriptors");
+    SmallVector<Value> arguments{source, target};
+    for (int64_t value :
+         {copy.getRows(), copy.getRowBytes() / 4, copy.getSourcePitch(),
+          copy.getTargetPitch(), copy.getMtype()})
+      arguments.push_back(
+          buddy::boscame::detail::createI64Constant(rewriter, loc, value));
+    LLVM::InlineAsmOp::create(
+        rewriter, loc, TypeRange{}, arguments,
+        "fence rw, rw\n\tmsettilem zero, $2\n\tmsettilen zero, $3\n\t"
+        "msettype zero, $6\n\tmlce32.m acc0, ($0), $4\n\t"
+        "msce32.m acc0, ($1), $5\n\tfence rw, rw",
+        "r,r,r,r,r,r,r,~{acc0},~{memory}",
+        /*has_side_effects=*/true, /*is_align_stack=*/false,
+        LLVM::TailCallKind::None, /*convergent=*/false, LLVM::AsmDialectAttr(),
+        ArrayAttr());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // Matrix value scope
 //===----------------------------------------------------------------------===//
 
 /// True when `op` produces an AME matrix value.
 bool isTileValueProducer(Operation *op) {
-  return isa_and_nonnull<TileLoadAOp, TileLoadBOp, TileLoadAccOp, TileMmaOp>(
-      op);
+  return isa_and_nonnull<TileLoadAOp, TileLoadBOp, TileLoadAccOp, TileZeroAccOp,
+                         TileMmaOp>(op);
 }
 
 /// True when `value` is a legal *source* of a matrix value.
@@ -351,6 +444,36 @@ bool isMatrixValueSource(Value value, StringRef &origin) {
 bool isMatrixValueType(Value value) {
   auto vector = dyn_cast<VectorType>(value.getType());
   return vector && vector.getRank() == 2;
+}
+
+/// Also recognize the lower-level one-dimensional scalable matrix spelling,
+/// including a value carried through a loop or a temporary conversion cast.
+bool isMatrixTransferClobberedValue(Value value, unsigned depth = 0) {
+  auto vector = dyn_cast<VectorType>(value.getType());
+  if (!vector || depth > 32)
+    return false;
+  if (vector.getRank() == 2)
+    return true;
+  if (auto argument = dyn_cast<BlockArgument>(value)) {
+    auto loop =
+        dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
+    return loop && argument.getArgNumber() > 0 &&
+           isMatrixTransferClobberedValue(
+               loop.getInitArgs()[argument.getArgNumber() - 1], depth + 1);
+  }
+  Operation *producer = value.getDefiningOp();
+  if (!producer)
+    return false;
+  if (producer->getName().getStringRef().starts_with("bosc_ame."))
+    return true;
+  if (auto loop = dyn_cast<scf::ForOp>(producer))
+    return isMatrixTransferClobberedValue(
+        loop.getInitArgs()[cast<OpResult>(value).getResultNumber()], depth + 1);
+  if (auto conversion = dyn_cast<UnrealizedConversionCastOp>(producer))
+    return llvm::any_of(conversion.getOperands(), [&](Value operand) {
+      return isMatrixTransferClobberedValue(operand, depth + 1);
+    });
+  return false;
 }
 
 /// The first version has no matrix-value ABI: a matrix value has to come from a
@@ -461,9 +584,8 @@ LogicalResult verifyBlockTileValues(Block &block) {
 bool buddy::boscame::hasTileOps(ModuleOp module) {
   bool found = false;
   module.walk([&](Operation *op) {
-    found |=
-        isa<TileLoadAOp, TileLoadBOp, TileLoadAccOp, TileMmaOp, TileStoreAccOp>(
-            op);
+    found |= isa<TileLoadAOp, TileLoadBOp, TileLoadAccOp, TileZeroAccOp,
+                 TileMmaOp, TileStoreAccOp, MatrixCopyOp>(op);
   });
   return found;
 }
@@ -504,6 +626,39 @@ LogicalResult buddy::boscame::verifyBOSCAMETileValues(ModuleOp module) {
       for (Block &block : region)
         ok &= succeeded(verifyBlockTileValues(block));
   });
+  // A transfer reserves one physical accumulator and changes the global
+  // matrix configuration. Reject any live matrix SSA value, including a TR
+  // value or an enclosing loop's carried accumulator. Checking enclosing
+  // operations also catches a value read before/after an entire nested scope
+  // even when it has no direct use inside the copy's own block.
+  Liveness liveness(module);
+  module.walk([&](MatrixCopyOp copy) {
+    for (Operation *position = copy; position != module;
+         position = position->getParentOp()) {
+      const LivenessBlockInfo *info =
+          liveness.getLiveness(position->getBlock());
+      if (!info)
+        continue;
+      for (Value value : info->currentlyLiveValues(position)) {
+        Operation *producer = value.getDefiningOp();
+        // An enclosing region operation's result does not exist until that
+        // region returns. The expansive block-liveness query includes it at
+        // the parent operation, but it is not a value crossing this copy.
+        if (position != copy && producer &&
+            (producer == position || position->isProperAncestor(producer)))
+          continue;
+        if (!isMatrixTransferClobberedValue(value))
+          continue;
+        copy.emitOpError()
+            << "cannot execute while TR/ACC matrix value " << value
+            << " is live; matrix copies reserve ACC0 and reconfigure the "
+               "matrix unit, and cannot cross a live or loop-carried matrix "
+               "value";
+        ok = false;
+        return;
+      }
+    }
+  });
   return success(ok);
 }
 
@@ -515,6 +670,7 @@ void buddy::boscame::populateBOSCAMETileLoweringPatterns(
   (void)options;
   MLIRContext *context = patterns.getContext();
   patterns.add<TileLoadAOpConversion, TileLoadBOpConversion,
-               TileLoadAccOpConversion, TileMmaOpConversion,
-               TileStoreAccOpConversion>(converter, context);
+               TileLoadAccOpConversion, TileZeroAccOpConversion,
+               TileMmaOpConversion, TileStoreAccOpConversion,
+               MatrixCopyOpConversion>(converter, context);
 }

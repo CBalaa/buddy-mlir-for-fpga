@@ -206,6 +206,18 @@ module attributes {
             ),
         ),
         (
+            "wrong_common_lane_count",
+            norm.replace("lanes = 16 : i64", "lanes = 64 : i64", 1),
+        ),
+        (
+            "zero_common_lane_count",
+            norm.replace("lanes = 16 : i64", "lanes = 0 : i64", 1),
+        ),
+        (
+            "wrong_common_lane_type",
+            norm.replace("lanes = 16 : i64", "lanes = 16 : i32", 1),
+        ),
+        (
             "scalar_capture",
             norm.replace("arith.subf %lhs, %rhs", "arith.subf %lhs, %zero", 1),
         ),

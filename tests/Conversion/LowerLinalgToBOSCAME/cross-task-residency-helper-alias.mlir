@@ -5,15 +5,16 @@
 // RUN: not buddy-opt %t/fresh.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=FRESH
 
 // Retain all original helper/caller alias relationships. The reader has a
-// multi-operation generic payload; the produced value is read after an
+// potentially overlapping helper operands without an exact-address proof;
+// the produced value is read after an
 // external terminal write; the entry has a DDR-to-DDR boundary; the fresh
 // helper has no entry-ABI alignment proof for its required DDR write.
 // Entry ABI isolation for called helpers is tested directly by
 // tests/KernelContract/entry-abi.py and PlanWorkspaceCalls.py.
-// READER: kernel contract V25: generic requires one pure arithmetic operation
+// READER: kernel contract V25: overlapping views must have identical element addresses
 // PRODUCED: kernel contract V23/V24: v1 does not support reading an external region after its terminal write
 // ENTRY: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
-// FRESH: no legal DMA route: endpoint alignment or SPM placement is unproven
+// FRESH: no legal boundary route: natural endpoint alignment, element type, or SPM placement is unproven
 
 //--- reader.mlir
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {

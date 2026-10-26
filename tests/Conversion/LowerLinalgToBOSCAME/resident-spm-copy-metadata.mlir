@@ -1,8 +1,10 @@
-// RUN: not buddy-opt %s '--linalg-to-boscame=buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s
+// RUN: buddy-opt %s '--linalg-to-boscame=buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>&1 | FileCheck %s --check-prefix=PLAN
+// RUN: FileCheck %s --check-prefix=EMIT < %t
+// RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null
 
-// V1 boundary recipes require one external endpoint; the original
-// internal SPM-to-SPM copy is unsupported. Typed DMA completion and graph
-// metadata are checked by physical-adapter.py and the BOSCAME dialect tests.
+// The pitched internal copy uses a synchronous raw ACC32 transfer between
+// independent fixed windows. Its completion retains the predecessor on the
+// external DMA load and the original load provenance.
 module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   func.func @pitched_copy_graph(
       %input: memref<64xf32> {bosc_ame.logical_value_id = 10 : i64,
@@ -50,4 +52,19 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// CHECK: v1 planned copy requires exactly one external DDR endpoint
+// PLAN: memref.copy plan.transfer={chunks = {bytes = 64 : i64, count = 2 : i64, source_stride = 128 : i64, target_stride = 64 : i64}
+// PLAN-SAME: recipe = "spm-acc32-spm", role = "internal"
+// PLAN-SAME: temp_bytes = 0 : i64, temporary_window = "none"
+// PLAN-SAME: source_pitch = 128 : i64
+// PLAN-SAME: target_pitch = 64 : i64
+// PLAN-SAME: total_bytes = 128 : i64
+
+// EMIT: %[[DMA:.*]] = bosc_ame.dma.start
+// EMIT: bosc_ame.dma.wait %[[DMA]]
+// EMIT-SAME: contract.task = {barrier_after = true, id = 0 : i64
+// EMIT-SAME: output_values = array<i64: 1>, predecessors = array<i64>
+// EMIT: bosc_ame.matrix.copy
+// EMIT-SAME: contract.provenance = {source_lineage_complete = true, source_load_origin_ids = array<i64: 0>}
+// EMIT-SAME: contract.task = {barrier_after = false, id = 1 : i64, input_values = array<i64: 1>, kind = "copy", output_values = array<i64: 2>, predecessors = array<i64: 0>
+// EMIT-SAME: source_pitch = 128 : i64
+// EMIT-SAME: target_pitch = 64 : i64

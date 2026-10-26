@@ -3,14 +3,14 @@
 // control flow must fail explicitly instead of claiming a complete graph.
 // CONTRACT-CASE: dynamic_seed_sum = reject: kernel contract V25: pointwise update requires parallel identity indexing
 // CONTRACT-CASE: generic_reduction = reject: kernel contract V25: pointwise update requires parallel identity indexing
-// CONTRACT-CASE: hidden_read = reject: kernel contract V25: generic requires one pure arithmetic operation
-// CONTRACT-CASE: hidden_write = reject: kernel contract V25: generic requires one pure arithmetic operation
+// CONTRACT-CASE: hidden_read = reject: kernel contract V25: generic requires pure scalar arithmetic operations
+// CONTRACT-CASE: hidden_write = reject: kernel contract V25: generic requires pure scalar arithmetic operations
 // CONTRACT-CASE: multi_operation_reduction = reject: kernel contract V25: pointwise update requires parallel identity indexing
 // CONTRACT-CASE: multi_output_extrema = complete
 // CONTRACT-CASE: nan_neutral_with_nnan = reject: kernel contract V25: pointwise update requires parallel identity indexing
 // CONTRACT-CASE: nan_neutral_without_nnan = reject: kernel contract V25: pointwise update requires parallel identity indexing
 // CONTRACT-CASE: parallel_and_fill = complete
-// CONTRACT-CASE: unknown_call = reject: kernel contract V25: generic requires one pure arithmetic operation
+// CONTRACT-CASE: unknown_call = reject: kernel contract V25: generic requires pure scalar arithmetic operations
 // CONTRACT-CASE: unmatched_multi_operation_combiner = reject: kernel contract V25: pointwise update requires parallel identity indexing
 // CONTRACT-CASE: vector_element_maximum = reject: kernel contract V25: pointwise update requires parallel identity indexing
 // CONTRACT-CASE: zero_filled_sum = reject: kernel contract V25: pointwise update requires parallel identity indexing

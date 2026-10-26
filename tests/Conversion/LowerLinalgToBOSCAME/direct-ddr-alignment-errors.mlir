@@ -1,7 +1,9 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.emitted.mlir
+// RUN: FileCheck %s < %t.emitted.mlir
+// RUN: buddy-opt %t.emitted.mlir --bosc-ame-spm-dma-check --lower-bosc-ame -o /dev/null
 
-// A static descriptor offset of one i32 is four bytes. Both direct AME
-// access and DMA staging reject this unaligned external endpoint.
+// A static descriptor offset of one i32 is four bytes. Direct AME compute
+// access is illegal, so the planner stages C through exact ACC32 copies.
 module {
   func.func @gemm(%a: memref<64x64xi8>,
                   %b: memref<64x64xi8, strided<[1, 64]>>,
@@ -14,4 +16,12 @@ module {
   }
 }
 
-// CHECK: no legal direct or staging route: external operand requires aligned endpoints, complete cache lines, and a DMA-compatible physical layout
+// CHECK-LABEL: func.func @gemm
+// CHECK: %[[C:.*]] = bosc_ame.spm.view
+// CHECK: bosc_ame.matrix.copy %arg2, %[[C]]
+// CHECK-SAME: row_bytes = 256 : i64, rows = 64 : i64
+// CHECK: bosc_ame.tile.load_acc
+// CHECK: bosc_ame.tile.mma
+// CHECK: bosc_ame.tile.store_acc
+// CHECK: bosc_ame.matrix.copy %[[C]], %arg2
+// CHECK-SAME: source_pitch = 256 : i64

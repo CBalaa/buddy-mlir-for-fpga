@@ -1827,6 +1827,8 @@ private:
     if (failed(ranked))
       return op.emitError("neutral contract load requires a ranked DDR view");
     ptr = *ranked;
+    SmallVector<OpFoldResult> mask =
+        op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{};
     SmallVector<int64_t> strides;
     int64_t offset;
     if (failed(cast<MemRefType>(ptr.getType())
@@ -1839,13 +1841,24 @@ private:
     // Preserve the physical contiguous axis, not the DDR pitch. A snapshot
     // owns exactly one logical tile, including padding for a masked load.
     // Source and destination subviews below retain their independent layouts.
+    // Prove separation using the actual copied rectangle. In particular a
+    // short K may have a dense DDR pitch smaller than the padded tile width;
+    // excluded lanes belong only to the private snapshot, never to DDR.
+    auto accessedExtent = [&](unsigned axis) {
+      int64_t logical = tensorType.getDimSize(axis);
+      if (!mask.empty())
+        if (auto valid = getConstantIntValue(mask[axis]);
+            valid && *valid >= 0 && *valid <= logical)
+          return *valid;
+      return logical;
+    };
     bool rowMajor = false;
     if (tensorType.getRank() == 1 && strides.size() == 1 && strides[0] == 1)
       rowMajor = true;
     else if (tensorType.getRank() == 2 && strides.size() == 2) {
-      if (strides[1] == 1 && strides[0] >= tensorType.getDimSize(1))
+      if (strides[1] == 1 && strides[0] >= accessedExtent(1))
         rowMajor = true;
-      else if (strides[0] != 1 || strides[1] < tensorType.getDimSize(0))
+      else if (strides[0] != 1 || strides[1] < accessedExtent(0))
         return op.emitError(
             "neutral contract load requires a non-overlapping rectangular "
             "layout with a static unit-stride axis");
@@ -1896,8 +1909,6 @@ private:
                     rewriter.getDictionaryAttr({rewriter.getNamedAttr(
                         "padding", rewriter.getBoolAttr(true))}));
     }
-    SmallVector<OpFoldResult> mask =
-        op.hasMask() ? op.getMixedMaskDims() : SmallVector<OpFoldResult>{};
     Value source = ptr;
     Value destination = snapshot;
     if (op.hasMask()) {

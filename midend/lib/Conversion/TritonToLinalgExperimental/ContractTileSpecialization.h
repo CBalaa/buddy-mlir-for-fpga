@@ -8,7 +8,8 @@
 #include "mlir/Support/LogicalResult.h"
 
 namespace mlir::triton {
-/// Specialize proven rectangular load/store bounds before graph annotation.
+/// Split proven partial last loop iterations and specialize rectangular
+/// load/store bounds while accumulators are tensors, before graph annotation.
 LogicalResult specializeContractTiles(ModuleOp module);
 } // namespace mlir::triton
 

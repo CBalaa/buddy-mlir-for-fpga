@@ -1,8 +1,7 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o /dev/null 2>&1 | FileCheck %s
+// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --implicit-check-not=bosc_ame.spm.view --implicit-check-not=bosc_ame.dma.start
 
-// Preserve the original thirteen-input arithmetic chain. This generic is
-// outside the V1 single-arithmetic recipe, so no bank-search result is claimed.
-// Supported multi-task physical capacity is covered by PlanRoutes.mlir/py.
+// Preserve the original thirteen-input arithmetic chain. Its supported scalar
+// DAG uses external RVV operands directly and needs no private bank capacity.
 module {
   func.func @large_greedy(
       %x0: memref<16xf32>, %x1: memref<16xf32>,
@@ -50,4 +49,7 @@ module {
   }
 }
 
-// CHECK: kernel contract V25: generic requires one pure arithmetic operation
+// CHECK-LABEL: func.func @large_greedy
+// CHECK-COUNT-13: vector.load {{.*}} {bosc_ame.direct_ddr}
+// CHECK-COUNT-12: arith.addf {{.*}} : vector<16xf32>
+// CHECK: vector.store {{.*}} {bosc_ame.direct_ddr}

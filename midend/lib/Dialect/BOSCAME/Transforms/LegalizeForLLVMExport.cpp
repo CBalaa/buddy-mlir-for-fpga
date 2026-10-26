@@ -346,7 +346,7 @@ public:
 
     // The SPM view and the DMA requests have dedicated conversion patterns
     // with a higher benefit; never fabricate an intrinsic for them.
-    if (isa<SpmViewOp, DmaStartOp, DmaWaitOp>(op))
+    if (isa<SpmViewOp, DmaStartOp, DmaWaitOp, MatrixCopyOp>(op))
       return failure();
 
     // The tile operations are handled by `BOSCAMETileLowering.cpp`, which
@@ -355,8 +355,8 @@ public:
     // `bosc_ame.intr.tile.*` operation: those do not exist, and even if they
     // did, the naming convention of this pattern cannot express the slot, the
     // stride or the configuration sequence.
-    if (isa<TileLoadAOp, TileLoadBOp, TileLoadAccOp, TileMmaOp, TileStoreAccOp>(
-            op))
+    if (isa<TileLoadAOp, TileLoadBOp, TileLoadAccOp, TileZeroAccOp, TileMmaOp,
+            TileStoreAccOp>(op))
       return failure();
 
     const auto &converter =

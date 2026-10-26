@@ -192,12 +192,73 @@ Operation *emitTransfer(memref::CopyOp copy) {
   OpBuilder b(copy);
   Location loc = copy.getLoc();
   auto p = plan(copy, "plan.transfer"), chunks = nested(p, "chunks");
+  Operation *completion = nullptr;
+  if (text(p, "engine") == "matrix") {
+    // Configuration, offsets, exact extents and predecessor order have all
+    // been verified. Each atomic operation owns its scratch accumulator and
+    // completes before the next tile; emission makes no route decisions.
+    for (Attribute attribute : p.getAs<ArrayAttr>("tiles")) {
+      auto tile = cast<DictionaryAttr>(attribute);
+      OperationState state(loc, MatrixCopyOp::getOperationName());
+      state.addOperands({copy.getSource(), copy.getTarget()});
+      for (StringRef name :
+           {"source_offset", "target_offset", "rows", "row_bytes",
+            "source_pitch", "target_pitch", "instruction_bits",
+            "register_class", "register_count", "mtype"})
+        state.addAttribute(name, tile.get(name));
+      completion = b.create(state);
+    }
+    return completion;
+  }
+  // Boundary-only fields do not apply to a verified internal SPM copy. Both
+  // matrix directions above use the recorded endpoint types and atomic tiles.
   bool load = text(p, "from") == "ddr";
   int64_t sourceStride = number(chunks, load ? "ddr_stride" : "spm_stride");
   int64_t targetStride = number(chunks, load ? "spm_stride" : "ddr_stride");
   int64_t size = number(chunks, "bytes"), count = number(chunks, "count");
   int64_t channel = number(p, "channel");
-  Operation *completion = nullptr;
+  if (text(p, "engine") == "segmented") {
+    // The verifier has proved exact coverage, address legality, and this
+    // predecessor order. Complete every segment before starting its successor;
+    // no DMA request or RVV value survives into the next segment.
+    for (Attribute attribute : p.getAs<ArrayAttr>("segments")) {
+      auto segment = cast<DictionaryAttr>(attribute);
+      int64_t segmentBytes = number(segment, "bytes");
+      Value source = endpoint(b, loc, copy.getSource(),
+                              number(segment, "source_offset"), segmentBytes);
+      Value target = endpoint(b, loc, copy.getTarget(),
+                              number(segment, "target_offset"), segmentBytes);
+      if (text(segment, "engine") == "dma") {
+        auto token = DmaStartOp::create(
+            b, loc, DMATokenType::get(b.getContext(), channel), source, target,
+            index(b, loc, segmentBytes), b.getI32IntegerAttr(channel));
+        completion = DmaWaitOp::create(b, loc, token.getToken());
+        continue;
+      }
+      auto type = cast<MemRefType>(source.getType());
+      int64_t width = elementBytes(type.getElementType());
+      int64_t lanes = number(segment, "vector_bytes") / width;
+      auto loop = scf::ForOp::create(b, loc, index(b, loc, 0),
+                                     index(b, loc, segmentBytes / width),
+                                     index(b, loc, lanes));
+      {
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPointToStart(loop.getBody());
+        // Each vector's declared lane count is exact and divides this segment.
+        // Fixed-vector legalization selects an adequate LMUL for the target's
+        // minimum VLEN and sets AVL to these lanes, including short tails.
+        auto loaded = vector::LoadOp::create(
+            b, loc, VectorType::get({lanes}, type.getElementType()), source,
+            ValueRange{loop.getInductionVar()});
+        auto stored = vector::StoreOp::create(
+            b, loc, loaded, target, ValueRange{loop.getInductionVar()});
+        (load ? loaded.getOperation() : stored.getOperation())
+            ->setAttr("bosc_ame.direct_ddr", b.getUnitAttr());
+      }
+      completion = loop;
+    }
+    return completion;
+  }
   for (int64_t i = 0; i < count; ++i) {
     Value source = endpoint(b, loc, copy.getSource(), i * sourceStride, size);
     Value target = endpoint(b, loc, copy.getTarget(), i * targetStride, size);
@@ -215,33 +276,57 @@ Operation *emitMatmul(linalg::MatmulOp matmul) {
   auto p = plan(matmul, "plan.route"), tile = nested(p, "tile"),
        sub = nested(p, "subtiles");
   int64_t m = number(tile, "m"), n = number(tile, "n"), k = number(tile, "k");
-  Operation *completion = nullptr;
-  for (int64_t ni = 0; ni < number(sub, "n"); ++ni) {
-    Value c = tileSubview(b, loc, matmul.getOutputs()[0], 0, ni * n, m, n);
-    auto accType = VectorType::get({m, n}, b.getI32Type());
-    auto acc = TileLoadAccOp::create(b, loc, accType, c);
-    direct(acc, nested(p, "accumulator"), b);
-    Value accumulator = acc.getMatrix();
-    for (int64_t ki = 0; ki < number(sub, "k"); ++ki) {
-      Value a = tileSubview(b, loc, matmul.getInputs()[0], 0, ki * k, m, k);
-      Value operandB =
-          tileSubview(b, loc, matmul.getInputs()[1], ki * k, ni * n, k, n);
-      auto lhs = TileLoadAOp::create(b, loc,
-                                     VectorType::get({m, k}, b.getI8Type()), a);
-      auto rhs = TileLoadBOp::create(
-          b, loc, VectorType::get({k, n}, b.getI8Type()), operandB);
-      direct(lhs, nested(p, "a"), b);
-      direct(rhs, nested(p, "b"), b);
-      auto mma = TileMmaOp::create(b, loc, accType, accumulator,
-                                   lhs.getMatrix(), rhs.getMatrix());
-      mma->setAttr("bosc_ame.ordered", b.getUnitAttr());
-      accumulator = mma.getMatrix();
+  auto emitTiles = [&](bool zero) -> Operation * {
+    Operation *completion = nullptr;
+    for (int64_t ni = 0; ni < number(sub, "n"); ++ni) {
+      Value c = tileSubview(b, loc, matmul.getOutputs()[0], 0, ni * n, m, n);
+      auto accType = VectorType::get({m, n}, b.getI32Type());
+      Value accumulator;
+      if (zero) {
+        accumulator = TileZeroAccOp::create(b, loc, accType).getMatrix();
+      } else {
+        auto acc = TileLoadAccOp::create(b, loc, accType, c);
+        direct(acc, nested(p, "accumulator"), b);
+        accumulator = acc.getMatrix();
+      }
+      for (int64_t ki = 0; ki < number(sub, "k"); ++ki) {
+        Value a = tileSubview(b, loc, matmul.getInputs()[0], 0, ki * k, m, k);
+        Value operandB =
+            tileSubview(b, loc, matmul.getInputs()[1], ki * k, ni * n, k, n);
+        auto lhs = TileLoadAOp::create(
+            b, loc, VectorType::get({m, k}, b.getI8Type()), a);
+        auto rhs = TileLoadBOp::create(
+            b, loc, VectorType::get({k, n}, b.getI8Type()), operandB);
+        direct(lhs, nested(p, "a"), b);
+        direct(rhs, nested(p, "b"), b);
+        auto mma = TileMmaOp::create(b, loc, accType, accumulator,
+                                     lhs.getMatrix(), rhs.getMatrix());
+        mma->setAttr("bosc_ame.ordered", b.getUnitAttr());
+        accumulator = mma.getMatrix();
+      }
+      auto store = TileStoreAccOp::create(b, loc, accumulator, c);
+      direct(store, nested(p, "output"), b);
+      completion = store;
     }
-    auto store = TileStoreAccOp::create(b, loc, accumulator, c);
-    direct(store, nested(p, "output"), b);
-    completion = store;
-  }
-  return completion;
+    return completion;
+  };
+  auto init = p.getAs<DictionaryAttr>("initialization");
+  if (!init)
+    return emitTiles(false);
+  if (text(init, "kind") == "zero")
+    return emitTiles(true);
+  // Each arm owns its complete tile lifetime. Matrix values never cross an
+  // if-result ABI or a DMA/runtime call, and memory holds every K backedge.
+  auto loop = cast<scf::ForOp>(matmul->getParentOp());
+  auto first =
+      arith::CmpIOp::create(b, loc, arith::CmpIPredicate::eq,
+                            loop.getInductionVar(), loop.getLowerBound());
+  auto branch = scf::IfOp::create(b, loc, first, true);
+  b.setInsertionPointToStart(&branch.getThenRegion().front());
+  emitTiles(true);
+  b.setInsertionPointToStart(&branch.getElseRegion().front());
+  emitTiles(false);
+  return branch;
 }
 
 Operation *emitFill(linalg::FillOp fill) {
@@ -250,6 +335,14 @@ Operation *emitFill(linalg::FillOp fill) {
   auto p = plan(fill, "plan.fill");
   Value output = fill.getOutputs()[0], scalar = fill.getInputs()[0];
   auto type = cast<MemRefType>(output.getType());
+  if (text(p, "engine") == "ame") {
+    // Logical initialization remains a graph task. Its private contents are
+    // materialized by the proven first consumer, without zero memory traffic.
+    auto deferred = scf::ExecuteRegionOp::create(b, loc, TypeRange{});
+    b.setInsertionPointToStart(&deferred.getRegion().emplaceBlock());
+    scf::YieldOp::create(b, loc);
+    return deferred;
+  }
   if (text(p, "level") == "host")
     return memref::StoreOp::create(b, loc, scalar, output, ValueRange{});
   int64_t lanes =
@@ -278,9 +371,7 @@ Operation *emitGeneric(linalg::GenericOp generic) {
   OpBuilder b(generic);
   Location loc = generic.getLoc();
   auto p = plan(generic, "plan.vector");
-  auto outputType = cast<MemRefType>(generic.getOutputs()[0].getType());
-  int64_t lanes =
-      number(p, "vector_bytes") / elementBytes(outputType.getElementType());
+  int64_t lanes = number(p, "lanes");
   auto loop = scf::ForOp::create(b, loc, index(b, loc, 0),
                                  index(b, loc, number(p, "elements")),
                                  index(b, loc, lanes));
@@ -292,22 +383,63 @@ Operation *emitGeneric(linalg::GenericOp generic) {
     if (argument.use_empty())
       continue;
     Value operand = generic->getOperand(i);
-    auto type = cast<MemRefType>(operand.getType());
+    auto type = dyn_cast<MemRefType>(operand.getType());
+    if (!type) {
+      Value broadcast = vector::BroadcastOp::create(
+          b, loc, VectorType::get({lanes}, operand.getType()), operand);
+      mapping.map(argument, broadcast);
+      continue;
+    }
     auto loaded = vector::LoadOp::create(
         b, loc, VectorType::get({lanes}, type.getElementType()), operand,
         ValueRange{loop.getInductionVar()});
     direct(loaded, cast<DictionaryAttr>(selections[i]), b);
     mapping.map(argument, loaded.getResult());
   }
-  Operation &arithmetic = body.front();
-  OperationState state(loc, arithmetic.getName());
-  for (Value operand : arithmetic.getOperands())
-    state.addOperands(mapping.lookup(operand));
-  state.addTypes(VectorType::get({lanes}, arithmetic.getResult(0).getType()));
-  state.addAttributes(arithmetic.getAttrs());
-  Operation *computed = b.create(state);
-  auto stored = vector::StoreOp::create(b, loc, computed->getResult(0),
-                                        generic.getOutputs()[0],
+  if (auto scalars = p.getAs<ArrayAttr>("scalar_operands"))
+    for (Attribute entry : scalars) {
+      auto selection = cast<DictionaryAttr>(entry);
+      auto value = cast<TypedAttr>(selection.get("value"));
+      Value scalar = arith::ConstantOp::create(b, loc, value.getType(), value);
+      Value broadcast = vector::BroadcastOp::create(
+          b, loc, VectorType::get({lanes}, value.getType()), scalar);
+      auto operationIndex = selection.getAs<IntegerAttr>("operation");
+      Operation &arithmetic = *std::next(
+          body.begin(), operationIndex ? operationIndex.getInt() : 0);
+      mapping.map(arithmetic.getOperand(number(selection, "operand")),
+                  broadcast);
+    }
+  for (Operation &arithmetic : body.without_terminator()) {
+    auto type = VectorType::get({lanes}, arithmetic.getResult(0).getType());
+    if (isa<math::AbsFOp>(arithmetic)) {
+      // abs is an exact sign-bit operation, including NaN payloads and -0.
+      // Avoid math-to-libm scalarization and vector spills across fabsf calls.
+      auto bitsType = VectorType::get({lanes}, b.getI32Type());
+      auto bits = arith::BitcastOp::create(
+          b, loc, bitsType, mapping.lookup(arithmetic.getOperand(0)));
+      auto mask = arith::ConstantOp::create(
+          b, loc, DenseElementsAttr::get(bitsType, int32_t{0x7fffffff}));
+      auto positive = arith::AndIOp::create(b, loc, bits, mask);
+      mapping.map(arithmetic.getResult(0),
+                  arith::BitcastOp::create(b, loc, type, positive));
+      continue;
+    }
+    if (auto constant = dyn_cast<arith::ConstantOp>(arithmetic)) {
+      Value scalar = arith::ConstantOp::create(b, loc, constant.getValue());
+      mapping.map(constant.getResult(),
+                  vector::BroadcastOp::create(b, loc, type, scalar));
+      continue;
+    }
+    OperationState state(loc, arithmetic.getName());
+    for (Value operand : arithmetic.getOperands())
+      state.addOperands(mapping.lookup(operand));
+    state.addTypes(type);
+    state.addAttributes(arithmetic.getAttrs());
+    mapping.map(arithmetic.getResult(0), b.create(state)->getResult(0));
+  }
+  Value result = mapping.lookup(
+      cast<linalg::YieldOp>(body.getTerminator()).getValues()[0]);
+  auto stored = vector::StoreOp::create(b, loc, result, generic.getOutputs()[0],
                                         ValueRange{loop.getInductionVar()});
   direct(stored,
          cast<DictionaryAttr>(selections[generic->getNumOperands() - 1]), b);
@@ -329,12 +461,27 @@ Operation *emitReduce(linalg::ReduceOp reduce) {
       vector::LoadOp::create(b, loc, VectorType::get({lanes}, b.getF32Type()),
                              source, ValueRange{loop.getInductionVar()});
   direct(loaded, nested(p, "input"), b);
-  Value next = vector::ReductionOp::create(b, loc, vector::CombiningKind::ADD,
-                                           loaded, loop.getRegionIterArgs()[0]);
+  auto kind = text(p, "strategy") == "ordered-vector-maxnum"
+                  ? vector::CombiningKind::MAXNUMF
+                  : vector::CombiningKind::ADD;
+  Value next = vector::ReductionOp::create(b, loc, kind, loaded,
+                                           loop.getRegionIterArgs()[0]);
   scf::YieldOp::create(b, loc, next);
   b.setInsertionPointAfter(loop);
   return memref::StoreOp::create(b, loc, loop.getResult(0), output,
                                  ValueRange{});
+}
+
+Operation *emitScalarLoad(memref::LoadOp load) {
+  OpBuilder b(load);
+  auto type = cast<MemRefType>(load.getMemRef().getType());
+  auto vector = vector::LoadOp::create(
+      b, load.getLoc(), VectorType::get({1}, type.getElementType()),
+      load.getMemRef(), load.getIndices());
+  auto extracted =
+      vector::ExtractOp::create(b, load.getLoc(), vector, int64_t{0});
+  load.getResult().replaceAllUsesWith(extracted);
+  return extracted;
 }
 
 struct EmitPass : PassWrapper<EmitPass, OperationPass<ModuleOp>> {
@@ -388,7 +535,8 @@ LogicalResult buddy::boscame::emitBOSCAMEPlan(ModuleOp module) {
   SmallVector<Operation *> computations;
   module.walk([&](Operation *op) {
     if (isa<memref::CopyOp, linalg::MatmulOp, linalg::FillOp, linalg::GenericOp,
-            linalg::ReduceOp>(op))
+            linalg::ReduceOp>(op) ||
+        op->hasAttr("plan.scalar"))
       computations.push_back(op);
   });
   for (Operation *op : computations) {
@@ -404,6 +552,8 @@ LogicalResult buddy::boscame::emitBOSCAMEPlan(ModuleOp module) {
       completion = emitGeneric(generic);
     else if (auto reduce = dyn_cast<linalg::ReduceOp>(op))
       completion = emitReduce(reduce);
+    else if (auto load = dyn_cast<memref::LoadOp>(op))
+      completion = emitScalarLoad(load);
     if (!completion)
       return op->emitError(
           "verified plan did not produce a completion operation");

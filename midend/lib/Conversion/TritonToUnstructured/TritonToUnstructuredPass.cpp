@@ -769,6 +769,9 @@ public:
                 auto gather = b.create<tts::GatherOp>(loc, load.getType(), ptr,
                                                       offsetInfo.offset,
                                                       load.getMask(), other);
+                for (NamedAttribute attr : load->getAttrs())
+                  if (attr.getName().strref().starts_with("contract."))
+                    gather->setAttr(attr.getName(), attr.getValue());
 
                 load->replaceAllUsesWith(gather->getResults());
                 load->erase();
@@ -777,8 +780,12 @@ public:
               .Case<triton::StoreOp>([&](triton::StoreOp store) {
                 auto offsetInfo = offsetMap.at(store.getPtr());
                 Value ptr = materializeBasePtr(offsetInfo, loc, b);
-                b.create<tts::ScatterOp>(loc, ptr, offsetInfo.offset,
-                                         store.getValue(), store.getMask());
+                auto scatter =
+                    b.create<tts::ScatterOp>(loc, ptr, offsetInfo.offset,
+                                             store.getValue(), store.getMask());
+                for (NamedAttribute attr : store->getAttrs())
+                  if (attr.getName().strref().starts_with("contract."))
+                    scatter->setAttr(attr.getName(), attr.getValue());
                 store->erase();
                 return success();
               })

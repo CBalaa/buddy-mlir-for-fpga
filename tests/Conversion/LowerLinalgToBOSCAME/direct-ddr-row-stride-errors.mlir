@@ -1,11 +1,13 @@
 // RUN: split-file %s %t
 // RUN: not buddy-opt %t/vector.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=VECTOR
-// RUN: not buddy-opt %t/ame.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=AME
+// RUN: buddy-opt %t/ame.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t/ame.emitted.mlir
+// RUN: FileCheck %s --check-prefix=AME < %t/ame.emitted.mlir
+// RUN: buddy-opt %t/ame.emitted.mlir --bosc-ame-spm-dma-check --lower-bosc-ame -o /dev/null
 
 // A direct vector store advances by the physical row stride.  65 f32 values
 // per row put the second row at byte offset 260, which is not a cache line.
 // The identity copy is rejected at the V1 DDR-to-DDR boundary. The AME
-// case reaches route selection and rejects the unaligned physical rows.
+// case reaches route selection and stages the non-cache-line pitch via ACC32.
 //--- vector.mlir
 module {
   func.func @copy(%src: memref<64x64xf32>,
@@ -35,4 +37,14 @@ module {
 }
 
 // VECTOR: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
-// AME: no legal direct or staging route: external operand requires aligned endpoints, complete cache lines, and a DMA-compatible physical layout
+// AME-LABEL: func.func @gemm
+// AME: %[[C:.*]] = bosc_ame.spm.view
+// AME: bosc_ame.matrix.copy %arg2, %[[C]]
+// AME-SAME: source_pitch = 260 : i64
+// AME-SAME: target_pitch = 256 : i64
+// AME: bosc_ame.tile.load_acc
+// AME: bosc_ame.tile.mma
+// AME: bosc_ame.tile.store_acc
+// AME: bosc_ame.matrix.copy %[[C]], %arg2
+// AME-SAME: source_pitch = 256 : i64
+// AME-SAME: target_pitch = 260 : i64

@@ -285,6 +285,78 @@ inline bool isProvablyMultipleOf(mlir::OpFoldResult value, int64_t factor) {
   return isProvablyMultipleOf(llvm::dyn_cast<mlir::Value>(value), factor);
 }
 
+/// A known residue is stronger than divisibility: it can prove that a short
+/// prefix makes both endpoints aligned. Unknown residues never authorize DMA.
+inline std::optional<int64_t>
+getKnownRemainder(mlir::Value value, int64_t modulus, unsigned depth = 0) {
+  if (!value || modulus <= 0 || depth > 64)
+    return std::nullopt;
+  auto normalize = [=](int64_t n) {
+    int64_t r = n % modulus;
+    return r < 0 ? r + modulus : r;
+  };
+  if (auto constant = mlir::getConstantIntValue(value))
+    return normalize(*constant);
+  if (modulus == 1 || isProvablyMultipleOf(value, modulus))
+    return 0;
+  auto integerType = llvm::dyn_cast<mlir::IntegerType>(value.getType());
+  if ((modulus & (modulus - 1)) ||
+      (integerType && integerType.getWidth() < 6 &&
+       (uint64_t(1) << integerType.getWidth()) < uint64_t(modulus)))
+    return std::nullopt;
+  auto next = [&](mlir::Value v) {
+    return getKnownRemainder(v, modulus, depth + 1);
+  };
+  auto castRemainder = [&](mlir::Value input) -> std::optional<int64_t> {
+    auto type = llvm::dyn_cast<mlir::IntegerType>(input.getType());
+    // Sign/zero extension preserves only the low bits already present in the
+    // source. In particular extui(-1 : i2) is 3, not 63 modulo 64.
+    if ((modulus & (modulus - 1)) ||
+        (type && type.getWidth() < 6 &&
+         (uint64_t(1) << type.getWidth()) < uint64_t(modulus)))
+      return std::nullopt;
+    return next(input);
+  };
+  mlir::Operation *op = value.getDefiningOp();
+  if (auto add = llvm::dyn_cast_or_null<mlir::arith::AddIOp>(op)) {
+    auto x = next(add.getLhs()), y = next(add.getRhs());
+    int64_t result;
+    if (x && y && !llvm::AddOverflow(*x, *y, result))
+      return normalize(result);
+  } else if (auto sub = llvm::dyn_cast_or_null<mlir::arith::SubIOp>(op)) {
+    auto x = next(sub.getLhs()), y = next(sub.getRhs());
+    if (x && y)
+      return normalize(*x - *y);
+  } else if (auto mul = llvm::dyn_cast_or_null<mlir::arith::MulIOp>(op)) {
+    auto x = next(mul.getLhs()), y = next(mul.getRhs());
+    int64_t result;
+    if ((x && *x == 0) || (y && *y == 0))
+      return 0;
+    if (x && y && !llvm::MulOverflow(*x, *y, result))
+      return normalize(result);
+  } else if (auto cast = llvm::dyn_cast_or_null<mlir::arith::IndexCastOp>(op)) {
+    return castRemainder(cast.getIn());
+  } else if (auto cast = llvm::dyn_cast_or_null<mlir::arith::ExtSIOp>(op)) {
+    return castRemainder(cast.getIn());
+  } else if (auto cast = llvm::dyn_cast_or_null<mlir::arith::ExtUIOp>(op)) {
+    return castRemainder(cast.getIn());
+  } else if (auto select = llvm::dyn_cast_or_null<mlir::arith::SelectOp>(op)) {
+    auto x = next(select.getTrueValue()), y = next(select.getFalseValue());
+    if (x && y && x == y)
+      return x;
+  }
+  return std::nullopt;
+}
+
+inline std::optional<int64_t> getKnownRemainder(mlir::OpFoldResult value,
+                                                int64_t modulus) {
+  if (modulus <= 0)
+    return std::nullopt;
+  if (auto n = mlir::getConstantIntValue(value))
+    return (*n % modulus + modulus) % modulus;
+  return getKnownRemainder(llvm::dyn_cast<mlir::Value>(value), modulus);
+}
+
 /// Static absolute descriptor offset in elements. A reinterpret_cast replaces
 /// the source offset; a subview adds offsets times the SOURCE strides.
 inline std::optional<int64_t> getStaticDescriptorOffset(mlir::Value value) {
@@ -340,7 +412,8 @@ inline bool isDescriptorOffsetAligned(mlir::Value value, int64_t factor) {
   if (auto offset = getStaticDescriptorOffset(value))
     return *offset % factor == 0;
   if (auto cast = value.getDefiningOp<mlir::memref::ReinterpretCastOp>())
-    return isProvablyMultipleOf(cast.getMixedOffsets()[0], factor);
+    return getKnownRemainder(cast.getMixedOffsets()[0], factor) ==
+           std::optional<int64_t>(0);
   if (auto sub = value.getDefiningOp<mlir::memref::SubViewOp>()) {
     if (!isDescriptorOffsetAligned(sub.getSource(), factor))
       return false;
@@ -455,6 +528,100 @@ inline bool isEndpointPointerAlignmentProven(mlir::Value endpoint,
   return true;
 }
 
+inline std::optional<int64_t> getDescriptorOffsetRemainder(mlir::Value value,
+                                                           int64_t modulus) {
+  if (auto offset = getStaticDescriptorOffset(value))
+    return (*offset % modulus + modulus) % modulus;
+  if (auto cast = value.getDefiningOp<mlir::memref::ReinterpretCastOp>())
+    return getKnownRemainder(cast.getMixedOffsets()[0], modulus);
+  if (auto sub = value.getDefiningOp<mlir::memref::SubViewOp>()) {
+    auto result = getDescriptorOffsetRemainder(sub.getSource(), modulus);
+    llvm::SmallVector<int64_t> strides;
+    int64_t ignored;
+    auto type = llvm::cast<mlir::MemRefType>(sub.getSource().getType());
+    if (!result || mlir::failed(type.getStridesAndOffset(strides, ignored)))
+      return std::nullopt;
+    for (auto [part, stride] : llvm::zip(sub.getMixedOffsets(), strides)) {
+      if (stride == mlir::ShapedType::kDynamic || stride < 0)
+        return std::nullopt;
+      int64_t factor = modulus / std::gcd(modulus, stride);
+      auto remainder = getKnownRemainder(part, factor);
+      if (!remainder)
+        return std::nullopt;
+      *result = (*result + *remainder * (stride % modulus)) % modulus;
+    }
+    return result;
+  }
+  if (auto cast = value.getDefiningOp<mlir::memref::CastOp>())
+    return getDescriptorOffsetRemainder(cast.getSource(), modulus);
+  if (auto cast = value.getDefiningOp<mlir::memref::MemorySpaceCastOp>())
+    return getDescriptorOffsetRemainder(cast.getSource(), modulus);
+  if (auto transpose = value.getDefiningOp<mlir::memref::TransposeOp>())
+    return getDescriptorOffsetRemainder(transpose.getIn(), modulus);
+  if (auto collapse = value.getDefiningOp<mlir::memref::CollapseShapeOp>())
+    return getDescriptorOffsetRemainder(collapse.getSrc(), modulus);
+  if (auto expand = value.getDefiningOp<mlir::memref::ExpandShapeOp>())
+    return getDescriptorOffsetRemainder(expand.getSrc(), modulus);
+  return std::nullopt;
+}
+
+/// Residue of the actual effective address, relative to a root whose alignment
+/// is independently checked by the ABI/placement verifier. No IR is created.
+/// Reinterpret casts replace descriptor offsets; only memref.view shifts the
+/// pointer. Keeping these components separate avoids counting offsets twice.
+inline std::optional<int64_t> getEndpointByteRemainder(mlir::Value endpoint,
+                                                       int64_t modulus = 64) {
+  if (modulus <= 0 || modulus > 64)
+    return std::nullopt;
+  if (isEndpointPointerAlignmentProven(endpoint, modulus))
+    return 0;
+  auto type = llvm::dyn_cast<mlir::MemRefType>(endpoint.getType());
+  unsigned width = type ? getSpmElementByteWidth(type.getElementType()) : 0;
+  if (!width)
+    return std::nullopt;
+  auto offset = getDescriptorOffsetRemainder(
+      endpoint, modulus / std::gcd(modulus, int64_t(width)));
+  if (!offset)
+    return std::nullopt;
+  int64_t result = *offset * width % modulus;
+  mlir::Value current = endpoint;
+  llvm::SmallPtrSet<mlir::Operation *, 8> visited;
+  while (mlir::Operation *op = current.getDefiningOp()) {
+    if (!visited.insert(op).second)
+      return std::nullopt;
+    if (auto view = llvm::dyn_cast<mlir::memref::ViewOp>(op)) {
+      auto shift = getKnownRemainder(view.getByteShift(), modulus);
+      if (!shift)
+        return std::nullopt;
+      result = (result + *shift) % modulus;
+      current = view.getSource();
+    } else if (auto sub = llvm::dyn_cast<mlir::memref::SubViewOp>(op)) {
+      current = sub.getSource();
+    } else if (auto cast =
+                   llvm::dyn_cast<mlir::memref::ReinterpretCastOp>(op)) {
+      current = cast.getSource();
+    } else if (auto cast = llvm::dyn_cast<mlir::memref::CastOp>(op)) {
+      current = cast.getSource();
+    } else if (auto cast =
+                   llvm::dyn_cast<mlir::memref::MemorySpaceCastOp>(op)) {
+      current = cast.getSource();
+    } else if (auto transpose = llvm::dyn_cast<mlir::memref::TransposeOp>(op)) {
+      current = transpose.getIn();
+    } else if (auto collapse =
+                   llvm::dyn_cast<mlir::memref::CollapseShapeOp>(op)) {
+      current = collapse.getSrc();
+    } else if (auto expand = llvm::dyn_cast<mlir::memref::ExpandShapeOp>(op)) {
+      current = expand.getSrc();
+    } else {
+      break;
+    }
+  }
+  return (llvm::isa<mlir::BlockArgument>(current) ||
+          isEndpointPointerAlignmentProven(current, modulus))
+             ? std::optional<int64_t>(result)
+             : std::nullopt;
+}
+
 /// Walk the view chain of a DMA endpoint and check that the base pointer it
 /// yields is `alignmentBytes` aligned, given that the storage root is.
 ///
@@ -467,6 +634,12 @@ inline bool isEndpointPointerAlignmentProven(mlir::Value endpoint,
 inline mlir::LogicalResult
 verifyEndpointPointerAlignment(mlir::Operation *op, mlir::Value endpoint,
                                llvm::StringRef what, int64_t alignmentBytes) {
+  // Alignment applies to the effective address, not independently to a view's
+  // byte shift and descriptor offset. A prefix may make their sum aligned.
+  if (alignmentBytes > 0 && alignmentBytes <= 64 &&
+      getEndpointByteRemainder(endpoint, alignmentBytes) ==
+          std::optional<int64_t>(0))
+    return mlir::success();
   auto type = llvm::dyn_cast<mlir::MemRefType>(endpoint.getType());
   unsigned width = type ? getSpmElementByteWidth(type.getElementType()) : 0;
   if (!width ||

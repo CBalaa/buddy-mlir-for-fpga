@@ -21,7 +21,7 @@
 // STAGING: high_water = array<i64: 131072, 65536>
 // STAGING-NOT: plan.transfer
 
-// LEGALITY: pointwise plan requires equal-shaped, same-type contiguous
+// LEGALITY: unsupported lane-wise scalar expression
 
 //--- success.mlir
 module {

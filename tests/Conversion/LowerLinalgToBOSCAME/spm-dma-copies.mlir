@@ -3,8 +3,9 @@
 // supported routes; see PlanRoutes.py, PlanEmitValidation.py,
 // PlanTerminalStore.py, physical-adapter.py and tests/KernelContract/.
 
-// Pure copies use the DMA data path, including typed copies that do not
-// perform arithmetic. Lengths are bytes, and every start is waited immediately.
+// Rank-one private copies remain unsupported. The harness also derives legal
+// DDR boundary copies, which use byte lengths and wait for each DMA start.
+// Rank-two internal ACC copy routes are covered by PlanInternalCopies.py.
 module {
   func.func @copy_i8() {
     %source = bosc_ame.spm.view {bank = 0 : i32, offset = 0 : i64}

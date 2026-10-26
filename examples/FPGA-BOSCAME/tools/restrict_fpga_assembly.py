@@ -17,6 +17,9 @@ directives, and all other instructions prevent sharing across that boundary.
 Opt-in --expand-f32-sub replaces compiler-emitted e32 vfsub.vf with scalar
 sign injection, allowed vfadd.vf, and scalar restoration. This needs no spare
 register and preserves IEEE subtraction and floating-point exception flags.
+Opt-in --expand-vector-merges replaces signed-five-bit vmerge.vim with allowed
+vmerge.vxm. It saves t6 in a temporary 16-byte scalar stack slot, materializes
+the immediate, and restores t6 and sp; no vector register is borrowed.
 Opt-in --order-vector-copies moves an independent scalar counter increment
 past a matching byte-vector store. NR can stall when that increment separates
 the load and store; both memory instructions retain their surrounding fences.
@@ -199,6 +202,43 @@ def _raw_words(code):
     return words
 
 
+def _expand_vector_merge(code):
+    """Preserve an immediate merge without needing a free vector or GPR."""
+    vector = r"(v(?:[0-9]|[12][0-9]|3[01]))"
+    operands = re.fullmatch(
+        r"vmerge\.vim\s+"
+        + vector
+        + r"\s*,\s*"
+        + vector
+        + r"\s*,\s*([+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+))\s*,\s*v0",
+        code,
+    )
+    if not operands:
+        raise ValueError(
+            "vmerge.vim expansion requires vector registers, a signed "
+            "five-bit immediate and explicit v0 mask"
+        )
+    destination, source, literal = operands.groups()
+    immediate = int(literal, 16 if "x" in literal.lower() else 10)
+    if destination == "v0" or not -16 <= immediate <= 15:
+        raise ValueError(
+            "vmerge.vim expansion requires a destination other than v0 "
+            "and an immediate in [-16,15]"
+        )
+    # RISC-V has no red zone, so do not touch caller-owned stack contents.
+    # Keep 16-byte stack alignment, and restore every scalar register before
+    # the next original instruction. The scalar operand is sign-extended by
+    # vmerge.vxm, exactly as the original signed-five-bit immediate for all SEW.
+    return (
+        "\taddi\tsp, sp, -16",
+        "\tsd\tt6, 0(sp)",
+        f"\tli\tt6, {immediate}",
+        f"\tvmerge.vxm\t{destination}, {source}, t6, v0",
+        "\tld\tt6, 0(sp)",
+        "\taddi\tsp, sp, 16",
+    )
+
+
 def transform(
     source,
     coalesce_fences=False,
@@ -206,6 +246,7 @@ def transform(
     order_vector_copies=False,
     order_vector_adds=False,
     insert_fences=True,
+    expand_vector_merges=False,
 ):
     output = []
     executable = True
@@ -327,6 +368,10 @@ def transform(
                 )
                 emit(f"\tfneg.s\t{scalar}, {scalar}")
                 continue
+            if expand_vector_merges and mnemonic == "vmerge.vim":
+                for expanded_line in _expand_vector_merge(code):
+                    emit(expanded_line)
+                continue
             if mnemonic.startswith("v") and mnemonic not in RVV_ALLOWED:
                 raise ValueError(f"RVV instruction not allowed: {code}")
             if (
@@ -424,6 +469,12 @@ def main():
         "allowed vfadd.vf; requires a local e32 vector configuration",
     )
     parser.add_argument(
+        "--expand-vector-merges",
+        action="store_true",
+        help="expand signed-five-bit vmerge.vim using allowed vmerge.vxm; "
+        "preserve t6 with a temporary 16-byte scalar stack slot",
+    )
+    parser.add_argument(
         "--order-vector-copies",
         action="store_true",
         help="move an independent counter increment after a matching byte "
@@ -453,6 +504,7 @@ def main():
             sys.stdin.read(),
             coalesce_fences=args.coalesce_fences,
             expand_f32_sub=args.expand_f32_sub,
+            expand_vector_merges=args.expand_vector_merges,
             order_vector_copies=args.order_vector_copies,
             order_vector_adds=args.order_vector_adds,
             insert_fences=not args.no_fences,

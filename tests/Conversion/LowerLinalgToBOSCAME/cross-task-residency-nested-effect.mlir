@@ -51,4 +51,4 @@ module attributes {bosc_ame.compute_graph_version = 1 : i32} {
   }
 }
 
-// CHECK: kernel contract V25: generic requires one pure arithmetic operation
+// CHECK: kernel contract V25: generic requires pure scalar arithmetic operations

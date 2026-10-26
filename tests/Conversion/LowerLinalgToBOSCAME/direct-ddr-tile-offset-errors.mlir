@@ -18,9 +18,9 @@ module {
   }
 }
 
-// A dynamic descriptor offset is valid only when its divisibility can be
-// proved. An arbitrary i32 offset can put a later C tile at a non-cache-line
-// address, so both direct access and DMA staging reject this endpoint.
+// An arbitrary dynamic descriptor offset can move a later C tile beyond the
+// argument storage. Exact RVV staging handles alignment but cannot replace
+// the missing bounds proof, so this endpoint remains rejected.
 //--- dynamic.mlir
 module {
   func.func @gemm(%a: memref<64x64xi8>,
@@ -38,4 +38,4 @@ module {
 }
 
 // BN: legacy bm/bn/bk overrides are obsolete; geometry is taken from buffer-form Linalg operands
-// DYNAMIC: no legal direct or staging route: external operand requires aligned endpoints, complete cache lines, and a DMA-compatible physical layout
+// DYNAMIC: DDR view exceeds its statically known argument storage

@@ -214,6 +214,27 @@ def encode_mma(
     return word
 
 
+def encode_acc_clear(
+    mnemonic, destination, lhs, rhs, gpr_mode, preserve_matrix_registers
+):
+    indices = [matrix_register(name, "acc") for name in (destination, lhs, rhs)]
+    if len(set(indices)) != 1:
+        raise ValueError("NR accumulator clear requires dst == src1 == src2")
+    accumulator = (
+        0
+        if gpr_mode == "fixed" and not preserve_matrix_registers
+        else indices[0]
+    )
+    word = (
+        (0x2C084077 if mnemonic == "mwsub.mm" else 0x2C081077)
+        | (accumulator << 20)
+        | (accumulator << 15)
+        | (accumulator << 7)
+    )
+    validate_ame_word(word)
+    return word
+
+
 def convert_line(line, gpr_mode="fixed", preserve_matrix_registers=False):
     """Return (converted assembly, changed), rejecting unverified AME forms."""
     if gpr_mode not in GPR_MODES:
@@ -313,6 +334,15 @@ def convert_line(line, gpr_mode="fixed", preserve_matrix_registers=False):
             word | (canonical_matrix << 7),
             code,
         ), True
+    if mnemonic in ("mwsub.mm", "mwsub.h.mm"):
+        if len(operands) != 3:
+            raise ValueError(
+                f"{mnemonic} expects the same Acc register three times"
+            )
+        word = encode_acc_clear(
+            mnemonic, *operands, gpr_mode, preserve_matrix_registers
+        )
+        return f"{indent}.word 0x{word:08x} # {code}", True
     if mnemonic == "mqma.b.mm":
         if len(operands) != 3:
             raise ValueError("mqma.b.mm expects acc, tr, tr")
@@ -359,6 +389,15 @@ def verify_fixed_matrix_schedule(source):
             matrix_register(operands[0], bank)
             physical = "tr1" if mnemonic == "mlbe8.m" else bank + "0"
             contents[physical] = operands[0]
+        elif mnemonic in ("mwsub.mm", "mwsub.h.mm"):
+            if len(operands) != 3:
+                raise ValueError(f"{mnemonic} expects three Acc operands")
+            indices = [matrix_register(value, "acc") for value in operands]
+            if len(set(indices)) != 1:
+                raise ValueError(
+                    "NR accumulator clear requires dst == src1 == src2"
+                )
+            contents["acc0"] = operands[0]
         elif mnemonic == "mqma.b.mm" and len(operands) == 3:
             uses = list(zip(("acc0", "tr0", "tr1"), operands))
         elif mnemonic == "msce32.m":

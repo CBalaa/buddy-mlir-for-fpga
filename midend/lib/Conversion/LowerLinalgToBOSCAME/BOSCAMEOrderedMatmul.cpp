@@ -17,14 +17,61 @@
 using namespace mlir;
 
 namespace {
+struct ElementAccess {
+  Value buffer;
+  SmallVector<Value> indices;
+};
+
+ElementAccess unitStrideElement(OpBuilder &builder, Location loc, Value source,
+                                ValueRange indices) {
+  auto type = cast<MemRefType>(source.getType());
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (succeeded(type.getStridesAndOffset(strides, offset))) {
+    if (strides.back() == 1)
+      return {source, llvm::to_vector(indices)};
+    // A one-lane access has no vectorization order to change. Transposing
+    // a column-major matrix and its indices preserves its exact address.
+    if (type.getRank() == 2 && strides.front() == 1) {
+      Value transposed = memref::TransposeOp::create(
+          builder, loc, source,
+          AffineMapAttr::get(AffineMap::getPermutationMap(
+              ArrayRef<unsigned>{1, 0}, builder.getContext())));
+      return {transposed, {indices[1], indices[0]}};
+    }
+  }
+
+  // vector.load/store require a unit trailing stride even for vector<1>.
+  // Rebuild only the addressed element, including the descriptor offset,
+  // so general strided operands retain the scalar reference semantics.
+  auto metadata =
+      memref::ExtractStridedMetadataOp::create(builder, loc, source);
+  Value address = metadata.getOffset();
+  for (auto [index, stride] : llvm::zip(indices, metadata.getStrides())) {
+    Value displacement =
+        builder.createOrFold<arith::MulIOp>(loc, index, stride);
+    address = builder.createOrFold<arith::AddIOp>(loc, address, displacement);
+  }
+  auto singletonType = MemRefType::get(
+      {1}, type.getElementType(),
+      StridedLayoutAttr::get(builder.getContext(), ShapedType::kDynamic, {1}),
+      type.getMemorySpace());
+  Value singleton = memref::ReinterpretCastOp::create(
+      builder, loc, singletonType, metadata.getBaseBuffer(), address,
+      ArrayRef<OpFoldResult>{builder.getIndexAttr(1)},
+      ArrayRef<OpFoldResult>{builder.getIndexAttr(1)});
+  return {singleton, {arith::ConstantIndexOp::create(builder, loc, 0)}};
+}
+
 Value loadElement(OpBuilder &builder, Location loc, Value source,
                   ValueRange indices) {
   auto type = cast<MemRefType>(source.getType());
   if (!::buddy::boscame::spmdma::getSpmBank(type))
     return memref::LoadOp::create(builder, loc, source, indices);
+  auto access = unitStrideElement(builder, loc, source, indices);
   Value vector = vector::LoadOp::create(
-      builder, loc, VectorType::get({1}, type.getElementType()), source,
-      indices);
+      builder, loc, VectorType::get({1}, type.getElementType()), access.buffer,
+      access.indices);
   return vector::ExtractOp::create(builder, loc, vector, int64_t{0});
 }
 
@@ -37,7 +84,8 @@ void storeElement(OpBuilder &builder, Location loc, Value value, Value target,
   }
   Value vector = vector::BroadcastOp::create(
       builder, loc, VectorType::get({1}, type.getElementType()), value);
-  vector::StoreOp::create(builder, loc, vector, target, indices);
+  auto access = unitStrideElement(builder, loc, target, indices);
+  vector::StoreOp::create(builder, loc, vector, access.buffer, access.indices);
 }
 } // namespace
 

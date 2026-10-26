@@ -115,7 +115,11 @@ def main():
         )
 
     cases = (
-        ("vector.reduction <add>", "vector.reduction <mul>", "ordered ADD"),
+        (
+            "vector.reduction <add>",
+            "vector.reduction <mul>",
+            "unsupported vector reduction",
+        ),
         ("vector.extract %v[2]", "vector.extract %v[16]", "outside vector"),
         (
             "bosc_ame.dma.wait %token : !bosc_ame.dma_token<0>",

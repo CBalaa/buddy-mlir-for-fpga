@@ -172,7 +172,7 @@ def check_legacy(binary):
         ("select_in_place", "select_distinct", "select_cast"),
         "unsupported legacy target metadata: bosc_ame.zero_tail_select_prefix",
     )
-    cases["split_ranges"] = "generic requires one pure arithmetic operation"
+    cases["split_ranges"] = "generic requires pure scalar arithmetic operations"
     for case, diagnostic in cases.items():
         result = subprocess.run(
             [binary, "-", OPTIONS],

@@ -71,6 +71,7 @@
 #include "Dialect/BOSCAME/DmaAlignment.h"
 #include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/BOSCAME/Transform.h"
+#include "Dialect/BOSCAME/Transforms/BOSCAMETileLowering.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -87,6 +88,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+
+#include <tuple>
 
 using namespace mlir;
 
@@ -205,7 +208,10 @@ getStaticElementSpan(MemRefType type) {
     if (llvm::AddOverflow(lastElement, reached, lastElement))
       return std::nullopt;
   }
-  return std::make_pair(offset, lastElement + 1);
+  int64_t length;
+  if (llvm::AddOverflow(lastElement, int64_t{1}, length))
+    return std::nullopt;
+  return std::make_pair(offset, length);
 }
 
 /// Walk the defining chain of `value` to the storage root it addresses.
@@ -225,7 +231,10 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       if (!bank || *bank != view.getBank())
         return std::nullopt;
       chain.bank = bank;
-      chain.pointerShift += view.getOffset();
+      if (llvm::AddOverflow(chain.pointerShift,
+                            static_cast<int64_t>(view.getOffset()),
+                            chain.pointerShift))
+        return std::nullopt;
       return chain;
     }
     // Only `memref.view` moves the base pointer, by `byte_shift` bytes.  A
@@ -244,7 +253,8 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       }
       if (*shift < 0)
         return std::nullopt;
-      chain.pointerShift += *shift;
+      if (llvm::AddOverflow(chain.pointerShift, *shift, chain.pointerShift))
+        return std::nullopt;
       current = view.getSource();
       continue;
     }
@@ -317,7 +327,9 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
       auto origin = tracePointerChain(initial);
       if (!origin)
         return std::nullopt;
-      origin->pointerShift += chain.pointerShift;
+      if (llvm::AddOverflow(origin->pointerShift, chain.pointerShift,
+                            origin->pointerShift))
+        return std::nullopt;
       origin->dynamicShift |= chain.dynamicShift || movesPointer;
       return origin;
     }
@@ -551,6 +563,8 @@ private:
                                          BlockAnalysis &analysis) {
     if (auto load = dyn_cast<TileLoadAccOp>(&op))
       recordAccumulatorLoad(load, analysis);
+    else if (auto zero = dyn_cast<TileZeroAccOp>(&op))
+      addAccumulatorChain(analysis, zero.getMatrix());
     else if (auto mma = dyn_cast<TileMmaOp>(&op))
       recordAccumulatorMma(mma, analysis);
     else if (auto store = dyn_cast<TileStoreAccOp>(&op))
@@ -660,7 +674,8 @@ private:
     return op.emitOpError()
            << "cannot " << action
            << " a DMA request while an AME accumulator is live between its "
-              "`bosc_ame.tile.load_acc` and `bosc_ame.tile.store_acc`; "
+              "`bosc_ame.tile.load_acc`/`bosc_ame.tile.zero_acc` and "
+              "`bosc_ame.tile.store_acc`; "
               "complete the accumulator chain before DMA "
            << (isa<DmaStartOp>(&op) ? "start" : "completion");
   }
@@ -704,6 +719,73 @@ private:
       return checkWait(wait, analysis);
     }
 
+    if (auto copy = dyn_cast<MatrixCopyOp>(&op)) {
+      // The copy completes its configuration/load/store bundle before it
+      // returns. Its scratch accumulator has no preservation ABI, so finish
+      // all DMA and accumulator chains before entering that bundle. The tile
+      // value verifier additionally rejects other live matrix values.
+      if (hasLiveAccumulator(analysis))
+        return op.emitOpError(
+            "cannot copy through matrix registers while an AME accumulator "
+            "is live; complete its accumulator chain first");
+      for (auto [endpoint, offset, pitch] :
+           {std::tuple<Value, int64_t, int64_t>{copy.getSource(),
+                                                copy.getSourceOffset(),
+                                                copy.getSourcePitch()},
+            std::tuple<Value, int64_t, int64_t>{copy.getTarget(),
+                                                copy.getTargetOffset(),
+                                                copy.getTargetPitch()}}) {
+        // Descriptor bounds alone do not constrain a reinterpret cast's
+        // backing storage. Resolve this tile's actual row span against the
+        // bank/root as well, including the offset from its effective pointer.
+        int64_t length = 0;
+        if (llvm::MulOverflow(static_cast<int64_t>(copy.getRows()) - 1, pitch,
+                              length) ||
+            llvm::AddOverflow(length, static_cast<int64_t>(copy.getRowBytes()),
+                              length))
+          return op.emitOpError(
+              "matrix copy row span exceeds the supported byte range");
+        auto footprint = resolveFootprint(endpoint, length);
+        if (!footprint ||
+            llvm::AddOverflow(footprint->begin, offset, footprint->begin) ||
+            llvm::AddOverflow(footprint->end, offset, footprint->end))
+          return op.emitOpError(
+              "matrix copy endpoint byte range cannot be resolved against "
+              "its backing storage");
+        if (footprint->bank) {
+          if (!footprint->rangeKnown || footprint->begin < 0 ||
+              footprint->end > kSpmBankCapacityBytes)
+            return op.emitOpError(
+                "matrix copy SPM range must be statically bounded inside "
+                "its bank");
+        } else {
+          if (footprint->begin < 0)
+            return op.emitOpError(
+                "matrix copy DDR range cannot precede its backing root");
+          // An unranked or dynamic entry root has no allocation extent in IR;
+          // its effective-view validity remains a caller/frontend contract.
+          // When the ranked root provides exact static bounds, a descriptor
+          // alias must stay inside those bounds rather than authorizing itself.
+          auto rootRange = resolveAccessFootprint(footprint->ddrRoot);
+          auto rootType = dyn_cast<MemRefType>(footprint->ddrRoot.getType());
+          if (rootType && rootType.hasStaticShape() &&
+              (!rootRange || !rootRange->rangeKnown || !footprint->rangeKnown ||
+               footprint->begin < rootRange->begin ||
+               footprint->end > rootRange->end))
+            return op.emitOpError(
+                "matrix copy DDR range must stay inside its statically "
+                "bounded entry root");
+        }
+      }
+      if (failed(checkAccess(op, analysis)))
+        return failure();
+      if (hasActive(analysis))
+        return op.emitOpError(
+            "cannot copy through matrix registers while a DMA request is "
+            "in flight; wait for every request before the matrix copy");
+      return success();
+    }
+
     // A callee can issue DMA or clobber matrix registers even when the caller
     // has no request in flight. Matrix values have no call-preservation ABI,
     // so a local memory-effect annotation cannot make such a call safe.
@@ -719,6 +801,10 @@ private:
 
     if (failed(checkAccess(op, analysis)))
       return failure();
+    if (isa<TileZeroAccOp>(&op) && hasActive(analysis))
+      return op.emitOpError("cannot start a zero accumulator while a DMA "
+                            "request is in flight; wait for every request "
+                            "before starting its matrix lifetime");
     recordAccumulatorOperation(op, analysis);
     return success();
   }
@@ -738,9 +824,9 @@ private:
     // memory effect that the checker does not understand could silently
     // access the fixed workspace and invalidate DMA/AME ordering.
     if (hasSpmValue &&
-        !isa<SpmViewOp, DmaStartOp, TileLoadAOp, TileLoadBOp, TileLoadAccOp,
-             TileStoreAccOp, vector::LoadOp, vector::StoreOp, memref::CastOp,
-             memref::CollapseShapeOp, memref::ExpandShapeOp,
+        !isa<SpmViewOp, DmaStartOp, MatrixCopyOp, TileLoadAOp, TileLoadBOp,
+             TileLoadAccOp, TileStoreAccOp, vector::LoadOp, vector::StoreOp,
+             memref::CastOp, memref::CollapseShapeOp, memref::ExpandShapeOp,
              memref::TransposeOp, memref::ExtractStridedMetadataOp,
              memref::MemorySpaceCastOp, memref::ReinterpretCastOp,
              memref::SubViewOp, memref::ViewOp, memref::DimOp, memref::LoadOp,
@@ -1010,6 +1096,7 @@ LogicalResult buddy::boscame::verifySpmDmaContract(ModuleOp module) {
   // memref.view shifts); skipping it would let an unprovable alignment reach
   // LLVM export, where the typed DMA contract can no longer reject it.
   LogicalResult operationStatus = success();
+  bool hasMatrixCopy = false;
   module.walk([&](Operation *op) {
     if (failed(operationStatus))
       return;
@@ -1017,8 +1104,17 @@ LogicalResult buddy::boscame::verifySpmDmaContract(ModuleOp module) {
       operationStatus = view.verify();
     else if (auto start = dyn_cast<DmaStartOp>(op))
       operationStatus = start.verify();
+    else if (auto copy = dyn_cast<MatrixCopyOp>(op)) {
+      hasMatrixCopy = true;
+      operationStatus = copy.verify();
+    }
   });
   if (failed(operationStatus))
+    return failure();
+  // The standalone checker must enforce the same scratch-register exclusion
+  // as lowering, including live TR values and structured loop-carried values.
+  // Preserve the historical checker surface for modules without matrix copies.
+  if (hasMatrixCopy && failed(verifyBOSCAMETileValues(module)))
     return failure();
 
   bool abiDisjointDdrRoots = false;

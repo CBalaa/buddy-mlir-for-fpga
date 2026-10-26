@@ -169,4 +169,4 @@ module {
 // ALIGN: kernel contract V22/V23: read or partial inheritance has no initialized content version
 // TRANSPOSE: kernel contract V22/V23: read or partial inheritance has no initialized content version
 // SERIAL-CALLER: kernel contract V22/V23: read or partial inheritance has no initialized content version
-// SERIAL: v1 planned copy requires exactly one external DDR endpoint
+// SERIAL: requires matching static rank-two SPM storage

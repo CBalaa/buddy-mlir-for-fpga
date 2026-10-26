@@ -113,17 +113,23 @@ def compile_source(work, name, source):
 def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
-    # Keep the old private-copy recipe as a precise boundary case. v1 uses
-    # explicit Linalg fills for private zero initialization.
+    # Standard normalization now proves private zero copies as well as fills.
+    # Retain the original source and run the same ordering/numerical checks.
     raw = lower(work, "original-private-copies")
-    assert raw.returncode != 0
-    assert (
-        "cross-scope edge is not a registered loop init/exit edge" in raw.stderr
-    ), raw.stderr
+    assert raw.returncode == 0, raw.stderr
 
-    for seed in (0, 7):
-        source = normalize_copies(SOURCE, seed)
-        result = compile_source(work, f"private-loop-{seed}", source)
+    for initial in (None, 0, 7):
+        seed = initial or 0
+        name = (
+            "original-private-copies"
+            if initial is None
+            else f"private-loop-{seed}"
+        )
+        result = (
+            raw
+            if initial is None
+            else compile_source(work, name, normalize_copies(SOURCE, seed))
+        )
         assert result.returncode == 0, result.stderr
         text = result.stdout
         acc_ops = re.findall(r"bosc_ame\.tile\.(?:load|store)_acc[^\n]*", text)
@@ -141,7 +147,7 @@ def main():
         # the final add of the later C snapshot remains as RVV arithmetic.
         assert len(re.findall(r"arith\.addi [^\n]*: vector<16xi32>", text)) == 1
         assert 'action = "eliminated"' in text
-        path = work / f"private-loop-{seed}.boscame.mlir"
+        path = work / f"{name}.boscame.mlir"
         path.write_text(text)
         a_values = [(-128 if i % 2 else 127) for i in range(4096)]
         b_values = [(-127 if i % 3 else 126) for i in range(4096)]

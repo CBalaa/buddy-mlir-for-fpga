@@ -132,6 +132,8 @@ def validate_ame_word(word):
         raise ValueError(
             "NR does not support transposed B loads; pack B as [N,K]"
         )
+    if is_ame_acc_clear(word):
+        return
     funct6 = word >> 26
     funct3 = (word >> 12) & 7
     immediate_or_store = (word >> 25) & 1
@@ -160,6 +162,20 @@ def validate_ame_word(word):
     ):
         return
     raise ValueError(f"unverified NR AME instruction encoding: {word:#010x}")
+
+
+def is_ame_acc_clear(word):
+    """Recognize only the 16 board-verified self-clear encodings.
+
+    Generic mwsub.mm requires msew=16; mwsub.h.mm selects 16-bit inputs
+    explicitly. Both produce i32 zeros and require dst == src1 == src2.
+    General subtraction, register conversion and other widths stay rejected.
+    """
+    accumulator = (word >> 7) & 15
+    return accumulator < 8 and word in (
+        base | (accumulator << 20) | (accumulator << 15) | (accumulator << 7)
+        for base in (0x2C084077, 0x2C081077)
+    )
 
 
 def is_vector(word):

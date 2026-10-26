@@ -30,6 +30,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
@@ -37,9 +38,11 @@
 #include "mlir/Dialect/Tensor/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/Vector/Transforms/BufferizableOpInterfaceImpl.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "mlir/Transforms/Passes.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -62,6 +65,104 @@ using namespace triton;
 #include "Conversion/TritonToLinalgExperimental/Passes.h.inc"
 
 namespace {
+
+/// Scalar boundary events use the same logical snapshot ABI as tensor events.
+/// Lifting to one lane preserves the address, value, mask and origin, while
+/// avoiding an unstructured scalar memory operation in the neutral contract.
+static void liftScalarBoundaryAccesses(ModuleOp module) {
+  SmallVector<Operation *> accesses;
+  module.walk([&](Operation *op) {
+    if ((isa<triton::LoadOp>(op) &&
+         !isa<ShapedType>(op->getResult(0).getType())) ||
+        (isa<triton::StoreOp>(op) &&
+         !isa<ShapedType>(cast<triton::StoreOp>(op).getValue().getType())))
+      accesses.push_back(op);
+  });
+  for (Operation *access : accesses) {
+    OpBuilder builder(access);
+    IRMapping mapping;
+    for (Value operand : access->getOperands()) {
+      auto type = RankedTensorType::get({1}, operand.getType());
+      Value lane =
+          triton::SplatOp::create(builder, access->getLoc(), type, operand);
+      if (isa<triton::PointerType>(operand.getType())) {
+        // A one-element range denotes a genuine unit-stride view. A bare
+        // pointer splat would carry stride zero into rectangular access
+        // analysis even though its only address is identical.
+        Value index = triton::MakeRangeOp::create(
+            builder, access->getLoc(),
+            RankedTensorType::get({1}, builder.getI32Type()), 0, 1);
+        lane = triton::AddPtrOp::create(builder, access->getLoc(), type, lane,
+                                        index);
+      }
+      mapping.map(operand, lane);
+    }
+    Operation *lifted = builder.clone(*access, mapping);
+    if (access->getNumResults()) {
+      lifted->getResult(0).setType(
+          RankedTensorType::get({1}, access->getResult(0).getType()));
+      Value zero = arith::ConstantIndexOp::create(builder, access->getLoc(), 0);
+      Value scalar = tensor::ExtractOp::create(
+          builder, access->getLoc(), lifted->getResult(0), ValueRange{zero});
+      access->getResult(0).replaceAllUsesWith(scalar);
+    }
+    access->erase();
+  }
+}
+
+struct FusePointwiseTensorExpression : OpRewritePattern<linalg::GenericOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  static bool laneExpression(linalg::GenericOp generic) {
+    return generic && generic.hasPureTensorSemantics() &&
+           generic.getNumLoops() == 1 &&
+           generic.getIteratorTypesArray()[0] == utils::IteratorType::parallel;
+  }
+
+  LogicalResult matchAndRewrite(linalg::GenericOp generic,
+                                PatternRewriter &rewriter) const override {
+    if (!laneExpression(generic))
+      return failure();
+    for (OpOperand *operand : generic.getDpsInputOperands()) {
+      auto producer = operand->get().getDefiningOp<linalg::GenericOp>();
+      if (!laneExpression(producer) ||
+          producer->getBlock() != generic->getBlock() ||
+          !linalg::areElementwiseOpsFusable(operand))
+        continue;
+      auto fused = linalg::fuseElementwiseOps(rewriter, operand);
+      if (failed(fused))
+        return failure();
+      for (auto [original, replacement] : fused->replacements)
+        rewriter.replaceUsesWithIf(original, replacement, [&](OpOperand &use) {
+          return use.get().getDefiningOp() != producer;
+        });
+      rewriter.eraseOp(generic);
+      return success();
+    }
+    for (OpOperand *operand : generic.getDpsInputOperands()) {
+      auto fill = operand->get().getDefiningOp<linalg::FillOp>();
+      if (!fill || !generic.payloadUsesValueFromOperand(operand))
+        continue;
+      rewriter.modifyOpInPlace(generic, [&] {
+        generic.getRegion()
+            .front()
+            .getArgument(operand->getOperandNumber())
+            .replaceAllUsesWith(fill.getInputs()[0]);
+      });
+      return success();
+    }
+    return failure();
+  }
+};
+
+static LogicalResult fusePointwiseTensorExpressions(ModuleOp module) {
+  RewritePatternSet patterns(module.getContext());
+  patterns.add<FusePointwiseTensorExpression>(module.getContext());
+  linalg::populateEraseUnusedOperandsAndResultsPatterns(patterns);
+  // Do not run RemoveOutsDependency: changing a loop's carried tensor into
+  // an unrelated empty buffer destroys its content boundary.
+  return applyPatternsGreedily(module, std::move(patterns));
+}
 
 static std::optional<int64_t> getSplatInteger(Value value) {
   Attribute valueAttr;
@@ -277,6 +378,92 @@ static LogicalResult fuseIntegerTensorAccumulators(ModuleOp module) {
       empty.erase();
   }
   return success();
+}
+
+/// A zero tensor used by both a matmul init and a following floating add
+/// remains live across the matmul. One-Shot must then copy the init before
+/// updating it, even though the add only needs its scalar splat value.
+/// Materialize that scalar use explicitly and destination-pass the product.
+/// This changes storage, not arithmetic: the add, its operand order, exact
+/// signed-zero constant and fastmath attributes are cloned without alteration.
+static void normalizeFloatingZeroProductAdds(ModuleOp module) {
+  SmallVector<linalg::GenericOp> candidates;
+  module.walk([&](linalg::GenericOp generic) {
+    if (generic.hasPureTensorSemantics())
+      candidates.push_back(generic);
+  });
+  for (linalg::GenericOp generic : candidates) {
+    if (generic.getInputs().size() != 2 || generic.getOutputs().size() != 1 ||
+        generic.getResults().size() != 1 ||
+        !hasIdentityParallelMaps(generic, 2))
+      continue;
+    auto type = dyn_cast<RankedTensorType>(generic.getResult(0).getType());
+    if (!type || !isa<FloatType>(type.getElementType()) ||
+        generic.getInputs()[0].getType() != type ||
+        generic.getInputs()[1].getType() != type)
+      continue;
+    Block &body = generic.getRegion().front();
+    if (body.getNumArguments() != 3 || body.getOperations().size() != 2)
+      continue;
+    auto add = dyn_cast<arith::AddFOp>(body.front());
+    auto yield = dyn_cast<linalg::YieldOp>(body.back());
+    if (!add || !yield || yield.getValues().size() != 1 ||
+        yield.getValues()[0] != add.getResult() ||
+        !((add.getLhs() == body.getArgument(0) &&
+           add.getRhs() == body.getArgument(1)) ||
+          (add.getLhs() == body.getArgument(1) &&
+           add.getRhs() == body.getArgument(0))))
+      continue;
+    for (unsigned zeroIndex : {0u, 1u}) {
+      Value zeroTensor = generic.getInputs()[zeroIndex];
+      Value product = generic.getInputs()[1 - zeroIndex];
+      auto matmul = product.getDefiningOp<linalg::MatmulOp>();
+      if (!matmul || !matmul.hasPureTensorSemantics() ||
+          matmul.getOutputs().size() != 1 ||
+          matmul.getOutputs()[0].getType() != type ||
+          !isSplatZero(matmul.getOutputs()[0]) ||
+          matmul->getBlock() != generic->getBlock() ||
+          !matmul->isBeforeInBlock(generic) || !isSplatZero(zeroTensor))
+        continue;
+      // Keep the proof local. Other product consumers and nonzero C retain
+      // their independent SSA snapshots and the ordinary copy decision.
+      if (!product.hasOneUse())
+        continue;
+      OpBuilder builder(generic);
+      Value scalar;
+      if (auto fill = zeroTensor.getDefiningOp<linalg::FillOp>()) {
+        scalar = fill.getInputs()[0];
+      } else if (auto constant =
+                     zeroTensor.getDefiningOp<arith::ConstantOp>()) {
+        auto dense = dyn_cast<DenseFPElementsAttr>(constant.getValue());
+        if (!dense || !dense.isSplat())
+          continue;
+        scalar = builder.create<arith::ConstantOp>(
+            generic.getLoc(), type.getElementType(),
+            dense.getSplatValue<FloatAttr>());
+      }
+      if (!scalar || scalar.getType() != type.getElementType())
+        continue;
+      auto replacement = builder.create<linalg::GenericOp>(
+          generic.getLoc(), TypeRange{type}, ValueRange{product},
+          ValueRange{product},
+          SmallVector<AffineMap>(2, builder.getMultiDimIdentityMap(2)),
+          SmallVector<utils::IteratorType>(2, utils::IteratorType::parallel),
+          [&](OpBuilder &nested, Location loc, ValueRange arguments) {
+            IRMapping mapping;
+            mapping.map(body.getArgument(zeroIndex), scalar);
+            mapping.map(body.getArgument(1 - zeroIndex), arguments[0]);
+            Operation *cloned = nested.clone(*add, mapping);
+            nested.create<linalg::YieldOp>(loc, cloned->getResult(0));
+          });
+      for (NamedAttribute attr : generic->getAttrs())
+        if (attr.getName().getValue().starts_with("contract."))
+          replacement->setAttr(attr.getName(), attr.getValue());
+      generic.getResult(0).replaceAllUsesWith(replacement.getResult(0));
+      generic.erase();
+      break;
+    }
+  }
 }
 
 static linalg::GenericOp getZeroBasedRange(Value value) {
@@ -651,6 +838,8 @@ public:
                        "legacy_memref_bridge or tensor-first-vector-cpu");
       return signalPassFailure();
     }
+    if (emitContract)
+      liftScalarBoundaryAccesses(module);
     PassManager pm(&getContext(), module.getOperationName());
     pm.addPass(createTritonToStructuredPass(enableMakeGatherScatterTensorPtr));
     pm.addPass(createCSEPass());
@@ -680,7 +869,10 @@ public:
     if (failed(specializeContractTiles(module)) ||
         failed(fuseIntegerTensorAccumulators(module)))
       return signalPassFailure();
+    normalizeFloatingZeroProductAdds(module);
     normalizeStaticTailSelects(module);
+    if (failed(fusePointwiseTensorExpressions(module)))
+      return signalPassFailure();
     OpPassManager cleanup(ModuleOp::getOperationName());
     cleanup.addPass(createCanonicalizerPass());
     cleanup.addPass(createCSEPass());

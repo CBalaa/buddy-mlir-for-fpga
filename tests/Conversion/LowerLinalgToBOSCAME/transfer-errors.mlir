@@ -184,7 +184,7 @@ module {
 // OVERLAP: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
 // CAPACITY: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
 // ELEMENT: v1 has no independent DDR-to-DDR copy recipe; a boundary copy requires a planned private endpoint
-// SHAPE: kernel contract V25: generic requires one pure arithmetic operation
+// SHAPE: v1 vector plan requires rank-one identity pointwise
 // DIRECT-LABEL: func.func @add
 // DIRECT: vector.load {{.*}} {bosc_ame.direct_ddr}
 // DIRECT: vector.load {{.*}} {bosc_ame.direct_ddr}

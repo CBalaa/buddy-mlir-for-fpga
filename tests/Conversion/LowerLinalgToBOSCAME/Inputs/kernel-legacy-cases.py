@@ -13,7 +13,8 @@ import tempfile
 from pathlib import Path
 
 COPY = "v1 has no independent DDR-to-DDR copy recipe"
-LOAD = "scalar load must access planned host rank-zero storage"
+LOAD = "scalar snapshot load requires a private SPM singleton"
+HOST_LOAD = "scalar load must access planned host rank-zero storage"
 UNKNOWN = (
     "V22/V23: read or partial inheritance has no initialized content version"
 )
@@ -48,8 +49,11 @@ EXPECTED = {
         "called_helper": LOAD,
         "custom_space_arguments": "target memory must be rooted in a verified SPM window",
     },
-    "buffer-alias-reinterpret": dict.fromkeys(
-        [
+    "buffer-alias-reinterpret": {
+        name: HOST_LOAD
+        if name == "reinterpret_rank2_dynamic_disjoint"
+        else LOAD
+        for name in [
             "reinterpret_disjoint",
             "reinterpret_overlap",
             "reinterpret_dynamic",
@@ -69,9 +73,8 @@ EXPECTED = {
             "mixed_root_reinterpret_equal",
             "reinterpret_dynamic_root_offset",
             "reinterpret_rank3",
-        ],
-        LOAD,
-    ),
+        ]
+    },
     "buffer-placement-ame-budget": {"ame_staging_is_in_the_budget": None},
     "buffer-placement-scf-legality": {
         "escaping_branch": UNKNOWN,
@@ -104,7 +107,7 @@ EXPECTED = {
     "direct-vector-store": {"copy": COPY},
     "direct-vector-transfer-fusion": {
         "copy": ESCAPE,
-        "pitched_copy": "no legal DMA route: cache-line length/pitch constraint is not satisfied",
+        "pitched_copy": "SPM root requires non-escaping aliases and completed local memory accesses",
         "destination_read": ESCAPE,
     },
     "direct-vector-transfer-gap": {"separated": ESCAPE},
@@ -371,12 +374,10 @@ def staged_dynamic_offset(tool, name, program):
     result = invoke(
         tool, derived, "--linalg-to-boscame=dma-abi=args_aligned64_nonalias"
     )
-    if name == "unknown":
-        check_result(result, "endpoint alignment or SPM placement is unproven")
-    else:
-        check_result(
-            result, "DDR view exceeds its statically known argument storage"
-        )
+    check_result(
+        result, "DDR view exceeds its statically known argument storage"
+    )
+    if name != "unknown":
         bounded = derived.replace(
             "%offset = arith.muli %row, %c16 : index",
             "%offset = arith.constant 16 : index",
@@ -469,7 +470,7 @@ def dma_roundtrip(tool, source, name, program):
                 initialized,
                 "--linalg-to-boscame=dma-abi=args_aligned64_nonalias",
             ),
-            "v1 planned copy requires exactly one external DDR endpoint",
+            "requires matching static rank-two SPM storage",
         )
     derived = (
         derived[:begin]

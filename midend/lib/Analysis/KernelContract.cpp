@@ -14,6 +14,8 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
@@ -57,6 +59,191 @@ static Value storageRoot(Value value) {
 static bool isPrivate(Value root) {
   return root && root.getDefiningOp() &&
          isa<memref::AllocOp, memref::AllocaOp>(root.getDefiningOp());
+}
+
+/// Linalg fusion can turn a tensor splat into a scalar region capture. Make
+/// dynamic captures explicit operands before collecting task dependencies.
+static void makeScalarInputsExplicit(ModuleOp module) {
+  SmallVector<linalg::GenericOp> generics;
+  module.walk([&](linalg::GenericOp generic) { generics.push_back(generic); });
+  for (linalg::GenericOp generic : generics) {
+    Block &body = generic.getRegion().front();
+    llvm::SetVector<Value> captures;
+    for (Operation &operation : body)
+      for (Value value : operation.getOperands()) {
+        auto argument = dyn_cast<BlockArgument>(value);
+        if (!value.getType().isIntOrFloat() ||
+            (argument && argument.getOwner() == &body) ||
+            (value.getDefiningOp() &&
+             value.getDefiningOp()->getBlock() == &body) ||
+            value.getDefiningOp<arith::ConstantOp>())
+          continue;
+        captures.insert(value);
+      }
+    if (captures.empty())
+      continue;
+    OpBuilder builder(generic);
+    SmallVector<Value> inputs(generic.getInputs());
+    llvm::append_range(inputs, captures);
+    auto maps = generic.getIndexingMapsArray();
+    auto scalarMap =
+        AffineMap::get(generic.getNumLoops(), 0, {}, module.getContext());
+    maps.insert(maps.begin() + generic.getNumDpsInputs(), captures.size(),
+                scalarMap);
+    auto replacement = linalg::GenericOp::create(
+        builder, generic.getLoc(), generic.getResultTypes(), inputs,
+        generic.getOutputs(), maps, generic.getIteratorTypesArray(),
+        [&](OpBuilder &nested, Location loc, ValueRange args) {
+          IRMapping mapping;
+          for (unsigned i = 0; i < generic.getNumDpsInputs(); ++i)
+            mapping.map(body.getArgument(i), args[i]);
+          for (unsigned i = 0; i < generic.getNumDpsInits(); ++i)
+            mapping.map(body.getArgument(generic.getNumDpsInputs() + i),
+                        args[inputs.size() + i]);
+          for (auto [i, capture] : llvm::enumerate(captures))
+            mapping.map(capture, args[generic.getNumDpsInputs() + i]);
+          for (Operation &operation : body)
+            nested.clone(operation, mapping);
+        });
+    for (NamedAttribute attr : generic->getDiscardableAttrs())
+      if (attr.getName().strref() != "contract.task")
+        replacement->setAttr(attr.getName(), attr.getValue());
+    generic.replaceAllUsesWith(replacement.getResults());
+    generic.erase();
+  }
+}
+
+/// Rematerialize an exact reaching zero before assigning content versions.
+/// The complete private source has one dominating initializer and no alias
+/// can modify or escape before any execution of the copy. A write may follow
+/// the copy's whole enclosing scope in the allocation's block: that scope
+/// includes every repeated iteration sharing this allocation. Merely following
+/// the copy inside its loop is insufficient, even through another nested loop.
+static void normalizeReachingZeroCopies(ModuleOp module) {
+  DominanceInfo dominance(module);
+  SmallVector<memref::CopyOp> copies;
+  module.walk([&](memref::CopyOp copy) { copies.push_back(copy); });
+  for (memref::CopyOp copy : copies) {
+    if (copy->hasAttr("contract.access"))
+      continue;
+    Value source = copy.getSource(), target = copy.getTarget();
+    auto sourceType = dyn_cast<MemRefType>(source.getType());
+    auto targetType = dyn_cast<MemRefType>(target.getType());
+    if (!sourceType || !targetType || !sourceType.hasStaticShape() ||
+        sourceType.getShape() != targetType.getShape() ||
+        sourceType.getElementType() != targetType.getElementType() ||
+        !isPrivate(source) || !isPrivate(target) || source == target)
+      continue;
+    Block *allocationBlock = source.getDefiningOp()->getBlock();
+    Operation *readScope = copy;
+    while (readScope && readScope->getBlock() != allocationBlock)
+      readScope = readScope->getParentOp();
+    if (!readScope)
+      continue;
+    auto afterReadLifetime = [&](Operation *operation) {
+      // Lift both accesses to the allocation's dynamic instance. In
+      // particular, an inner-loop copy cannot ignore a subsequent write in
+      // the same outer loop: its next iteration still shares this storage.
+      while (operation && operation->getBlock() != allocationBlock)
+        operation = operation->getParentOp();
+      return operation && operation != readScope &&
+             readScope->isBeforeInBlock(operation);
+    };
+    SmallVector<Value> aliases{source};
+    llvm::SmallDenseSet<Value> seen;
+    linalg::FillOp initializer;
+    bool immutable = true;
+    while (!aliases.empty() && immutable) {
+      Value alias = aliases.pop_back_val();
+      if (!seen.insert(alias).second)
+        continue;
+      for (OpOperand &use : alias.getUses()) {
+        Operation *owner = use.getOwner();
+        if (afterReadLifetime(owner))
+          continue;
+        if (auto view = dyn_cast<ViewLikeOpInterface>(owner)) {
+          if (view.getViewSource() != alias || owner->getNumResults() != 1) {
+            immutable = false;
+            break;
+          }
+          aliases.push_back(owner->getResult(0));
+          continue;
+        }
+        if (auto fill = dyn_cast<linalg::FillOp>(owner)) {
+          if (alias != source || fill.getOutputs()[0] != source ||
+              initializer) {
+            immutable = false;
+            break;
+          }
+          Attribute value;
+          if (!matchPattern(fill.getInputs()[0], m_Constant(&value)) ||
+              !(isa<IntegerAttr>(value)
+                    ? cast<IntegerAttr>(value).getValue().isZero()
+                    : isa<FloatAttr>(value) &&
+                          cast<FloatAttr>(value).getValue().isZero())) {
+            immutable = false;
+            break;
+          }
+          initializer = fill;
+          continue;
+        }
+        if (isa<memref::LoadOp, memref::DimOp, memref::DeallocOp>(owner))
+          continue;
+        if (auto read = dyn_cast<memref::CopyOp>(owner);
+            read && read.getSource() == alias && read.getTarget() != alias)
+          continue;
+        if (auto compute = dyn_cast<linalg::LinalgOp>(owner);
+            compute && use.getOperandNumber() < compute.getNumDpsInputs())
+          continue;
+        immutable = false;
+        break;
+      }
+    }
+    if (!immutable || !initializer ||
+        !dominance.dominates(initializer.getOperation(), copy.getOperation()))
+      continue;
+    // Unknown effects intentionally invalidate private content in contract
+    // v1. Do not bypass that rule merely because the opaque operation has no
+    // explicit SSA use of this allocation (including in another iteration).
+    auto function = source.getDefiningOp()->getParentOfType<func::FuncOp>();
+    if (!function)
+      continue;
+    WalkResult knownEffects = function.walk([&](Operation *operation) {
+      if (isa<func::FuncOp, scf::ForOp, scf::IfOp>(operation) ||
+          isMemoryEffectFree(operation))
+        return WalkResult::advance();
+      auto effect = dyn_cast<MemoryEffectOpInterface>(operation);
+      if (!effect)
+        return WalkResult::interrupt();
+      SmallVector<MemoryEffects::EffectInstance> effects;
+      effect.getEffects(effects);
+      for (const auto &instance : effects)
+        if (isa<MemoryEffects::Write, MemoryEffects::Free>(
+                instance.getEffect()) &&
+            !instance.getValue())
+          return WalkResult::interrupt();
+      return WalkResult::advance();
+    });
+    if (knownEffects.wasInterrupted())
+      continue;
+    OpBuilder builder(copy);
+    // Reuse the original scalar, including the sign bit of floating zero.
+    auto fill = linalg::FillOp::create(
+        builder, copy.getLoc(), initializer.getInputs(), ValueRange{target});
+    for (NamedAttribute attr : copy->getAttrs())
+      if (attr.getName().strref() != "contract.task")
+        fill->setAttr(attr.getName(), attr.getValue());
+    copy.erase();
+    bool unused = llvm::all_of(source.getUsers(), [&](Operation *user) {
+      return user == initializer || isa<memref::DeallocOp>(user);
+    });
+    if (unused) {
+      SmallVector<Operation *> users(source.getUsers());
+      for (Operation *user : users)
+        user->erase();
+      source.getDefiningOp()->erase();
+    }
+  }
 }
 
 // Most view operations preserve the aligned pointer, while memref.view moves
@@ -676,16 +863,38 @@ LogicalResult FunctionContract::checkInPlace(Operation *op,
                        [](utils::IteratorType i) {
                          return i != utils::IteratorType::parallel;
                        }) ||
-          llvm::any_of(generic.getIndexingMapsArray(),
-                       [](AffineMap map) { return !map.isIdentity(); }))
+          llvm::any_of(
+              llvm::zip(generic.getOperands(), generic.getIndexingMapsArray()),
+              [](auto entry) {
+                auto [value, map] = entry;
+                return isa<BaseMemRefType>(value.getType())
+                           ? !map.isIdentity()
+                           : map.getNumResults() != 0;
+              }))
         return fail(op, "V25",
                     "pointwise update requires parallel identity indexing");
       Block &body = generic.getRegion().front();
-      if (std::distance(body.begin(), body.end()) != 2 ||
-          body.front().getName().getDialectNamespace() != "arith" ||
-          !isMemoryEffectFree(&body.front()))
-        return fail(op, "V25",
-                    "generic requires one pure arithmetic operation");
+      for (Operation &scalar : body.without_terminator()) {
+        StringRef dialect = scalar.getName().getDialectNamespace();
+        if ((dialect != "arith" && dialect != "math") ||
+            !isMemoryEffectFree(&scalar) || scalar.getNumRegions() ||
+            llvm::any_of(scalar.getResultTypes(),
+                         [](Type type) { return !type.isIntOrFloat(); }))
+          return fail(op, "V25",
+                      "generic requires pure scalar arithmetic operations");
+        for (Value operand : scalar.getOperands()) {
+          auto argument = dyn_cast<BlockArgument>(operand);
+          if ((argument && argument.getOwner() == &body) ||
+              (operand.getDefiningOp() &&
+               operand.getDefiningOp()->getBlock() == &body))
+            continue;
+          auto constant = operand.getDefiningOp<arith::ConstantOp>();
+          if (!constant || !isa<IntegerAttr, FloatAttr>(constant.getValue()))
+            return fail(op, "V25",
+                        "generic scalar captures require scalar constants; "
+                        "other scalars must be explicit operands");
+        }
+      }
     }
     for (Value input : effect.reads) {
       if (disjoint(input, output))
@@ -2010,6 +2219,10 @@ bool hasEntryArgumentABI(func::FuncOp function) {
 
 LogicalResult annotateKernelContract(ModuleOp module, StringRef producer,
                                      bool planned) {
+  if (!planned) {
+    makeScalarInputsExplicit(module);
+    normalizeReachingZeroCopies(module);
+  }
   if (failed(checkRepresentation(module, planned)))
     return failure();
   Builder builder(module.getContext());

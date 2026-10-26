@@ -38,6 +38,56 @@ class Ranges {
 public:
   DenseMap<Value, Interval> arguments;
 
+  /// A launch-domain comparison can guard an otherwise static memory extent
+  /// (for example `row < ROWS` in a one-program-per-row bias add). Preserve
+  /// unknown predicates rather than treating all masked accesses as full.
+  std::optional<bool> truth(Value value) const {
+    if (auto constant = getConstantIntValue(value))
+      return *constant != 0;
+    auto cmp = value.getDefiningOp<arith::CmpIOp>();
+    if (!cmp)
+      return std::nullopt;
+    auto a = get(cmp.getLhs()), b = get(cmp.getRhs());
+    if (!a || !b)
+      return std::nullopt;
+    switch (cmp.getPredicate()) {
+    case arith::CmpIPredicate::eq:
+    case arith::CmpIPredicate::ne:
+      if (a->lo == a->hi && b->lo == b->hi && a->lo == b->lo)
+        return cmp.getPredicate() == arith::CmpIPredicate::eq;
+      if (a->hi < b->lo || b->hi < a->lo)
+        return cmp.getPredicate() == arith::CmpIPredicate::ne;
+      break;
+    case arith::CmpIPredicate::slt:
+      if (a->hi < b->lo)
+        return true;
+      if (a->lo >= b->hi)
+        return false;
+      break;
+    case arith::CmpIPredicate::sle:
+      if (a->hi <= b->lo)
+        return true;
+      if (a->lo > b->hi)
+        return false;
+      break;
+    case arith::CmpIPredicate::sgt:
+      if (a->lo > b->hi)
+        return true;
+      if (a->hi <= b->lo)
+        return false;
+      break;
+    case arith::CmpIPredicate::sge:
+      if (a->lo >= b->hi)
+        return true;
+      if (a->hi < b->lo)
+        return false;
+      break;
+    default:
+      break;
+    }
+    return std::nullopt;
+  }
+
   std::optional<Interval> get(Value value, unsigned depth = 0) const {
     if (depth > 64 || !value.getType().isIntOrIndex())
       return std::nullopt;
@@ -51,7 +101,7 @@ public:
     if (auto argument = dyn_cast<BlockArgument>(value)) {
       auto loop =
           dyn_cast_or_null<scf::ForOp>(argument.getOwner()->getParentOp());
-      if (!loop || loop.getInductionVar() != value)
+      if (!loop || loop.getInductionVar() != value || loop.getUnsignedCmp())
         return std::nullopt;
       auto lo = getConstantIntValue(loop.getLowerBound());
       auto hi = getConstantIntValue(loop.getUpperBound());
@@ -76,6 +126,22 @@ public:
       if (input && fits(value.getType(), *input))
         return input;
       return std::nullopt;
+    }
+    if (isa<arith::DivSIOp, arith::RemSIOp>(op)) {
+      auto numerator = get(op->getOperand(0), depth + 1);
+      auto divisor = getConstantIntValue(op->getOperand(1));
+      if (!numerator || numerator->lo < 0 || !divisor || *divisor <= 0)
+        return std::nullopt;
+      Interval result;
+      if (isa<arith::DivSIOp>(op)) {
+        result = {numerator->lo / *divisor, numerator->hi / *divisor};
+      } else if (numerator->lo / *divisor == numerator->hi / *divisor) {
+        result = {numerator->lo % *divisor, numerator->hi % *divisor};
+      } else {
+        result = {0, std::min(numerator->hi, *divisor - 1)};
+      }
+      return fits(value.getType(), result) ? std::optional<Interval>(result)
+                                           : std::nullopt;
     }
     if (!isa<arith::AddIOp, arith::SubIOp, arith::MulIOp, arith::MinSIOp,
              arith::MaxSIOp>(op))
@@ -129,19 +195,27 @@ template <typename Op> static Value otherOperand(Value value, Value operand) {
   return {};
 }
 
-/// Match the rectangular clamp emitted by structured-to-memref:
-/// min(max(min(start + tile, bound), start) - start, tile).
+/// Match the rectangular clamp emitted by structured-to-memref. Canonicalize
+/// may remove the redundant outer min(..., tile), so accept both spellings:
+/// min(max(min(start + tile, bound), start) - start, tile)
+/// and max(min(start + tile, bound), start) - start.
 static std::optional<TileExtent> matchExtent(Value value,
                                              const Ranges &ranges) {
-  auto outer = value.getDefiningOp<arith::MinSIOp>();
-  if (!outer || !ranges.get(value))
+  if (!ranges.get(value))
     return std::nullopt;
-  for (auto [difference, tileValue] :
-       {std::pair{outer.getLhs(), outer.getRhs()},
-        std::pair{outer.getRhs(), outer.getLhs()}}) {
-    auto tile = getConstantIntValue(tileValue);
+  SmallVector<std::pair<Value, std::optional<int64_t>>> differences;
+  if (auto outer = value.getDefiningOp<arith::MinSIOp>()) {
+    for (auto [difference, tileValue] :
+         {std::pair{outer.getLhs(), outer.getRhs()},
+          std::pair{outer.getRhs(), outer.getLhs()}})
+      if (auto tile = getConstantIntValue(tileValue); tile && *tile > 0)
+        differences.emplace_back(difference, *tile);
+  } else {
+    differences.emplace_back(value, std::nullopt);
+  }
+  for (auto [difference, outerTile] : differences) {
     auto sub = difference.getDefiningOp<arith::SubIOp>();
-    if (!tile || *tile <= 0 || !sub)
+    if (!sub)
       continue;
     Value start = sub.getRhs();
     Value limited = otherOperand<arith::MaxSIOp>(sub.getLhs(), start);
@@ -154,8 +228,9 @@ static std::optional<TileExtent> matchExtent(Value value,
           std::pair{minimum.getRhs(), minimum.getLhs()}}) {
       auto bound = getConstantIntValue(boundValue);
       Value increment = otherOperand<arith::AddIOp>(end, start);
-      if (bound && *bound >= 0 && increment &&
-          getConstantIntValue(increment) == tile)
+      auto tile = increment ? getConstantIntValue(increment) : std::nullopt;
+      if (bound && *bound >= 0 && tile && *tile > 0 &&
+          (!outerTile || *outerTile == *tile))
         return TileExtent{value, start, *tile, *bound};
     }
   }
@@ -172,6 +247,79 @@ static std::optional<int64_t> constantExtent(const TileExtent &extent,
   };
   int64_t a = clamp(start->lo), b = clamp(start->hi);
   return a == b ? std::optional<int64_t>(a) : std::nullopt;
+}
+
+static SmallVector<TileExtent> memoryExtents(Operation *root,
+                                             const Ranges &ranges) {
+  llvm::SetVector<Value> sizes;
+  root->walk([&](memref::CopyOp copy) {
+    if (!copy->hasAttr("contract.access"))
+      return;
+    for (Value operand : copy->getOperands())
+      if (auto view = operand.getDefiningOp<memref::SubViewOp>())
+        for (OpFoldResult size : view.getMixedSizes())
+          if (auto value = dyn_cast<Value>(size))
+            sizes.insert(value);
+  });
+  SmallVector<TileExtent> extents;
+  for (Value size : sizes)
+    if (auto extent = matchExtent(size, ranges))
+      extents.push_back(*extent);
+  return extents;
+}
+
+/// Separate a proven full prefix from one partial last iteration while the
+/// accumulator is still tensor SSA. This does not change tile shapes or
+/// arithmetic: even the last iteration executes its original padded tile.
+/// Memory effects retain their iteration order, including inside branches.
+static void splitPartialLastIterations(func::FuncOp function,
+                                       const Ranges &ranges) {
+  SmallVector<scf::ForOp> loops;
+  function.walk<WalkOrder::PostOrder>(
+      [&](scf::ForOp loop) { loops.push_back(loop); });
+  for (scf::ForOp loop : loops) {
+    auto domain = ranges.get(loop.getInductionVar());
+    auto step = getConstantIntValue(loop.getStep());
+    // Ranges also proves that the original final IV increment cannot wrap.
+    // A single iteration already has a singleton domain and needs no split.
+    if (!domain || !step || *step <= 0 || domain->lo == domain->hi)
+      continue;
+    Ranges prefixRanges = ranges, tailRanges = ranges;
+    prefixRanges.arguments[loop.getInductionVar()] = {domain->lo,
+                                                      domain->hi - *step};
+    tailRanges.arguments[loop.getInductionVar()] = {domain->hi, domain->hi};
+    auto extents = memoryExtents(loop, ranges);
+    bool partialLast = llvm::any_of(extents, [&](const TileExtent &extent) {
+      auto prefix = constantExtent(extent, prefixRanges);
+      auto tail = constantExtent(extent, tailRanges);
+      return prefix && *prefix == extent.tile && tail && *tail > 0 &&
+             *tail < extent.tile;
+    });
+    if (!partialLast)
+      continue;
+
+    OpBuilder builder(loop);
+    Value last = builder.create<arith::ConstantOp>(
+        loop.getLoc(),
+        builder.getIntegerAttr(loop.getInductionVar().getType(), domain->hi));
+    IRMapping prefixMapping;
+    auto prefix = cast<scf::ForOp>(builder.clone(*loop, prefixMapping));
+    prefix.setUpperBound(last);
+
+    // Build the last iteration from the prefix results, never the original
+    // init operands. Replacing the old loop only after cloning keeps those
+    // prefix uses separate from the last iteration's yielded results.
+    IRMapping tailMapping;
+    tailMapping.map(loop.getInductionVar(), last);
+    tailMapping.map(loop.getRegionIterArgs(), prefix.getResults());
+    for (Operation &op : loop.getBody()->without_terminator())
+      builder.clone(op, tailMapping);
+    auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+    for (auto [result, value] :
+         llvm::zip(loop.getResults(), yield.getOperands()))
+      result.replaceAllUsesWith(tailMapping.lookupOrDefault(value));
+    loop.erase();
+  }
 }
 
 /// Linear launch-axis start. Other variables (including loop IVs) cannot
@@ -367,20 +515,20 @@ LogicalResult mlir::triton::specializeContractTiles(ModuleOp module) {
         ranges.arguments[value] = {grid, grid};
       }
     }
-    llvm::SetVector<Value> sizes;
-    function.walk([&](memref::CopyOp copy) {
-      if (!copy->hasAttr("contract.access"))
-        return;
-      for (Value operand : copy->getOperands())
-        if (auto view = operand.getDefiningOp<memref::SubViewOp>())
-          for (OpFoldResult size : view.getMixedSizes())
-            if (auto value = dyn_cast<Value>(size))
-              sizes.insert(value);
+    SmallVector<arith::SelectOp> knownSelects;
+    function.walk([&](arith::SelectOp select) {
+      if (select.getType().isIntOrIndex() &&
+          ranges.truth(select.getCondition()))
+        knownSelects.push_back(select);
     });
-    SmallVector<TileExtent> extents;
-    for (Value size : sizes)
-      if (auto extent = matchExtent(size, ranges))
-        extents.push_back(*extent);
+    for (auto select : knownSelects) {
+      bool condition = *ranges.truth(select.getCondition());
+      select.getResult().replaceAllUsesWith(condition ? select.getTrueValue()
+                                                      : select.getFalseValue());
+      select.erase();
+    }
+    splitPartialLastIterations(function, ranges);
+    SmallVector<TileExtent> extents = memoryExtents(function, ranges);
     SmallVector<Partition> partitions;
     for (unsigned axis = 0; axis < 3; ++axis) {
       Value pid = pids[axis];
