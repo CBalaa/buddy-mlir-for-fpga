@@ -26,6 +26,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 #include <optional>
 #include <tuple>
@@ -905,11 +906,20 @@ private:
     }
     if (auto reduce = dyn_cast<linalg::ReduceOp>(op)) {
       auto p = dict(op, "plan.reduce");
+      Block &body = reduce.getRegion().front();
+      Operation *combiner = body.empty() ? nullptr : &body.front();
+      bool isSum = isa_and_nonnull<arith::AddFOp>(combiner);
+      bool isMaximum = isa_and_nonnull<arith::MaximumFOp>(combiner);
+      bool isMaxNum = isa_and_nonnull<arith::MaxNumFOp>(combiner);
       require(
           op,
-          string(p, "engine") == "rvv" && integer(p, "vector_bytes") == 64 &&
-              (string(p, "strategy") == "ordered-vector-add" ||
-               string(p, "strategy") == "ordered-vector-maxnum") &&
+          string(p, "engine") == "rvv" &&
+              ((isSum && integer(p, "vector_bytes") == 64 &&
+                string(p, "strategy") == "ordered-vector-add") ||
+               (isMaxNum && integer(p, "vector_bytes") == 64 &&
+                string(p, "strategy") == "ordered-vector-maxnum") ||
+               (isMaximum && integer(p, "vector_bytes") == 4 &&
+                string(p, "strategy") == "ordered-scalar-max")) &&
               string(p, "fp_policy") == "preserve" && integer(p, "axis") == 0 &&
               reduce.getDimensions() == ArrayRef<int64_t>{0} &&
               reduce.getInputs().size() == 1 && reduce.getInits().size() == 1,
@@ -930,27 +940,25 @@ private:
               staticType(reduce.getInputs()[0], strides) && strides[0] == 1 &&
               string(placement(reduce.getInits()[0]), "level") == "host",
           "reduction requires contiguous f32 input and host rank-zero output");
-      Block &body = reduce.getRegion().front();
-      Operation *combine = body.empty() ? nullptr : &body.front();
-      bool validCombine = false;
-      if (auto add = dyn_cast_or_null<arith::AddFOp>(combine))
-        validCombine = string(p, "strategy") == "ordered-vector-add" &&
-                       add.getFastmath() == arith::FastMathFlags::none;
-      if (auto max = dyn_cast_or_null<arith::MaxNumFOp>(combine))
-        validCombine = string(p, "strategy") == "ordered-vector-maxnum" &&
-                       max.getFastmath() == arith::FastMathFlags::none;
+      bool supported =
+          combiner &&
+          llvm::TypeSwitch<Operation *, bool>(combiner)
+              .Case<arith::AddFOp, arith::MaximumFOp, arith::MaxNumFOp>(
+                  [](auto op) {
+                    return op.getFastmath() == arith::FastMathFlags::none;
+                  })
+              .Default(false);
       auto yield = dyn_cast<linalg::YieldOp>(body.getTerminator());
       require(op,
               body.getOperations().size() == 2 && body.getNumArguments() == 2 &&
-                  validCombine && yield && yield.getValues().size() == 1 &&
-                  yield.getValues()[0] == combine->getResult(0) &&
-                  ((combine->getOperand(0) == body.getArgument(0) &&
-                    combine->getOperand(1) == body.getArgument(1)) ||
-                   (combine->getOperand(1) == body.getArgument(0) &&
-                    combine->getOperand(0) == body.getArgument(1))),
+                  supported && yield && yield.getValues().size() == 1 &&
+                  yield.getValues()[0] == combiner->getResult(0) &&
+                  ((combiner->getOperand(0) == body.getArgument(0) &&
+                    combiner->getOperand(1) == body.getArgument(1)) ||
+                   (combiner->getOperand(1) == body.getArgument(0) &&
+                    combiner->getOperand(0) == body.getArgument(1))),
               "reduction payload must yield one planned ordered combine of "
-              "input and "
-              "accumulator");
+              "input and accumulator");
       return;
     }
     if (isa<linalg::LinalgOp>(op))
