@@ -1,0 +1,182 @@
+{
+  "scope": "Existing production relocatable kernel objects and compiler wrappers. Calls are resolved from R_RISCV_CALL_PLT relocations. External DMA callees are modeled with zero incremental stack solely to exclude them from this kernel-only bound; this is not a linked firmware stack audit.",
+  "status": "PASS",
+  "cases": {
+    "gelu_197x3072": {
+      "object_sha256": "ba63712863cc1c77e4cfa1054beb41598aa6f62802055aa4cc45336fa796b0ee",
+      "isa": {
+        "status": "PASS",
+        "elf_sha256": "ba63712863cc1c77e4cfa1054beb41598aa6f62802055aa4cc45336fa796b0ee",
+        "executable_sections": [
+          {
+            "name": ".text",
+            "address": "0x0",
+            "bytes": 2394
+          }
+        ],
+        "instructions": 675,
+        "ame_instructions": 0,
+        "vector_memory_instructions": 4,
+        "ame_store_instructions": 0,
+        "vector_store_instructions": 2,
+        "rvv_instructions": {
+          "vfmul.vf": 1,
+          "vfmv.f.s": 1,
+          "vfmv.s.f": 1,
+          "vle32.v": 2,
+          "vse32.v": 2,
+          "vsetivli": 2
+        },
+        "errors": []
+      },
+      "undefined_symbols": [
+        "bosc_ame_dma_start",
+        "bosc_ame_dma_wait"
+      ],
+      "calls_from_object_relocations": [
+        {
+          "address": "0x80",
+          "target": "bosc_ame_dma_start"
+        },
+        {
+          "address": "0x8c",
+          "target": "bosc_ame_dma_wait"
+        },
+        {
+          "address": "0x94c",
+          "target": "triton_gelu_197x3072"
+        }
+      ],
+      "fused_multiply_add_instructions": [],
+      "kernel_and_wrapper_stack_bound_bytes": 736,
+      "stack_by_entry_alignment": [
+        {
+          "entry_sp_mod64": 0,
+          "peak": 736,
+          "path": [
+            "_mlir_ciface_triton_gelu_197x3072",
+            "triton_gelu_197x3072"
+          ],
+          "address": "0x0",
+          "returns": true
+        },
+        {
+          "entry_sp_mod64": 16,
+          "peak": 736,
+          "path": [
+            "_mlir_ciface_triton_gelu_197x3072",
+            "triton_gelu_197x3072"
+          ],
+          "address": "0x0",
+          "returns": true
+        },
+        {
+          "entry_sp_mod64": 32,
+          "peak": 736,
+          "path": [
+            "_mlir_ciface_triton_gelu_197x3072",
+            "triton_gelu_197x3072"
+          ],
+          "address": "0x0",
+          "returns": true
+        },
+        {
+          "entry_sp_mod64": 48,
+          "peak": 736,
+          "path": [
+            "_mlir_ciface_triton_gelu_197x3072",
+            "triton_gelu_197x3072"
+          ],
+          "address": "0x0",
+          "returns": true
+        }
+      ],
+      "runtime_stack_excluded": true,
+      "call_count": 3
+    },
+    "softmax_12x197x197": {
+      "object_sha256": "0e2f2a0c3e54eb01765ad8b6f30d97c956b89484be573f0aa1376afec02de8af",
+      "isa": {
+        "status": "PASS",
+        "elf_sha256": "0e2f2a0c3e54eb01765ad8b6f30d97c956b89484be573f0aa1376afec02de8af",
+        "executable_sections": [
+          {
+            "name": ".text",
+            "address": "0x0",
+            "bytes": 1612
+          }
+        ],
+        "instructions": 448,
+        "ame_instructions": 0,
+        "vector_memory_instructions": 17,
+        "ame_store_instructions": 0,
+        "vector_store_instructions": 8,
+        "rvv_instructions": {
+          "vfadd.vf": 1,
+          "vfmv.f.s": 4,
+          "vfmv.s.f": 3,
+          "vfredmax.vs": 1,
+          "vfredosum.vs": 1,
+          "vle32.v": 9,
+          "vmv.v.x": 1,
+          "vse32.v": 8,
+          "vsetivli": 9
+        },
+        "errors": []
+      },
+      "undefined_symbols": [],
+      "calls_from_object_relocations": [
+        {
+          "address": "0x63e",
+          "target": "triton_softmax_12x197x197"
+        }
+      ],
+      "fused_multiply_add_instructions": [],
+      "kernel_and_wrapper_stack_bound_bytes": 208,
+      "stack_by_entry_alignment": [
+        {
+          "entry_sp_mod64": 0,
+          "peak": 192,
+          "path": [
+            "_mlir_ciface_triton_softmax_12x197x197",
+            "triton_softmax_12x197x197"
+          ],
+          "address": "0xf0",
+          "returns": true
+        },
+        {
+          "entry_sp_mod64": 16,
+          "peak": 208,
+          "path": [
+            "_mlir_ciface_triton_softmax_12x197x197",
+            "triton_softmax_12x197x197"
+          ],
+          "address": "0xf0",
+          "returns": true
+        },
+        {
+          "entry_sp_mod64": 32,
+          "peak": 160,
+          "path": [
+            "_mlir_ciface_triton_softmax_12x197x197",
+            "triton_softmax_12x197x197"
+          ],
+          "address": "0xf0",
+          "returns": true
+        },
+        {
+          "entry_sp_mod64": 48,
+          "peak": 176,
+          "path": [
+            "_mlir_ciface_triton_softmax_12x197x197",
+            "triton_softmax_12x197x197"
+          ],
+          "address": "0xf0",
+          "returns": true
+        }
+      ],
+      "runtime_stack_excluded": false,
+      "call_count": 1
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "status": "PASS",
+  "new_board_run": false,
+  "cases": [
+    {
+      "example": "matmul_i8_196x768x768",
+      "build_check_simcheck": "PASS",
+      "programs_per_grid": 42,
+      "outputs_per_grid": 150528,
+      "simulation_rounds": 3,
+      "max_abs": 0,
+      "stack": {
+        "status": "PASS",
+        "elf_sha256": "95335a64afee404cc1171d6561f669629f2b5f622960a1ee133be96067dd0948",
+        "stack_capacity": 65536,
+        "peak_bytes": 1216,
+        "remaining_bytes": 64320
+      },
+      "artifact_hashes": {
+        "kernel.ttir": "96dfaa49277c48264a124ade7d40aa69f80ef7df473f0d12a61428b5cc9f6a5c",
+        "kernel.frontend.mlir": "4bb93a6b21893c2752b3f5807ae54a8f3a90addd371b864d7b4520b9f0c70885",
+        "kernel.planned.mlir": "2a7f26c6c81bd6acb785a647772ff7ae810aadb37c94c1b0a11a7b51b81e25ed",
+        "kernel.boscame.mlir": "9513d7f7732e15183b4d73494f295a6785f906fc94e2de4c4c1ec0c2eea4701a",
+        "kernel.nr.s": "4a334485bdf4c54e4ac0be2c0dcab63e9fe6e7c8a42dbded6b40686aa6752a39",
+        "matmul_i8_196x768x768.elf": "95335a64afee404cc1171d6561f669629f2b5f622960a1ee133be96067dd0948"
+      }
+    },
+    {
+      "example": "matmul_i8_128x1024x128",
+      "build_check_simcheck": "PASS",
+      "programs_per_grid": 32,
+      "outputs_per_grid": 131072,
+      "simulation_rounds": 1,
+      "max_abs": 0,
+      "stack": {
+        "status": "PASS",
+        "elf_sha256": "4f790c53dc28e21128e122d31b97cb3823d3506c89331c31eadbd581cd68cbda",
+        "stack_capacity": 65536,
+        "peak_bytes": 656,
+        "remaining_bytes": 64880
+      },
+      "artifact_hashes": {
+        "kernel.ttir": "aef569acfcd64269daca214ef6e7bfa0b923d85ef230c3da0dc52ff6e06289b5",
+        "kernel.frontend.mlir": "89f2fd16c887de99bd7b34cd15478d70cd494ca7ea1f81c4318ab0b6caf297ed",
+        "kernel.planned.mlir": "f2b0422e7608651a4f08fa6d94a866e9381d74d52dea831334361b6311787f22",
+        "kernel.boscame.mlir": "2c003671ea83041d5939e7c4ad5ec180a09bd1927e5b7b0168f0e5036f996828",
+        "kernel.nr.s": "7165e0cfe6b542e2e992f51f5cd43d2c333e04ec82a0edb46f00653a0be54152",
+        "matmul_i8_128x1024x128.elf": "4f790c53dc28e21128e122d31b97cb3823d3506c89331c31eadbd581cd68cbda"
+      }
+    },
+    {
+      "example": "layernorm_197x768",
+      "build_check_simcheck": "PASS",
+      "programs_per_grid": 197,
+      "outputs_per_grid": 151296,
+      "simulation_rounds": 1,
+      "max_abs": 0,
+      "stack": {
+        "status": "PASS",
+        "elf_sha256": "dcee4218a18200d0c2094cf175d9ab9cceed0a62091b5a2dcc05979040718e42",
+        "stack_capacity": 65536,
+        "peak_bytes": 1168,
+        "remaining_bytes": 64368
+      },
+      "artifact_hashes": {
+        "kernel.ttir": "2166c568752fd7869d019c3596e7d452d16d6a74dfcbc791af0d57c02798737f",
+        "kernel.frontend.mlir": "5fdf2b7a75e853edc8513be3ddc72bc1eb7108bc9161786c36cdfca21afb45d6",
+        "kernel.planned.mlir": "6bee8a9e77ef6600aec2bb12c2f3ee5c61edf52613aa83b14ce49128b4c23310",
+        "kernel.boscame.mlir": "54c172e1446244299bd1f288387260f4bc4d9b2daf3a1e0e34af90e07f28c1c6",
+        "kernel.nr.s": "03272d41859f0b443df47537ebb4743f3402662fd4d0aab05e8021e9144e822f",
+        "layernorm_197x768.elf": "dcee4218a18200d0c2094cf175d9ab9cceed0a62091b5a2dcc05979040718e42"
+      },
+      "rtol": 2e-05,
+      "atol": 2e-05,
+      "exact_dma_ranges_per_row": 4,
+      "bytes_per_range": 3072
+    }
+  ]
+}

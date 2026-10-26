@@ -1,5 +1,14 @@
 # Experimental Triton lowering to BOSCAME
 
+The current compiler uses the [neutral contract → plan → emit pipeline](BOSCAMEKernelContractPipeline.md).
+The commands and board evidence below describe the earlier integrated
+experimental implementation. Its former `boscame` frontend option has been
+replaced by `contract`; use the current pipeline guide for new compilations.
+Retained board measurements are evidence for the recorded artifacts, not for
+newly generated output.
+
+## Earlier integrated implementation and retained validation
+
 The experimental driver can stage independent loads and stores through DMA,
 including kernels without a dot, and lower signed i8 × i8 → i32 dots to AME.
 The existing `--triton-to-boscame` entry remains available.

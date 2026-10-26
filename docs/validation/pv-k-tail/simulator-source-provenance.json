@@ -1,0 +1,20 @@
+{
+  "scope": "48-worker actual-run source provenance; current collection checks were strengthened while the unchanged runtime executed",
+  "run_start_simcheck_sha256": "494c697b7cb71d55dba84361e039908a5c41cda2f49be4a9fa4627eca172824a",
+  "current_simcheck_sha256": "35b97ecde803f174596fa58b92eb0e354ac6d49d62b7cf746ab30000af0f91e6",
+  "run_start_hash_source": "artifact-hashes-run-start.json captured before the 48-worker launch; reconstruction by removing only subsequent collect-only checks verifies the archived hash",
+  "unchanged_runtime_function_sha256": {
+    "scenarios_for": "d1db1cb4a71c776502520b1577556712377cb7ab5a9b581f2b38a5f01b7e418c",
+    "pv_program_mask": "83f9f9d5bba977df1376d04894dc783b55e6a8af6efaefc2d1c3759d06c6ca74",
+    "check_pv_selected_output": "7a241d58422fbbc29a7fbc712f9ca62ec4fc15328a7014e7a10f56f36a2421b8",
+    "audit_pv_program": "9309caac9f5bf3dd2075ce880303ee3de539cae9c09d16d6625fe7745e7527ce",
+    "check_artifacts": "193f5082a78eb22f6f0b7ec0a51fa670ad5745a0d7142fadfb255769add1cf69",
+    "simulate_case": "abbfd3f909a91f02dc4e2cb4a65cdbd1c12838aad5eec14c7625742d91e01ae9",
+    "pv_shards": "23ca8541e3d9bfd40738012359b5596098a6ca734f367104d8a23d00066743aa",
+    "pv_shard_worker": "8a5a6f7d1a6da709cc74d55227766ee0ade83241aea124805e43e6ce481848b7",
+    "assemble_pv_round": "29a515ba8f65c67fcd9d13126efdce40c41ba50433b3ebb84204f95bf808feb7",
+    "check_pv_sharded": "4a25e184e071fa1a539f3ede12fd915f481b4c280cb81674a75aad0c7c96edd5"
+  },
+  "changed_function": "validate_pv_shard_evidence (collect-only): fixed shard identity and exact selected-program order",
+  "ordering_note": "Each shard fixes head and N tile: normal visits M0..12; both stress tail-first and stress reverse visit M12..0. The last round repeats the same stress and reverse-M order on retained dirty SPM; no single-Machine global reverse is claimed."
+}

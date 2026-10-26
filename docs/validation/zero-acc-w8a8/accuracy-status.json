@@ -1,0 +1,9 @@
+{
+  "status": "SELF_TEST_PASS",
+  "full_model_executed": false,
+  "accuracy_accepted": false,
+  "checkpoint_comparison": "UNVERIFIED",
+  "labeled_top1_top5": "UNVERIFIED",
+  "new_board_run": false,
+  "reason": "Complete candidate model execution and matching checkpoint/validation inputs are unavailable; kernel oracle checks do not establish model accuracy."
+}

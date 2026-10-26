@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "status": "PARTIAL_MODEL",
+  "frozen_at_utc": "2026-10-26T05:18:44.684626+00:00",
+  "build": {
+    "cases": 40,
+    "asm_pass": 37,
+    "blocked": [
+      "attention_pv_12x197x64x197",
+      "gelu_197x3072",
+      "softmax_12x197x197"
+    ],
+    "report": "build/build-report.json"
+  },
+  "simulation": {
+    "pass": 31,
+    "programs": 17485,
+    "output_comparisons": 11211403,
+    "max_abs": 0,
+    "validation_not_executed": [
+      "linear_196x768x768",
+      "linear_197x3072x768",
+      "linear_197x768x3072",
+      "linear_197x768x768",
+      "linear_1x1000x768",
+      "patch_embed_196x768"
+    ],
+    "report": "build/simcheck-report.json"
+  },
+  "chain": {
+    "status": "PASS",
+    "programs": 4136,
+    "old_c_reads": 0,
+    "full_model_executed": false,
+    "accuracy_accepted": false,
+    "runs": [
+      {
+        "name": "ties-and-channel-scales",
+        "order": "forward",
+        "output_sha256": "6fd45bf8e66f0ece5dba6b00939e45e8cf66098c4ae9bc5431496f130d64ec22",
+        "max_abs_vs_ordered_fp32": 1052592.0
+      },
+      {
+        "name": "repeated-workspace-reuse",
+        "order": "reverse",
+        "output_sha256": "6fd45bf8e66f0ece5dba6b00939e45e8cf66098c4ae9bc5431496f130d64ec22",
+        "max_abs_vs_ordered_fp32": 1052592.0
+      },
+      {
+        "name": "changed-token-scale",
+        "order": "tail-first",
+        "output_sha256": "4c0651f4193a5de69ee3c51e396ccd589104aea07cae0db478edf12021296b56",
+        "max_abs_vs_ordered_fp32": 131574.0
+      },
+      {
+        "name": "zero-token-and-zero-channel",
+        "order": "reverse",
+        "output_sha256": "233cb3747363fef1c8733b84cb08d0e1a41b5f66612e207d5b76e5004db1c9f1",
+        "max_abs_vs_ordered_fp32": 0.0
+      }
+    ],
+    "report": "build/w8a8-chain-check.json"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "status": "PASS",
+  "scope": "two selected emitted-IR programs; not full-grid or assembly execution; timing is interpreter cost only",
+  "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+  "runs": [
+    {
+      "program": [
+        0,
+        0,
+        0
+      ],
+      "elapsed_seconds": 7.357704497873783,
+      "bit_exact": true,
+      "pv_access_audit": {
+        "a_matrix_geometry": {
+          "full-M/full-K": 3,
+          "full-M/tail-K": 1
+        },
+        "b_dma_packets": 197,
+        "ddr_bytes": {
+          "%arg0": 12608,
+          "%arg1": 12608,
+          "%arg2": 1024
+        }
+      }
+    },
+    {
+      "program": [
+        12,
+        3,
+        11
+      ],
+      "elapsed_seconds": 7.126918530091643,
+      "bit_exact": true,
+      "pv_access_audit": {
+        "a_matrix_geometry": {
+          "tail-M/full-K": 3,
+          "tail-M/tail-K": 1
+        },
+        "b_dma_packets": 197,
+        "ddr_bytes": {
+          "%arg0": 3940,
+          "%arg1": 12608,
+          "%arg2": 320
+        }
+      }
+    }
+  ]
+}

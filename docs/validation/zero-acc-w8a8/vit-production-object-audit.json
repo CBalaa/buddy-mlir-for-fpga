@@ -1,0 +1,1074 @@
+{
+  "status": "PASS",
+  "scope": "production ISA audit of all successfully generated RISC-V objects",
+  "cases": [
+    {
+      "case": "add_197x768",
+      "status": "PASS",
+      "elf_sha256": "8fe20ebb4e199cd6f32fbc0250e8577fe159efa3dc66412ff73dd091f59f3961",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 270
+        }
+      ],
+      "instructions": 94,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 3,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 2,
+        "vse32.v": 1,
+        "vsetivli": 1
+      },
+      "errors": []
+    },
+    {
+      "case": "add_1x1000",
+      "status": "PASS",
+      "elf_sha256": "3806a7bb79bb558ff6bd07f8042b07202e843ef4f627b98a129b21561c04e73c",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 800
+        }
+      ],
+      "instructions": 254,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 14,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 7,
+      "rvv_instructions": {
+        "vfadd.vv": 2,
+        "vle32.v": 7,
+        "vmv.v.i": 2,
+        "vse32.v": 7,
+        "vsetivli": 7
+      },
+      "errors": []
+    },
+    {
+      "case": "add_1x768",
+      "status": "PASS",
+      "elf_sha256": "6804acc20d733a1ff62ab44f7ac87c58d3b7dbabf71624a2a62a033776bf3934",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 270
+        }
+      ],
+      "instructions": 94,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 3,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 2,
+        "vse32.v": 1,
+        "vsetivli": 1
+      },
+      "errors": []
+    },
+    {
+      "case": "attention_qk_12x197x197x64",
+      "status": "PASS",
+      "elf_sha256": "377ae8b4b81cafdcda454628ddba468b3859518e0998ffcbdb8aac7ebfdc09c8",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 5670
+        }
+      ],
+      "instructions": 1896,
+      "ame_instructions": 40,
+      "vector_memory_instructions": 48,
+      "ame_store_instructions": 8,
+      "vector_store_instructions": 24,
+      "rvv_instructions": {
+        "vfadd.vf": 4,
+        "vfmul.vv": 4,
+        "vfmv.f.s": 12,
+        "vfmv.s.f": 4,
+        "vle32.v": 24,
+        "vmv.v.i": 6,
+        "vmv.v.x": 4,
+        "vse32.v": 24,
+        "vsetivli": 18
+      },
+      "errors": []
+    },
+    {
+      "case": "bias_add_196x768",
+      "status": "PASS",
+      "elf_sha256": "f44265edb12a31fd0950315550b773e988d8f80832de7489996a0138a40e157f",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 416
+        }
+      ],
+      "instructions": 143,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 5,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 3,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 2,
+        "vmv.v.i": 2,
+        "vse32.v": 3,
+        "vsetivli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "bias_add_197x3072",
+      "status": "PASS",
+      "elf_sha256": "fad61af8db1c2170de50f9a542f2d23405422c785ed7fe7e7cd58a1ed1474ffd",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 284
+        }
+      ],
+      "instructions": 102,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 3,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 2,
+        "vse32.v": 1,
+        "vsetivli": 1
+      },
+      "errors": []
+    },
+    {
+      "case": "bias_add_197x768",
+      "status": "PASS",
+      "elf_sha256": "1f1937e42ecd6fe696dfc5dc0674fc6b5046d7875ddd60a5d5f19998cf831b88",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 416
+        }
+      ],
+      "instructions": 143,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 5,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 3,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 2,
+        "vmv.v.i": 2,
+        "vse32.v": 3,
+        "vsetivli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "bias_add_1x1000",
+      "status": "PASS",
+      "elf_sha256": "8f2a8d00a35c58086700a9477cdb331fbd11caf24387b29a1b77541274fa971b",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 694
+        }
+      ],
+      "instructions": 220,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 15,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 8,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 7,
+        "vmv.v.i": 1,
+        "vse32.v": 8,
+        "vsetivli": 7
+      },
+      "errors": []
+    },
+    {
+      "case": "bias_add_1x768",
+      "status": "PASS",
+      "elf_sha256": "a7f660aaa58e88ee783f5d37f1b1e3ed4860a4c40d86c64a76235850ae6ce1c6",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 416
+        }
+      ],
+      "instructions": 143,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 5,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 3,
+      "rvv_instructions": {
+        "vfadd.vv": 1,
+        "vle32.v": 2,
+        "vmv.v.i": 2,
+        "vse32.v": 3,
+        "vsetivli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "dequantize_196x768",
+      "status": "PASS",
+      "elf_sha256": "27402da3c1b142259f8320f5989c2600bf9894a7ed403213b11cae9b44dc52bf",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 620
+        }
+      ],
+      "instructions": 193,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 12,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 5,
+      "rvv_instructions": {
+        "vfcvt.f.x.v": 3,
+        "vfmul.vf": 2,
+        "vfmul.vv": 1,
+        "vfmv.f.s": 1,
+        "vle32.v": 6,
+        "vle64.v": 1,
+        "vse32.v": 4,
+        "vse64.v": 1,
+        "vsetivli": 6
+      },
+      "errors": []
+    },
+    {
+      "case": "dequantize_197x3072",
+      "status": "PASS",
+      "elf_sha256": "cd9530bf4ba3dc6a1e6f3dd7792d706dad1d52d899cefeb154beb04b22d4ed57",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 620
+        }
+      ],
+      "instructions": 193,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 12,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 5,
+      "rvv_instructions": {
+        "vfcvt.f.x.v": 3,
+        "vfmul.vf": 2,
+        "vfmul.vv": 1,
+        "vfmv.f.s": 1,
+        "vle32.v": 6,
+        "vle64.v": 1,
+        "vse32.v": 4,
+        "vse64.v": 1,
+        "vsetivli": 6
+      },
+      "errors": []
+    },
+    {
+      "case": "dequantize_197x768",
+      "status": "PASS",
+      "elf_sha256": "2b6d65f98d9a9b83aad10a1ebfa053afab08fbef289f49761ea13e4bca5d28d3",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 620
+        }
+      ],
+      "instructions": 193,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 12,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 5,
+      "rvv_instructions": {
+        "vfcvt.f.x.v": 3,
+        "vfmul.vf": 2,
+        "vfmul.vv": 1,
+        "vfmv.f.s": 1,
+        "vle32.v": 6,
+        "vle64.v": 1,
+        "vse32.v": 4,
+        "vse64.v": 1,
+        "vsetivli": 6
+      },
+      "errors": []
+    },
+    {
+      "case": "dequantize_1x1000",
+      "status": "PASS",
+      "elf_sha256": "e5ad906abf95d51c16e8b47663a05a0d7f9605cc21237ebebd97dd1c730481cb",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 1300
+        }
+      ],
+      "instructions": 391,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 26,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 12,
+      "rvv_instructions": {
+        "vfcvt.f.x.v": 6,
+        "vfmul.vf": 4,
+        "vfmul.vv": 2,
+        "vfmv.f.s": 2,
+        "vle32.v": 13,
+        "vle64.v": 1,
+        "vmv.v.i": 1,
+        "vmv.v.x": 1,
+        "vse32.v": 11,
+        "vse64.v": 1,
+        "vsetivli": 14
+      },
+      "errors": []
+    },
+    {
+      "case": "layernorm_197x768",
+      "status": "PASS",
+      "elf_sha256": "70734c30492a026882aef91bfeb7953165df162670088b23c98f7903f1b781a7",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 1130
+        }
+      ],
+      "instructions": 339,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 21,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 10,
+      "rvv_instructions": {
+        "vfadd.vf": 1,
+        "vfadd.vv": 1,
+        "vfmul.vf": 3,
+        "vfmul.vv": 3,
+        "vfmv.f.s": 2,
+        "vfmv.s.f": 2,
+        "vfredosum.vs": 2,
+        "vle32.v": 10,
+        "vle64.v": 1,
+        "vmv.v.i": 3,
+        "vmv.v.x": 1,
+        "vse32.v": 9,
+        "vse64.v": 1,
+        "vsetivli": 10
+      },
+      "errors": []
+    },
+    {
+      "case": "layernorm_1x768",
+      "status": "PASS",
+      "elf_sha256": "56ddc39909cf6b9aca7dca92e1b8c20bee061babbedd2aa6b7c542ac72c62ca4",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 1130
+        }
+      ],
+      "instructions": 339,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 21,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 10,
+      "rvv_instructions": {
+        "vfadd.vf": 1,
+        "vfadd.vv": 1,
+        "vfmul.vf": 3,
+        "vfmul.vv": 3,
+        "vfmv.f.s": 2,
+        "vfmv.s.f": 2,
+        "vfredosum.vs": 2,
+        "vle32.v": 10,
+        "vle64.v": 1,
+        "vmv.v.i": 3,
+        "vmv.v.x": 1,
+        "vse32.v": 9,
+        "vse64.v": 1,
+        "vsetivli": 10
+      },
+      "errors": []
+    },
+    {
+      "case": "linear_196x768x768",
+      "status": "PASS",
+      "elf_sha256": "d7f394990c0af32e7bd5000b5577eb82f3ea29c17ef499a1509e8d8325b56272",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 5120
+        }
+      ],
+      "instructions": 1671,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 26,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 12,
+      "rvv_instructions": {
+        "vfadd.vv": 4,
+        "vfmv.f.s": 6,
+        "vfmv.s.f": 2,
+        "vle32.v": 14,
+        "vmv.v.i": 4,
+        "vse32.v": 12,
+        "vsetivli": 12
+      },
+      "errors": []
+    },
+    {
+      "case": "linear_197x3072x768",
+      "status": "PASS",
+      "elf_sha256": "fb526b27400211114f346c39dc0db876aca2967da9df6d147255adbd1612ba7e",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 5314
+        }
+      ],
+      "instructions": 1743,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 26,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 12,
+      "rvv_instructions": {
+        "vfadd.vv": 4,
+        "vfmv.f.s": 6,
+        "vfmv.s.f": 2,
+        "vle32.v": 14,
+        "vmv.v.i": 4,
+        "vse32.v": 12,
+        "vsetivli": 12
+      },
+      "errors": []
+    },
+    {
+      "case": "linear_197x768x3072",
+      "status": "PASS",
+      "elf_sha256": "44c5205cc43f1464d30ef90968aecf08123bf1c6f488bc80bfbb45f78706598d",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 5306
+        }
+      ],
+      "instructions": 1753,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 26,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 12,
+      "rvv_instructions": {
+        "vfadd.vv": 4,
+        "vfmv.f.s": 6,
+        "vfmv.s.f": 2,
+        "vle32.v": 14,
+        "vmv.v.i": 4,
+        "vse32.v": 12,
+        "vsetivli": 12
+      },
+      "errors": []
+    },
+    {
+      "case": "linear_197x768x768",
+      "status": "PASS",
+      "elf_sha256": "7876bafde1a32db3cd910c456733befc3d03adace74f772cb6a07eaf2bd073be",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 5242
+        }
+      ],
+      "instructions": 1710,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 26,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 12,
+      "rvv_instructions": {
+        "vfadd.vv": 4,
+        "vfmv.f.s": 6,
+        "vfmv.s.f": 2,
+        "vle32.v": 14,
+        "vmv.v.i": 4,
+        "vse32.v": 12,
+        "vsetivli": 12
+      },
+      "errors": []
+    },
+    {
+      "case": "linear_1x1000x768",
+      "status": "PASS",
+      "elf_sha256": "962034fc6f27c4065a88588241bb42f3f0db1e45de39260660dd8f39cbd0c5f4",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 3206
+        }
+      ],
+      "instructions": 1118,
+      "ame_instructions": 20,
+      "vector_memory_instructions": 26,
+      "ame_store_instructions": 4,
+      "vector_store_instructions": 12,
+      "rvv_instructions": {
+        "vfadd.vv": 4,
+        "vfmv.f.s": 6,
+        "vfmv.s.f": 2,
+        "vle32.v": 14,
+        "vmv.v.i": 5,
+        "vse32.v": 12,
+        "vsetivli": 12
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_196x768x768",
+      "status": "PASS",
+      "elf_sha256": "d469e8f03e7fc36e5116cdac62841ae3e243523a3414d7cb8de1d9c9a8e1814b",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6422
+        }
+      ],
+      "instructions": 2277,
+      "ame_instructions": 68,
+      "vector_memory_instructions": 10,
+      "ame_store_instructions": 2,
+      "vector_store_instructions": 6,
+      "rvv_instructions": {
+        "vadd.vv": 2,
+        "vle32.v": 4,
+        "vmv.v.i": 4,
+        "vse32.v": 5,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_197x3072x768",
+      "status": "PASS",
+      "elf_sha256": "937ca92932fcb3c33bbcc8cfa3165d1b1a117d27fd3ade9a4f7ed5c87e44a7ba",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6558
+        }
+      ],
+      "instructions": 2355,
+      "ame_instructions": 68,
+      "vector_memory_instructions": 10,
+      "ame_store_instructions": 2,
+      "vector_store_instructions": 6,
+      "rvv_instructions": {
+        "vadd.vv": 2,
+        "vle32.v": 4,
+        "vmv.v.i": 4,
+        "vse32.v": 5,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_197x768x3072",
+      "status": "PASS",
+      "elf_sha256": "4bebcc1d370f3c51358fefca5d6aa9356cca2ac74f1e1c4dad17f0e0ec672282",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6542
+        }
+      ],
+      "instructions": 2319,
+      "ame_instructions": 68,
+      "vector_memory_instructions": 10,
+      "ame_store_instructions": 2,
+      "vector_store_instructions": 6,
+      "rvv_instructions": {
+        "vadd.vv": 2,
+        "vle32.v": 4,
+        "vmv.v.i": 4,
+        "vse32.v": 5,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_197x768x768",
+      "status": "PASS",
+      "elf_sha256": "207b7dc3014075660b591d65210efdc2a8376b9fd2abd23ec94b22335f285190",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6540
+        }
+      ],
+      "instructions": 2313,
+      "ame_instructions": 68,
+      "vector_memory_instructions": 10,
+      "ame_store_instructions": 2,
+      "vector_store_instructions": 6,
+      "rvv_instructions": {
+        "vadd.vv": 2,
+        "vle32.v": 4,
+        "vmv.v.i": 4,
+        "vse32.v": 5,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 3
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_1x1000x768",
+      "status": "PASS",
+      "elf_sha256": "e4ee8d9dc2130f5ff2051ae79b9659e591a210970e48002a90df9722bdcdeae5",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 5628
+        }
+      ],
+      "instructions": 2078,
+      "ame_instructions": 78,
+      "vector_memory_instructions": 13,
+      "ame_store_instructions": 4,
+      "vector_store_instructions": 9,
+      "rvv_instructions": {
+        "vadd.vv": 2,
+        "vle32.v": 4,
+        "vmv.v.i": 8,
+        "vse32.v": 6,
+        "vse8.v": 3,
+        "vsetivli": 7,
+        "vsetvli": 7
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_overwrite_196x768x768",
+      "status": "PASS",
+      "elf_sha256": "0bafdfc6c40872e9cb8069d6d13e3f8015f329b88bf5ffd545c3e4d2fac442f2",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6902
+        }
+      ],
+      "instructions": 2645,
+      "ame_instructions": 132,
+      "vector_memory_instructions": 1,
+      "ame_store_instructions": 3,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vmv.v.i": 2,
+        "vse8.v": 1,
+        "vsetvli": 2
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_overwrite_197x3072x768",
+      "status": "PASS",
+      "elf_sha256": "127f3ec091ce82b7d681f8b5350e4019ecb17fd0156f5120b8ed01572e50c9f5",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6938
+        }
+      ],
+      "instructions": 2668,
+      "ame_instructions": 132,
+      "vector_memory_instructions": 1,
+      "ame_store_instructions": 3,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vmv.v.i": 2,
+        "vse8.v": 1,
+        "vsetvli": 2
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_overwrite_197x768x3072",
+      "status": "PASS",
+      "elf_sha256": "8a0725614b1bc9fc31623b7623b7cf6f5e44ad0ef527b32adc5cee84b906d36d",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6992
+        }
+      ],
+      "instructions": 2679,
+      "ame_instructions": 132,
+      "vector_memory_instructions": 1,
+      "ame_store_instructions": 3,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vmv.v.i": 2,
+        "vse8.v": 1,
+        "vsetvli": 2
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_overwrite_197x768x768",
+      "status": "PASS",
+      "elf_sha256": "e9463846972025a5a9a6c45e3ed1e535fb1a9ca1a3e4d742e73342f822346afc",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 6966
+        }
+      ],
+      "instructions": 2664,
+      "ame_instructions": 132,
+      "vector_memory_instructions": 1,
+      "ame_store_instructions": 3,
+      "vector_store_instructions": 1,
+      "rvv_instructions": {
+        "vmv.v.i": 2,
+        "vse8.v": 1,
+        "vsetvli": 2
+      },
+      "errors": []
+    },
+    {
+      "case": "matmul_i8_overwrite_1x1000x768",
+      "status": "PASS",
+      "elf_sha256": "d4826a512f3520232c6ce41514c421cdf12ab91465c61ca9a35804bde2f18aa5",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 7454
+        }
+      ],
+      "instructions": 2881,
+      "ame_instructions": 141,
+      "vector_memory_instructions": 3,
+      "ame_store_instructions": 5,
+      "vector_store_instructions": 3,
+      "rvv_instructions": {
+        "vmv.v.i": 5,
+        "vse8.v": 3,
+        "vsetvli": 5
+      },
+      "errors": []
+    },
+    {
+      "case": "patch_embed_196x768",
+      "status": "PASS",
+      "elf_sha256": "8865c74e1af387a9310aaab42c4a1c05b70d072e34347ce902ab5e8b620a2529",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 424
+        }
+      ],
+      "instructions": 149,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 4,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 2,
+      "rvv_instructions": {
+        "vle32.v": 1,
+        "vle64.v": 1,
+        "vse32.v": 1,
+        "vse64.v": 1,
+        "vsetivli": 2
+      },
+      "errors": []
+    },
+    {
+      "case": "quantize_1000x768",
+      "status": "PASS",
+      "elf_sha256": "799d21e5b0a72ff5ec94ac8d1c9ecc99907f4793030bc46787217b8e98343584",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 688
+        }
+      ],
+      "instructions": 219,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 7,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 4,
+      "rvv_instructions": {
+        "vadd.vv": 1,
+        "vand.vx": 1,
+        "vfabs.v": 1,
+        "vfcvt.f.x.v": 1,
+        "vfcvt.rtz.x.f.v": 1,
+        "vfdiv.vf": 1,
+        "vfmax.vf": 1,
+        "vfmin.vf": 1,
+        "vfmv.f.s": 1,
+        "vfmv.s.f": 1,
+        "vfredmax.vs": 1,
+        "vfsub.vv": 1,
+        "vle32.v": 3,
+        "vmerge.vxm": 1,
+        "vmfge.vf": 2,
+        "vmv.v.i": 2,
+        "vnsrl.wi": 2,
+        "vse32.v": 3,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 4
+      },
+      "errors": []
+    },
+    {
+      "case": "quantize_196x768",
+      "status": "PASS",
+      "elf_sha256": "e65ad42f310c08603cf947eec8ea87f2459bc7b79d6f4fe1beda5de541334af9",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 688
+        }
+      ],
+      "instructions": 219,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 7,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 4,
+      "rvv_instructions": {
+        "vadd.vv": 1,
+        "vand.vx": 1,
+        "vfabs.v": 1,
+        "vfcvt.f.x.v": 1,
+        "vfcvt.rtz.x.f.v": 1,
+        "vfdiv.vf": 1,
+        "vfmax.vf": 1,
+        "vfmin.vf": 1,
+        "vfmv.f.s": 1,
+        "vfmv.s.f": 1,
+        "vfredmax.vs": 1,
+        "vfsub.vv": 1,
+        "vle32.v": 3,
+        "vmerge.vxm": 1,
+        "vmfge.vf": 2,
+        "vmv.v.i": 2,
+        "vnsrl.wi": 2,
+        "vse32.v": 3,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 4
+      },
+      "errors": []
+    },
+    {
+      "case": "quantize_197x3072",
+      "status": "PASS",
+      "elf_sha256": "a073b0c6c1dc3add10f124d98c868bcad5533be28f8fa8b52911dcddcdb6018b",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 688
+        }
+      ],
+      "instructions": 223,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 7,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 4,
+      "rvv_instructions": {
+        "vadd.vv": 1,
+        "vand.vx": 1,
+        "vfabs.v": 1,
+        "vfcvt.f.x.v": 1,
+        "vfcvt.rtz.x.f.v": 1,
+        "vfdiv.vf": 1,
+        "vfmax.vf": 1,
+        "vfmin.vf": 1,
+        "vfmv.f.s": 1,
+        "vfmv.s.f": 1,
+        "vfredmax.vs": 1,
+        "vfsub.vv": 1,
+        "vle32.v": 3,
+        "vmerge.vxm": 1,
+        "vmfge.vf": 2,
+        "vmv.v.i": 2,
+        "vnsrl.wi": 2,
+        "vse32.v": 3,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 4
+      },
+      "errors": []
+    },
+    {
+      "case": "quantize_197x768",
+      "status": "PASS",
+      "elf_sha256": "9c84632e7a09cac8b6606adc8215ce1de9ba042f7dd0b5fefc46a616446b4486",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 688
+        }
+      ],
+      "instructions": 219,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 7,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 4,
+      "rvv_instructions": {
+        "vadd.vv": 1,
+        "vand.vx": 1,
+        "vfabs.v": 1,
+        "vfcvt.f.x.v": 1,
+        "vfcvt.rtz.x.f.v": 1,
+        "vfdiv.vf": 1,
+        "vfmax.vf": 1,
+        "vfmin.vf": 1,
+        "vfmv.f.s": 1,
+        "vfmv.s.f": 1,
+        "vfredmax.vs": 1,
+        "vfsub.vv": 1,
+        "vle32.v": 3,
+        "vmerge.vxm": 1,
+        "vmfge.vf": 2,
+        "vmv.v.i": 2,
+        "vnsrl.wi": 2,
+        "vse32.v": 3,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 4
+      },
+      "errors": []
+    },
+    {
+      "case": "quantize_1x768",
+      "status": "PASS",
+      "elf_sha256": "59e2035fc14e527ffd05ee59ca3474e730de52e91b38e48a68e648a84b14a80b",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 688
+        }
+      ],
+      "instructions": 219,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 7,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 4,
+      "rvv_instructions": {
+        "vadd.vv": 1,
+        "vand.vx": 1,
+        "vfabs.v": 1,
+        "vfcvt.f.x.v": 1,
+        "vfcvt.rtz.x.f.v": 1,
+        "vfdiv.vf": 1,
+        "vfmax.vf": 1,
+        "vfmin.vf": 1,
+        "vfmv.f.s": 1,
+        "vfmv.s.f": 1,
+        "vfredmax.vs": 1,
+        "vfsub.vv": 1,
+        "vle32.v": 3,
+        "vmerge.vxm": 1,
+        "vmfge.vf": 2,
+        "vmv.v.i": 2,
+        "vnsrl.wi": 2,
+        "vse32.v": 3,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 4
+      },
+      "errors": []
+    },
+    {
+      "case": "quantize_768x768",
+      "status": "PASS",
+      "elf_sha256": "81c89f368e933464e7b64356b2bcad0783e5419621e5db52e9c597d06ab54f4c",
+      "executable_sections": [
+        {
+          "name": ".text",
+          "address": "0x0",
+          "bytes": 688
+        }
+      ],
+      "instructions": 219,
+      "ame_instructions": 0,
+      "vector_memory_instructions": 7,
+      "ame_store_instructions": 0,
+      "vector_store_instructions": 4,
+      "rvv_instructions": {
+        "vadd.vv": 1,
+        "vand.vx": 1,
+        "vfabs.v": 1,
+        "vfcvt.f.x.v": 1,
+        "vfcvt.rtz.x.f.v": 1,
+        "vfdiv.vf": 1,
+        "vfmax.vf": 1,
+        "vfmin.vf": 1,
+        "vfmv.f.s": 1,
+        "vfmv.s.f": 1,
+        "vfredmax.vs": 1,
+        "vfsub.vv": 1,
+        "vle32.v": 3,
+        "vmerge.vxm": 1,
+        "vmfge.vf": 2,
+        "vmv.v.i": 2,
+        "vnsrl.wi": 2,
+        "vse32.v": 3,
+        "vse8.v": 1,
+        "vsetivli": 5,
+        "vsetvli": 4
+      },
+      "errors": []
+    }
+  ]
+}

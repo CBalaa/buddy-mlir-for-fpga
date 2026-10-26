@@ -1,0 +1,7 @@
+{
+  "status": "PASS",
+  "existing_cases": 38,
+  "compared_artifacts": 418,
+  "differences": [],
+  "scope": "all pre-existing kernel.* artifacts, including emitted IR and objects; no new numerical run is inferred"
+}

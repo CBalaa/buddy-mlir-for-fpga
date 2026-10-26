@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "cases": [
+    {
+      "name": "attention_qk_12x197x197x64",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "kernels/attention_qk_12x197x197x64",
+      "artifacts": {
+        "kernel.o": "3be38202eaa8b1d5cfac4f07f8b44e4d27849610f58af6a984c12a5a14105d4e",
+        "kernel.planned.mlir": "9b7f5aa16721a6c7c17f43a6e1deb68a293d2ea6941b5ef2512ccba2076cbc7e",
+        "kernel.llvm.mlir": "ecd3b344c8bbf4523e4f38352652b90ad2b1c34ced192036306b5a0b0bb5e5f7",
+        "kernel.ttir": "a60a3ca6b1b0f1718f8792782ee0597dd72ea1cca71026ec3c8174288c50987b",
+        "kernel.frontend.mlir": "e43f3b9bd1a587624d9bf2d0f9faaf06b7c259210feb1f5ab58037f2e1564a20",
+        "kernel.boscame.mlir": "67e5190b4c17d2ee714801ef6beb5bb2cf7b17ac8c9ffc7fb0e5ad49e58a1d8e",
+        "kernel.bufferized.mlir": "e43f3b9bd1a587624d9bf2d0f9faaf06b7c259210feb1f5ab58037f2e1564a20",
+        "kernel.encoded.s": "bd33a7b9e471eb46c811281b5299c54af600bd8b03c0c98f7e95d848e1209ade",
+        "kernel.nr.s": "0f7e0b1a02d31ef128e0df6ce4934ea686dad3594c44e13be80e9bd8a60c5cd8",
+        "kernel.ll": "1e4a30049eabe9f1ada43a0b54d5f5a526dfdc92c3a11e7cafe703c90aed5683",
+        "kernel.s": "af0faa97f8c846408d6ad3a0f4f7efb58dc7c5c0f0d2fc21c161d67dea0a8cd4"
+      },
+      "kernel_module_sha256": "4a363070691a4c6204385e8b39d07f3289de08dede14c4a48add0759f4b61875"
+    }
+  ]
+}

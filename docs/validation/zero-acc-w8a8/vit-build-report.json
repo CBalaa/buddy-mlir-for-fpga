@@ -1,0 +1,767 @@
+{
+  "schema": 1,
+  "status": "PARTIAL",
+  "cases": [
+    {
+      "name": "add_197x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/add_197x768",
+      "artifacts": {
+        "kernel.ll": "a517262bc2e1f70f6c34a1c2adfa80e53f90e2e7c99c972a4b53d8cda7c01e90",
+        "kernel.llvm.mlir": "dfd08c2346699ad998f1d628b2751129128be5d4495fc691076e69b9811a984f",
+        "kernel.encoded.s": "815b3103a2085d5615c4a779a7c7714039f8752443817d458d986f7ec768484b",
+        "kernel.nr.s": "4036eaae6c69cf6287325bb14ced974c69960c305c2b2129ee02a10b8f201930",
+        "kernel.boscame.mlir": "5df5fe8990c1d6268c75c0a4aaf5c0f3fa92ec5a1e709d55f4073c9f3771b706",
+        "kernel.frontend.mlir": "e39fc672bb21e9f202d3457b4b8a4ec52296add3ecea4726ef5f0570f5f05f58",
+        "kernel.o": "8fe20ebb4e199cd6f32fbc0250e8577fe159efa3dc66412ff73dd091f59f3961",
+        "kernel.planned.mlir": "55b4082d889e1e071ca56390992222299e387e49bd89a8da85696dca255e2bd4",
+        "kernel.bufferized.mlir": "e39fc672bb21e9f202d3457b4b8a4ec52296add3ecea4726ef5f0570f5f05f58",
+        "kernel.ttir": "95af02e20d276cb63e25fcf44cd6219b49efe2ceb20a9fdd6215eb5226b7be15",
+        "kernel.s": "815b3103a2085d5615c4a779a7c7714039f8752443817d458d986f7ec768484b"
+      },
+      "kernel_module_sha256": "30585714374b7b250003d29bd0a51156b07592a5fa87fa269719c30324de65db"
+    },
+    {
+      "name": "add_1x1000",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/add_1x1000",
+      "artifacts": {
+        "kernel.ll": "93b06a09576d15ad24e8638d567feb8dc99703b24f0e8afd6969391da180bfff",
+        "kernel.llvm.mlir": "34a19c2665882bb8c478113e6b340f700925512ca36048486414975759b28e94",
+        "kernel.encoded.s": "32b780aeb1b6bb3a37813c2a4fb18dafc7a5f41b912f4c1f80976065899c43d4",
+        "kernel.nr.s": "8266f7ccb12774b6f22412424c9a734899b7878a5a4ac0131b00b5600f3187f5",
+        "kernel.boscame.mlir": "d2c1150379cafbc2b841216e13dd9fcc143005e9581dbf41f45680bd4687931d",
+        "kernel.frontend.mlir": "8aa7ef2b5429b022e01fbcfa059631fbb926c028cc315a8d9ce8fee2f522051d",
+        "kernel.o": "3806a7bb79bb558ff6bd07f8042b07202e843ef4f627b98a129b21561c04e73c",
+        "kernel.planned.mlir": "32417389db11076b2690e4ee339214c04f5fc241caec98b0adfa53b78b57c485",
+        "kernel.bufferized.mlir": "8aa7ef2b5429b022e01fbcfa059631fbb926c028cc315a8d9ce8fee2f522051d",
+        "kernel.ttir": "b68030e7938567ceb8c7b407b2289cfc4e28c10a58a4218cad5b165901744982",
+        "kernel.s": "32b780aeb1b6bb3a37813c2a4fb18dafc7a5f41b912f4c1f80976065899c43d4"
+      },
+      "kernel_module_sha256": "c8fb65fa71a2811a9242aa474f4c76c301b651b6f3cfca8f066b9f770da43e69"
+    },
+    {
+      "name": "add_1x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/add_1x768",
+      "artifacts": {
+        "kernel.ll": "91dfbc23546dcabc8a4f203ea89b47bf2668fd340415edf54d54781f7fdfefa6",
+        "kernel.llvm.mlir": "54be4d0c17266b3a5635b33a37d1be5c62482429ba558d350d1e2c9a5efcb1c8",
+        "kernel.encoded.s": "497b610de1e25982db56d5b59b947f4738453420d41ca2c30ed22a6ad0222c09",
+        "kernel.nr.s": "10d5fc7c3ed91511cd951a0b471c7981fe85f9d17526588774e9d7aad7aebcf6",
+        "kernel.boscame.mlir": "6f312914e2110fa7503b0851b8f9d2e090bbfe23f2a81d4ad93ffb7d238f57ef",
+        "kernel.frontend.mlir": "581afb500e7b8c1444d90cdbd3b47ebdc08547c97bd765f07e1efc1acf32151a",
+        "kernel.o": "6804acc20d733a1ff62ab44f7ac87c58d3b7dbabf71624a2a62a033776bf3934",
+        "kernel.planned.mlir": "12db750f27abfe47feb633aa5680673958431a7d9c65f5ac97d3d306d7699a0f",
+        "kernel.bufferized.mlir": "581afb500e7b8c1444d90cdbd3b47ebdc08547c97bd765f07e1efc1acf32151a",
+        "kernel.ttir": "0cc1a0465238f965d797ac003515ec52ba5f4424ff56c4e6502447210a0ee713",
+        "kernel.s": "497b610de1e25982db56d5b59b947f4738453420d41ca2c30ed22a6ad0222c09"
+      },
+      "kernel_module_sha256": "f44ffe521397b6ea71c9877db0394da182a417330f1991c6c4a6496c9df5f6f7"
+    },
+    {
+      "name": "attention_pv_12x197x64x197",
+      "status": "BLOCKED",
+      "stage": "frontend",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197",
+      "reason": "examples/FPGA-BOSCAME/vit-base-patch16-224/attention_pv_12x197x64x197/kernel.py:29:13: error: 'memref.copy' op kernel contract V4: static valid shape must match the access rank and be positive\n        a = tl.load(\n            ^\nexamples/FPGA-BOSCAME/vit-base-patch16-224/attention_pv_12x197x64x197/kernel.py:29:13: note: see current operation: \"memref.copy\"(%77, %78) {contract.access = {boundary = \"external_ddr\", kind = \"load\", mask = {kind = \"rectangular\", valid_shape = array<i64: 16, -9223372036854775808>}, origin_id = 0 : i64, other = 0.000000e+00 : f32}} : (memref<16x?xf32, strided<[197, 1], offset: ?>>, memref<16x?xf32, strided<[64, 1]>>) -> ()"
+    },
+    {
+      "name": "attention_qk_12x197x197x64",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_qk_12x197x197x64",
+      "artifacts": {
+        "kernel.ll": "1e4a30049eabe9f1ada43a0b54d5f5a526dfdc92c3a11e7cafe703c90aed5683",
+        "kernel.llvm.mlir": "ecd3b344c8bbf4523e4f38352652b90ad2b1c34ced192036306b5a0b0bb5e5f7",
+        "kernel.encoded.s": "bd33a7b9e471eb46c811281b5299c54af600bd8b03c0c98f7e95d848e1209ade",
+        "kernel.nr.s": "6e7c10eadaa6f261edea907e2f3752b08bbe90b576e0260121bf952aa795a262",
+        "kernel.boscame.mlir": "67e5190b4c17d2ee714801ef6beb5bb2cf7b17ac8c9ffc7fb0e5ad49e58a1d8e",
+        "kernel.frontend.mlir": "e43f3b9bd1a587624d9bf2d0f9faaf06b7c259210feb1f5ab58037f2e1564a20",
+        "kernel.o": "377ae8b4b81cafdcda454628ddba468b3859518e0998ffcbdb8aac7ebfdc09c8",
+        "kernel.planned.mlir": "3d196ad3c7e2b00ef776ad5703094cccb3256ffcbd671d42d172f2675c1a932a",
+        "kernel.bufferized.mlir": "e43f3b9bd1a587624d9bf2d0f9faaf06b7c259210feb1f5ab58037f2e1564a20",
+        "kernel.ttir": "a60a3ca6b1b0f1718f8792782ee0597dd72ea1cca71026ec3c8174288c50987b",
+        "kernel.s": "af0faa97f8c846408d6ad3a0f4f7efb58dc7c5c0f0d2fc21c161d67dea0a8cd4"
+      },
+      "kernel_module_sha256": "4a363070691a4c6204385e8b39d07f3289de08dede14c4a48add0759f4b61875"
+    },
+    {
+      "name": "bias_add_196x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/bias_add_196x768",
+      "artifacts": {
+        "kernel.ll": "09420ff74442eb77a85cef81135f78ae029fb18712f65c6535f0da3873fc7cc6",
+        "kernel.llvm.mlir": "b684cde4d88076a36fcbbd59e4d12deee448af1792ae9c945c44b9f1594a3508",
+        "kernel.encoded.s": "c94ff242eba0ad1be4ebb33f14879bf0f5d1ebc54b932ac7bbbb1d097e655be6",
+        "kernel.nr.s": "bc7cc7a7c7c8a7ebc1b82559ee14c849f23d5e6abb4d67fdba93bcff07983082",
+        "kernel.boscame.mlir": "fa6df5f408cb8f0fa7fdcb06cbbb9accd11a6d767d7e5e13947a0acf7507321b",
+        "kernel.frontend.mlir": "76e6be7763b43e52a41caa7a5f1f92f33b5e869e79ee36914a8dc7b2bf302d66",
+        "kernel.o": "f44265edb12a31fd0950315550b773e988d8f80832de7489996a0138a40e157f",
+        "kernel.planned.mlir": "287f9b1751ddbbdeaea20ebd23bbda31cf5cfe539da3eaed1bde54490d4b2222",
+        "kernel.bufferized.mlir": "76e6be7763b43e52a41caa7a5f1f92f33b5e869e79ee36914a8dc7b2bf302d66",
+        "kernel.ttir": "b647ae4a6112cb8be59782ba641fb1aee5adf6cbced032de189b17f7f6e89f8f",
+        "kernel.s": "c94ff242eba0ad1be4ebb33f14879bf0f5d1ebc54b932ac7bbbb1d097e655be6"
+      },
+      "kernel_module_sha256": "20ad092f3ce07aa788661ffefa1c1070942f05cd657399ae6e59264a1fe08220"
+    },
+    {
+      "name": "bias_add_197x3072",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/bias_add_197x3072",
+      "artifacts": {
+        "kernel.ll": "7461ebae4e6805b4ed80552bc10bf27c7534197b30169d57bcab4b0fd4af9a2b",
+        "kernel.llvm.mlir": "8ff62761939f8ba62a333b6ba0fb5aba974f9c9fb494cc3c4f7bbc0c9ff20c2a",
+        "kernel.encoded.s": "c8210f5b355bbeb8038bad6d82ff6eba5cdaf7ac5d48a8280b0a4e30b5a3925d",
+        "kernel.nr.s": "62c00a21af2404fb14a7d6b915840c1495745e67238d15ed3c9b473383476368",
+        "kernel.boscame.mlir": "f626ea35ea940beb049a2e3a5c92e29b1826948b491bb04789666609285a78a7",
+        "kernel.frontend.mlir": "44d6acae7abc889234d7a984b7cf46296794fc8f94b0b531a327436552b47c90",
+        "kernel.o": "fad61af8db1c2170de50f9a542f2d23405422c785ed7fe7e7cd58a1ed1474ffd",
+        "kernel.planned.mlir": "f2420ce76f50179b3403ffab6264bade1f45ef729da829f59a347069cc4f4ef6",
+        "kernel.bufferized.mlir": "44d6acae7abc889234d7a984b7cf46296794fc8f94b0b531a327436552b47c90",
+        "kernel.ttir": "45160fa6fec572428b891a4bb7adadd5c05a276a6a1b365bd202a7efc09c1e95",
+        "kernel.s": "c8210f5b355bbeb8038bad6d82ff6eba5cdaf7ac5d48a8280b0a4e30b5a3925d"
+      },
+      "kernel_module_sha256": "70ee75665891b741612391a4bb36bcd3a5c2551f00f5718ba6b40526cc067249"
+    },
+    {
+      "name": "bias_add_197x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/bias_add_197x768",
+      "artifacts": {
+        "kernel.ll": "e7ef97df16808e49c1b97b8eaf9b13dd914b23d229b15bd2a510adee7b8112b1",
+        "kernel.llvm.mlir": "e7ce9ace0b25a0d9043c93619b89a3a3ae187140313952ef5772fa9d568f8676",
+        "kernel.encoded.s": "43204f4b67b6a870d035723d94b6d31a4fe330160322f8dddb2d26ee1881d3cb",
+        "kernel.nr.s": "0f7c87b2360c63db626d22299cd0e9090ef042ea8141b6016ccaedd0b363393c",
+        "kernel.boscame.mlir": "efdebf40bdc6ac257f6fced886ffb2e654c9b81cca68e31f0c6c72b984a76a5a",
+        "kernel.frontend.mlir": "867ec954ba9eb1749b92bd17af7add65bfc1761ca88192ba664bed41c5805021",
+        "kernel.o": "1f1937e42ecd6fe696dfc5dc0674fc6b5046d7875ddd60a5d5f19998cf831b88",
+        "kernel.planned.mlir": "a111fab221abfd1e6e9f03d22d4983226b166a840646ba6cacc1687ac8084675",
+        "kernel.bufferized.mlir": "867ec954ba9eb1749b92bd17af7add65bfc1761ca88192ba664bed41c5805021",
+        "kernel.ttir": "00c083702c096ab98edab8daa518334f4cd0c7f26162bb8b6c764fb6e22f5f45",
+        "kernel.s": "43204f4b67b6a870d035723d94b6d31a4fe330160322f8dddb2d26ee1881d3cb"
+      },
+      "kernel_module_sha256": "704e2bac9513cfa2f60b1a8dd2cf11831c03015c4458a54a69d4e523e3524065"
+    },
+    {
+      "name": "bias_add_1x1000",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/bias_add_1x1000",
+      "artifacts": {
+        "kernel.ll": "0ed62d65740037240e968413cfeeddee777d2c4694994b3830ec3dd56ebe2ebd",
+        "kernel.llvm.mlir": "4f420fb00eca3e78729ab2e50ccb6305246e1ec0edd4ed2aabb5f7f4532a8a3b",
+        "kernel.encoded.s": "1d046da1e4a0fd11d9317b865d2128bbc9a6405a4d9b48a39e00c461e907cb22",
+        "kernel.nr.s": "3ea2d34c6d46182b1f1f1f7d6cf678c4b9ad9be9edd04751559ddf1410bb5096",
+        "kernel.boscame.mlir": "0d863f30f0b719ab40723fde514ef31b4f7a062e67f3c52f671e8a61e17e1be2",
+        "kernel.frontend.mlir": "c4ed006758c7bb34526b903d9fb30df0c49ce7d423a18fde0acd7817fd2bdd9b",
+        "kernel.o": "8f2a8d00a35c58086700a9477cdb331fbd11caf24387b29a1b77541274fa971b",
+        "kernel.planned.mlir": "580ef061ad9b7c88b7310a8b77036df672e8cd1334aaeeeb12215f4d7892b671",
+        "kernel.bufferized.mlir": "c4ed006758c7bb34526b903d9fb30df0c49ce7d423a18fde0acd7817fd2bdd9b",
+        "kernel.ttir": "7bfff5c1c870cfe52bade96978beb9694c18b65e952b03d12dbff6ee29f8239f",
+        "kernel.s": "1d046da1e4a0fd11d9317b865d2128bbc9a6405a4d9b48a39e00c461e907cb22"
+      },
+      "kernel_module_sha256": "05f69a185f998164b0777e259d0bc82379cb4b94e039b3c06dc96de7ec1c29c4"
+    },
+    {
+      "name": "bias_add_1x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/bias_add_1x768",
+      "artifacts": {
+        "kernel.ll": "9a47882fe03bd695e076e888a3907d664451322229b3eaa50dc116164b5cd8c4",
+        "kernel.llvm.mlir": "1f7ceab4de0499dfd7f97cbf01facf725156d5b322a4574373843e4cdc464831",
+        "kernel.encoded.s": "a8e783940da57e6e01aada20b565d195d38a1c10fda5b3fdfbb7a5ed382d1ff9",
+        "kernel.nr.s": "c353e3538046e8748528e8500d31ea42910367cd6fc2e827750c28c5dcaaf6d1",
+        "kernel.boscame.mlir": "2ee428ffa5e8a1751cb621a173cde7d68b47a6e8c8ffca8a8922bcbe3e6b06a1",
+        "kernel.frontend.mlir": "cc19ca8312748d77df9d22843ce50c5423b636117c87189cb75bfd16ab5627a6",
+        "kernel.o": "a7f660aaa58e88ee783f5d37f1b1e3ed4860a4c40d86c64a76235850ae6ce1c6",
+        "kernel.planned.mlir": "a4c3a231b90805f0bbf44033505c6f26da7c152313607c83110c91dfa63fc2cb",
+        "kernel.bufferized.mlir": "cc19ca8312748d77df9d22843ce50c5423b636117c87189cb75bfd16ab5627a6",
+        "kernel.ttir": "f2d693f077413f68f3f16c82471150a1835594aff0bac42f734c5a00e7367208",
+        "kernel.s": "a8e783940da57e6e01aada20b565d195d38a1c10fda5b3fdfbb7a5ed382d1ff9"
+      },
+      "kernel_module_sha256": "0b2ef62f9096f0c5688bc3b632335f9f2c2264e3379cd4ee713917c223501c6a"
+    },
+    {
+      "name": "dequantize_196x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/dequantize_196x768",
+      "artifacts": {
+        "kernel.ll": "0d2d9aa858067ab85935ee54eced69db1f1edcb17122a310edd32fe5bcada68b",
+        "kernel.llvm.mlir": "d2c0a26502beaf287b12f8656e45dd50d282e85fd460fb4008099e0d13d3d9d1",
+        "kernel.encoded.s": "51d543031e2d732b48e13c70b0a5044c62058e98219b545be027f0da54dedf22",
+        "kernel.nr.s": "ed94448e11c6875e735f35fcdc1bfebf3182dba626bbef20b6b721f8f1db224f",
+        "kernel.boscame.mlir": "b7d680cb6558fc325e80aff6552407cdf146ec92f2be491c1b274bc72b81f66a",
+        "kernel.frontend.mlir": "ee8870b6a9d3be10590209b0caf4fac535985c382faf22ddfb17d091a813922a",
+        "kernel.o": "27402da3c1b142259f8320f5989c2600bf9894a7ed403213b11cae9b44dc52bf",
+        "kernel.planned.mlir": "e9f0e98db15cc3965e3d896f0a08971e6fd12638251e8775f501db86e6b7ee00",
+        "kernel.bufferized.mlir": "ee8870b6a9d3be10590209b0caf4fac535985c382faf22ddfb17d091a813922a",
+        "kernel.ttir": "e31ba925af80ab5ae4efa487a379e99604da9b989b6feb2c2825a8638640c9a3",
+        "kernel.s": "51d543031e2d732b48e13c70b0a5044c62058e98219b545be027f0da54dedf22"
+      },
+      "kernel_module_sha256": "2b5823fcbee9a5fccca125df83bbb8ac48f8c8d9ad83bf320e0feaec86165d38"
+    },
+    {
+      "name": "dequantize_197x3072",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/dequantize_197x3072",
+      "artifacts": {
+        "kernel.ll": "2f59c4d3cd256eb93aa5f7dd0bebbda658b60505915ab60c2400f92dff570084",
+        "kernel.llvm.mlir": "6b409d8b8daf832cc45ef99ced59b7a3f93b2560544875afce371a0ea4a5a25d",
+        "kernel.encoded.s": "57547ecbdeb64b129998c90d737db2f359a44e20bcad0d365afe1ec941ec0c5f",
+        "kernel.nr.s": "8359f1e9c95fd8263f51d502c6b6651f9942aff1cec51ca85222d40fd00441f8",
+        "kernel.boscame.mlir": "e78fd762d620df4db3ba70321282aae6ef6f8b5c218dcd3e1ffb05059b802e07",
+        "kernel.frontend.mlir": "7435013978626b737f0e086efde6753a9dec4669dac8fe70b7e9f2234c1f36c4",
+        "kernel.o": "cd9530bf4ba3dc6a1e6f3dd7792d706dad1d52d899cefeb154beb04b22d4ed57",
+        "kernel.planned.mlir": "2495a205e2cfc1fa251ce3b5f9526e5123140b4e2a38ee14832f86eedec948fd",
+        "kernel.bufferized.mlir": "7435013978626b737f0e086efde6753a9dec4669dac8fe70b7e9f2234c1f36c4",
+        "kernel.ttir": "82ded6c23f8d92ddfa6d2af9d178c814de2cbb37c2a206f724ba27de228aa6fb",
+        "kernel.s": "57547ecbdeb64b129998c90d737db2f359a44e20bcad0d365afe1ec941ec0c5f"
+      },
+      "kernel_module_sha256": "cdf9be1bc1cf052f1fc536fa8b3713dfc0d6ce9ae1997287e6d7bee220c89f85"
+    },
+    {
+      "name": "dequantize_197x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/dequantize_197x768",
+      "artifacts": {
+        "kernel.ll": "a761c76b5d40e0e0fae262e5fb8be28f1901986c20bc94973f6c4cf1e705ae8e",
+        "kernel.llvm.mlir": "9a3d493281dba06a56f6910a401f3930ed2e5807cf74bb41d743ff3abd96926a",
+        "kernel.encoded.s": "be60f2a8db4451d34186e5640276c0d396422e5b76fbb72e453221bdc042041b",
+        "kernel.nr.s": "a008e4626b96d64d8be602d5b71cb1b04e12394c7cc413bb843aaccb5254cb4d",
+        "kernel.boscame.mlir": "9c1b6665d4a8043389b6e14296e356bbca3c9b04ac30a2e5bd9bcf64d1460d01",
+        "kernel.frontend.mlir": "3118ab5616da261e672c905f453e4de34f73760822e197508720ddd90878dc19",
+        "kernel.o": "2b6d65f98d9a9b83aad10a1ebfa053afab08fbef289f49761ea13e4bca5d28d3",
+        "kernel.planned.mlir": "69e1779c278181de306c5e29201d65c6592c199e98e152883b8edd57c9257ef6",
+        "kernel.bufferized.mlir": "3118ab5616da261e672c905f453e4de34f73760822e197508720ddd90878dc19",
+        "kernel.ttir": "f5260bd69075df6740ebed74b283728c957a48ea2859076ad0e3701ccfec58ba",
+        "kernel.s": "be60f2a8db4451d34186e5640276c0d396422e5b76fbb72e453221bdc042041b"
+      },
+      "kernel_module_sha256": "2e28b61c3396faa56eed043d518925692f217a9681c76ece1a0164f41e14cef8"
+    },
+    {
+      "name": "dequantize_1x1000",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/dequantize_1x1000",
+      "artifacts": {
+        "kernel.ll": "937eba133ba2c39e8fff101da8ee24e962e90cd05563b0b39864be222bfee8f1",
+        "kernel.llvm.mlir": "8c8f7e953ee1e2f399b4da56fdb3251767d8aeccb03354b049139c2fca744ddc",
+        "kernel.encoded.s": "35fa606677d9fb42e0e1244e462bf899b361ea50198032600fdd95ce7b533cf2",
+        "kernel.nr.s": "df222858fdc1f17204f05c0b5b41a324e75632f10fe04a7514cec1434851faf0",
+        "kernel.boscame.mlir": "60dae67dd809d06f2c3e89d65f46bb1586f224c5b62bb5d33478e8aeb69b2f1a",
+        "kernel.frontend.mlir": "a2b65faee134ffa48d84e3244962982f0f3ea39cfd4acadd7e6e9df20ec00ec0",
+        "kernel.o": "e5ad906abf95d51c16e8b47663a05a0d7f9605cc21237ebebd97dd1c730481cb",
+        "kernel.planned.mlir": "572da8e0698524acad22a803c208df32c8ecf7e9b85deb49716987e8ec0299f7",
+        "kernel.bufferized.mlir": "a2b65faee134ffa48d84e3244962982f0f3ea39cfd4acadd7e6e9df20ec00ec0",
+        "kernel.ttir": "34eb3bc57bc3e666774132f5542ec41aaa8cc0cb1261f2b5a2f6834d95d34f99",
+        "kernel.s": "35fa606677d9fb42e0e1244e462bf899b361ea50198032600fdd95ce7b533cf2"
+      },
+      "kernel_module_sha256": "742153aed96935813901c78bdd96238bed3dbd3916376bf677f04f9ebe80b9c0"
+    },
+    {
+      "name": "gelu_197x3072",
+      "status": "BLOCKED",
+      "stage": "planned",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/gelu_197x3072",
+      "reason": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/gelu_197x3072/kernel.bufferized.mlir:19:5: error: unsupported lane-wise scalar expression\n    linalg.generic {indexing_maps = [#map, #map], iterator_types = [\"parallel\"]} ins(%alloc : memref<128xf32>) outs(%alloc_2 : memref<128xf32>) attrs =  {contract.provenance = {source_lineage_complete = true, source_load_origin_ids = array<i64: 0>}, contract.task = {barrier_after = false, id = 2 : i64, input_values = array<i64: 2>, kind = \"elementwise\", output_values = array<i64: 4>, predecessors = array<i64: 0, 1>, rematerializable = false, scope = 0 : i64, stage = 1 : i64}} {\n    ^\nexamples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/gelu_197x3072/kernel.bufferized.mlir:19:5: note: see current operation: \n\"linalg.generic\"(%7, %9) <{indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> (d0)>], iterator_types = [#linalg.iterator_type<parallel>], operandSegmentSizes = array<i32: 1, 1>}> ({\n^bb0(%arg8: f32, %arg9: f32):\n  %11 = \"arith.mulf\"(%arg8, %1) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32\n  %12 = \"math.erf\"(%11) <{fastmath = #arith.fastmath<none>}> : (f32) -> f32\n  %13 = \"arith.addf\"(%12, %0) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32\n  %14 = \"arith.mulf\"(%arg8, %2) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32\n  %15 = \"arith.mulf\"(%14, %13) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32\n  \"linalg.yield\"(%15) : (f32) -> ()\n}) {contract.provenance = {source_lineage_complete = true, source_load_origin_ids = array<i64: 0>, source_store_origin_ids = array<i64: 1>}, contract.task = {barrier_after = false, id = 2 : i64, input_values = array<i64: 2>, kind = \"elementwise\", output_values = array<i64>, predecessors = array<i64: 0>, rematerializable = false, scope = 0 : i64, stage = 1 : i64}} : (memref<128xf32>, memref<128xf32, strided<[1], offset: ?>>) -> ()"
+    },
+    {
+      "name": "layernorm_197x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/layernorm_197x768",
+      "artifacts": {
+        "kernel.ll": "6029778381fc5849765c765cb1ff2e745a3426efdfcf8de2501555cc8171dc42",
+        "kernel.llvm.mlir": "148017ecfdceed4536575d1f6856cbe1c93e3bf2d6e1b89085e17d72f54777ee",
+        "kernel.encoded.s": "dd512023df57d9f797adfcec2899151d7e33d971d9e9892a8f736f1bb3672e9a",
+        "kernel.nr.s": "8dd6b0b203e93c53e3c88f483897bc27896ed633c7b619419f7238b23b042537",
+        "kernel.boscame.mlir": "2510d29cd1260d7ce304f64fcac458237f490b039464b5dbb5b18ec40a3288f1",
+        "kernel.frontend.mlir": "4f25f53528bf9455fbde552969b995882a754d51c2dcab329fe81e3a701cb8a8",
+        "kernel.o": "70734c30492a026882aef91bfeb7953165df162670088b23c98f7903f1b781a7",
+        "kernel.planned.mlir": "aecb3c0e767e9ebdda4c8d1b379f7718a3f12b5d7c7957145bd1e79b5e5a5b0c",
+        "kernel.bufferized.mlir": "4f25f53528bf9455fbde552969b995882a754d51c2dcab329fe81e3a701cb8a8",
+        "kernel.ttir": "6fb67b54a906b466a91ac6f231a8b8e3b9d4d51cc80f4fb1c85bdcacab40ae19",
+        "kernel.s": "dd512023df57d9f797adfcec2899151d7e33d971d9e9892a8f736f1bb3672e9a"
+      },
+      "kernel_module_sha256": "8e1fe7ccc7d95d5ef21fc7d4c4331d693103010b332271ae05ca054c2b670b14"
+    },
+    {
+      "name": "layernorm_1x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/layernorm_1x768",
+      "artifacts": {
+        "kernel.ll": "d583bda8e48e86267ad8e22c1312938035cc02d8dcfa10a2ed1e989dbf7f932f",
+        "kernel.llvm.mlir": "b76666816c8f356104e34424f49b18e80bba41d33056fb462f27a47e0c0e8b47",
+        "kernel.encoded.s": "12d0a982a6976eb55f0fe2cecebab1908ec3c25bc79359b6b7c69aaf90c85921",
+        "kernel.nr.s": "63c2cdb5678e5c7ab94ab48cd8a07adcdb57ddbb4155f197b35f606ddefc494b",
+        "kernel.boscame.mlir": "8ff5ecc33c7cde740b51d1cb086be65f8358536bbb2948a6a371f2cb1624c319",
+        "kernel.frontend.mlir": "01277008d198c94577cff2e42596ac7f0175ffbeb9e8db5b458d83216d6272c2",
+        "kernel.o": "56ddc39909cf6b9aca7dca92e1b8c20bee061babbedd2aa6b7c542ac72c62ca4",
+        "kernel.planned.mlir": "c06f6d736e116e596a28dfce43ce4c7be48804d06e8ed4818032190da2b7ecdc",
+        "kernel.bufferized.mlir": "01277008d198c94577cff2e42596ac7f0175ffbeb9e8db5b458d83216d6272c2",
+        "kernel.ttir": "35f9bb9e6526a0c8f2f808df2e7d5ce1cc28b44067017d962ee0e195a6136c59",
+        "kernel.s": "12d0a982a6976eb55f0fe2cecebab1908ec3c25bc79359b6b7c69aaf90c85921"
+      },
+      "kernel_module_sha256": "31306a9b68ad864ca478db66e4102672985eedbc5eb70f5e06cc365123e719da"
+    },
+    {
+      "name": "linear_196x768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/linear_196x768x768",
+      "artifacts": {
+        "kernel.ll": "dc05c1c743c7c51ff7d8aaac830570901d3f1af8ce86f5b61a175a0e03a2d822",
+        "kernel.llvm.mlir": "a29469328cae3143b112593afbbb35f25f9e3bf603e457b302c4813a912c0d46",
+        "kernel.encoded.s": "2dd8def847e18b3329175fe7639d13b7d56952b0b944cb7a284d4da4e6e0c791",
+        "kernel.nr.s": "4ce52d5f558eed90f526e5da6c0fc0b650b46911c470fd4f10fb59440da62c83",
+        "kernel.boscame.mlir": "e27fda24eda48a7afaf64f4b40155573a0c24bc1c1f200da89f4f6462f3f7ad1",
+        "kernel.frontend.mlir": "41504cab11fbdd623f4113c850d1008b494147189df1658b9923b014fc7f60d5",
+        "kernel.o": "d7f394990c0af32e7bd5000b5577eb82f3ea29c17ef499a1509e8d8325b56272",
+        "kernel.planned.mlir": "4984f8259d1d71e1c6aaee3a8c0d939fa6a2b0047c89254c256db48761657300",
+        "kernel.bufferized.mlir": "41504cab11fbdd623f4113c850d1008b494147189df1658b9923b014fc7f60d5",
+        "kernel.ttir": "eb8b358c506e3eb202fd532ceec8492d722fc8f9f2aa519d850bad27af97fae5",
+        "kernel.s": "2dd8def847e18b3329175fe7639d13b7d56952b0b944cb7a284d4da4e6e0c791"
+      },
+      "kernel_module_sha256": "e3c11aa68b6b8488a76605e49ef76d022d6972486eae6eddd31bfb84a3b66540"
+    },
+    {
+      "name": "linear_197x3072x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/linear_197x3072x768",
+      "artifacts": {
+        "kernel.ll": "c219034f39f34ea0bc060f23f9d32540ea8fc79f50cd2a93747785da0333cbda",
+        "kernel.llvm.mlir": "8a21835270aa10a663e020e576f581cc3f5b882aa123e43c05e557106827ce8c",
+        "kernel.encoded.s": "2b35fc34731f08f49ce2ded96b2580fbe2cbdf8d4006eafdd99f953f2435e686",
+        "kernel.nr.s": "0fbaf9e52cb6ac3f9a47cb70892e6d636b2158c32d82d19e1c6e519154cf5e22",
+        "kernel.boscame.mlir": "f104fcab863bb8ea69570d74325389939c6b75d6a657b42ad49a94cf55e5ea04",
+        "kernel.frontend.mlir": "d61dc1cfae26037debb4d7a28d4bb1d4d1f846712eb7e507fa6f95f5a24ef5bb",
+        "kernel.o": "fb526b27400211114f346c39dc0db876aca2967da9df6d147255adbd1612ba7e",
+        "kernel.planned.mlir": "a4b9aef48f5eb75f62fc0c7a9a204d2736850492116a4676ef2a7477b9e70954",
+        "kernel.bufferized.mlir": "d61dc1cfae26037debb4d7a28d4bb1d4d1f846712eb7e507fa6f95f5a24ef5bb",
+        "kernel.ttir": "d3b42d83638f0e0ce8d999393895b8757a48c665f3d39e686a591c6ac484b379",
+        "kernel.s": "2b35fc34731f08f49ce2ded96b2580fbe2cbdf8d4006eafdd99f953f2435e686"
+      },
+      "kernel_module_sha256": "4161ba5181f9ce2a720223004e5b76d1c50a3c6c566e4e28254119f3159375d4"
+    },
+    {
+      "name": "linear_197x768x3072",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/linear_197x768x3072",
+      "artifacts": {
+        "kernel.ll": "e8597f5e886eb42e268080db33fd7233e675bb8285f7938e8668549d1a12530e",
+        "kernel.llvm.mlir": "b408b8d28c340a54e225ad10a3f3c4fb4e6b2750ff4897451cb7dc34d5547a7c",
+        "kernel.encoded.s": "e099eb9f618e15c8b365e2ab2ef2f9ebf8208580515146f217131f726f408262",
+        "kernel.nr.s": "41c1e3db827c7d29fab25b654197c5a9aeea0516b31be4c73703ed208898d1d4",
+        "kernel.boscame.mlir": "59d064ba2e777302f96708d044d3fe5cbe33da500400669ca31db3b7ff7ba9f4",
+        "kernel.frontend.mlir": "117aab6fc4dd05a1a007762bea1f13a1adf28aa5f2c99f34c806a67c5ee2d6e5",
+        "kernel.o": "44c5205cc43f1464d30ef90968aecf08123bf1c6f488bc80bfbb45f78706598d",
+        "kernel.planned.mlir": "55e8b07f9b44edf3ed0b6fd669edf2844177c175bd4ed6a289d60bf7f78a3744",
+        "kernel.bufferized.mlir": "117aab6fc4dd05a1a007762bea1f13a1adf28aa5f2c99f34c806a67c5ee2d6e5",
+        "kernel.ttir": "31a2681f118ec92b910b57f8a138e7b4830a77ef47a81d34b5b05efad1d35be2",
+        "kernel.s": "e099eb9f618e15c8b365e2ab2ef2f9ebf8208580515146f217131f726f408262"
+      },
+      "kernel_module_sha256": "cd89342b7484b048a2afcd3377c1ac06f5b130ceffca6008a824b9e22a8dc14f"
+    },
+    {
+      "name": "linear_197x768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/linear_197x768x768",
+      "artifacts": {
+        "kernel.ll": "29f43026a3ae747e825f6e6b4dece68d5e81f8accf4103164981ad5aaeaf17c6",
+        "kernel.llvm.mlir": "d231bd3bcfd534d59d4ee0c77bf15cb9da2352144773e7d13180d063e600d9ea",
+        "kernel.encoded.s": "540a5dc12e9a60a298db8bee45f8703b2ef36b7a574b9601bef992e012c6c9fc",
+        "kernel.nr.s": "31dae4efbb08f1db97453062aa454b8ca1f4a6c34ec900802256df379453aefe",
+        "kernel.boscame.mlir": "c16f56d78387386cecda127d9d9f8caf49b56a34d6fd9b8eb4d9ae8138178ab2",
+        "kernel.frontend.mlir": "f7aab10f61aef6765553ac15c09105756ae9995da419d307349374cdec9b75df",
+        "kernel.o": "7876bafde1a32db3cd910c456733befc3d03adace74f772cb6a07eaf2bd073be",
+        "kernel.planned.mlir": "fde2371dc98e08790fcd4072a1cfbc58cf3547ee49b40f452015ef61a68c1e6f",
+        "kernel.bufferized.mlir": "f7aab10f61aef6765553ac15c09105756ae9995da419d307349374cdec9b75df",
+        "kernel.ttir": "73f12a485ddf90a8faf44253cdcaea67c3f7e692beef5715d429ae957b4eb1be",
+        "kernel.s": "540a5dc12e9a60a298db8bee45f8703b2ef36b7a574b9601bef992e012c6c9fc"
+      },
+      "kernel_module_sha256": "3ac0cf4656883df25eec72ba75d476579b48339976498dc12cdf81c581890c10"
+    },
+    {
+      "name": "linear_1x1000x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/linear_1x1000x768",
+      "artifacts": {
+        "kernel.ll": "4a588b84666b4329f20ba36acefd26441c8ca01b206a88d73d0583b1bf2bb36c",
+        "kernel.llvm.mlir": "8e32364688d1d73e28385bc85bdd43cc1a3404eebf45e8480d90e11f90196aac",
+        "kernel.encoded.s": "0654d3c9ddc02212e89b97130f4a66b62d7be867d58f886acd3080e2fe9c1bce",
+        "kernel.nr.s": "19563134196a8896f4b059eb572a08349d1bc1113b453c506efea0ecef20b6a0",
+        "kernel.boscame.mlir": "9ddf16853cb0870cd3a923fab29866d1f5b3338815209a4b3b94b5329f21468c",
+        "kernel.frontend.mlir": "ef332491d9907a6deae1a66dc7dd364ed054bbf0d40a6f380b7c6b992bfd5063",
+        "kernel.o": "962034fc6f27c4065a88588241bb42f3f0db1e45de39260660dd8f39cbd0c5f4",
+        "kernel.planned.mlir": "d697ef59041e8991a7302e9e13ca7114352d44bf28fe89e9b0b7a839b87c5b28",
+        "kernel.bufferized.mlir": "ef332491d9907a6deae1a66dc7dd364ed054bbf0d40a6f380b7c6b992bfd5063",
+        "kernel.ttir": "325c6dc1589e9c193fae06c252c06b921781ca53dedf8f6606ac815df1fcfec6",
+        "kernel.s": "a4869e99e03f3b787514e0008fe4b60547045bcf4656b671cb600b2fd772f4dc"
+      },
+      "kernel_module_sha256": "344fa627589b1d64f93cd4fa3f3d2c092deef9c7cbabc9d7b679cb18db51116b"
+    },
+    {
+      "name": "matmul_i8_196x768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_196x768x768",
+      "artifacts": {
+        "kernel.ll": "04324bef56083984d6cc17804ade1339c55a44c4af0ed9982c451d1d9b83aedf",
+        "kernel.llvm.mlir": "992e94ae11ea3bdaa760daf4dd408ea3edd99e0a6583749e7e51b5d9b27352c5",
+        "kernel.encoded.s": "cb2f959540583e3bccc9501291a3fb23783ae38a13682b3ab9ceafaa2249d235",
+        "kernel.nr.s": "949b99370e858f9da8de6103abfb50520af3389897db4b00cbc2da60fcadc51e",
+        "kernel.boscame.mlir": "ec6557ba956a788f539286ee50855aa824c1c7404a2d13ef0eb8f87709513f5d",
+        "kernel.frontend.mlir": "509961bb56237e16d8b5864b2c0e0000c0b996361bc7ced283943d9f1b6899e1",
+        "kernel.o": "d469e8f03e7fc36e5116cdac62841ae3e243523a3414d7cb8de1d9c9a8e1814b",
+        "kernel.planned.mlir": "25b9eb679b1d3f6558681b8bed350503425e873e64b0d96b392ef975e947d966",
+        "kernel.bufferized.mlir": "509961bb56237e16d8b5864b2c0e0000c0b996361bc7ced283943d9f1b6899e1",
+        "kernel.ttir": "c25f2b44b8bb330f564faa896a4db6788ea63f28a198eedbad9f5ef044de80fe",
+        "kernel.s": "614c63050d95c5c142b73d6b8c2427a4a3b0896b635845ae6df079e815361643"
+      },
+      "kernel_module_sha256": "7c9267db666e1d4cba2397415b48bb5682bb1625bc774fab264b58b1e947f133"
+    },
+    {
+      "name": "matmul_i8_197x3072x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_197x3072x768",
+      "artifacts": {
+        "kernel.ll": "a7b32a85fab9f481c800292dd9f54d8b0c81f9025d311ced09b41b1509a6b0ea",
+        "kernel.llvm.mlir": "54d6557c40269bd29f8a23d9eef14919366e463e6afa47da38405b700fbb4953",
+        "kernel.encoded.s": "fe51f74f1a5b811542c5cf3235f3c28e70fb9586b415a6c8c61f99cbcb1c7c15",
+        "kernel.nr.s": "b41214df2fec9bba6b523c3d85a5ec66808aca36146b3e3616f98907e847d19f",
+        "kernel.boscame.mlir": "40bd6402d1988f00f77d088a38ad7fdd50975cf050b1ae580a5cb8100a06d2c4",
+        "kernel.frontend.mlir": "4f164d35012a99d4328b633df94e77cd5bc45f13e26f159553bc2df628d35b89",
+        "kernel.o": "937ca92932fcb3c33bbcc8cfa3165d1b1a117d27fd3ade9a4f7ed5c87e44a7ba",
+        "kernel.planned.mlir": "d06c20c592ac96c049a29212120cabe94c16cd4cfba0d003163ac686a80c1808",
+        "kernel.bufferized.mlir": "4f164d35012a99d4328b633df94e77cd5bc45f13e26f159553bc2df628d35b89",
+        "kernel.ttir": "81cdac7460b5b658acd14ee0df9a7a92e2f8434ed093052d7a8b4cc9fedec5df",
+        "kernel.s": "802e55ba069ec87aa66a8db349edb59c801ab9c26d6aa575ab877d6c557de30f"
+      },
+      "kernel_module_sha256": "6700ec2b78970af6438b0f175288e94ca19e95daff9c93bcaae631bd24284947"
+    },
+    {
+      "name": "matmul_i8_197x768x3072",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_197x768x3072",
+      "artifacts": {
+        "kernel.ll": "352b5bbef3f6a818f2f8963909aaf9c347d289f1743f7c3a1d7874050e630a32",
+        "kernel.llvm.mlir": "d9b810dcb58dd3715ee82300ef6902d3083122b3c611014d02e6c7935f79fbf0",
+        "kernel.encoded.s": "0e134ef2a0f5771e23b46045f7cd3fcc67ed66aa754f9ed78d796aa3fd39df06",
+        "kernel.nr.s": "a02aa88d80f4296c11f2d1ff724da1d9d8e3a686c7d895c080b79174e51f7a59",
+        "kernel.boscame.mlir": "8d8f0bf51ed7aed62f8f6bba92395151f70131e9159c8330260de1c108c1bfca",
+        "kernel.frontend.mlir": "d1f9a29240a5dcecce6b5febfcc837ac8d053a6e26599ec9a26e6a20c812cff6",
+        "kernel.o": "4bebcc1d370f3c51358fefca5d6aa9356cca2ac74f1e1c4dad17f0e0ec672282",
+        "kernel.planned.mlir": "c05c4b8e5d44be6567178c9282bc937363d816667339db5ac3662f07192dbc88",
+        "kernel.bufferized.mlir": "d1f9a29240a5dcecce6b5febfcc837ac8d053a6e26599ec9a26e6a20c812cff6",
+        "kernel.ttir": "fed8e37921538f96960d86d404366a4afc1e14196624fc971f7cae0d9e0a2c45",
+        "kernel.s": "2257c8a789c06ddb2b105eef84db42447bdf5815e2dccdd6176860936b70e530"
+      },
+      "kernel_module_sha256": "2b71ebd17e49b1745c40c709322eaa424a81d3983cdc9afcda19e6e2483f0475"
+    },
+    {
+      "name": "matmul_i8_197x768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_197x768x768",
+      "artifacts": {
+        "kernel.ll": "f915b5d3d8709c4432a02595b0b36cf34e6e68096c9c5783eea4a87c2c9c5641",
+        "kernel.llvm.mlir": "d6a040e7bf0555112bc4cff4984c2cc1330f9e6e54906dcda554c83fd3c95d3d",
+        "kernel.encoded.s": "c2ce63ffd1f7910e8fbfd96210078c958671f76ae8d45838f38f117aef4caca0",
+        "kernel.nr.s": "25be24d2ec6700a21ffe512227fb5915c6e48d3aadb63f54012dd99f20bdeffc",
+        "kernel.boscame.mlir": "287238fe3c4974668e7277e996bc1b02c3cf1048adae810f4313206ce67f0eb7",
+        "kernel.frontend.mlir": "1ef98484088bcbed51093af6860024f3e6aab2e2756a6e1f20a22e865fb62c4f",
+        "kernel.o": "207b7dc3014075660b591d65210efdc2a8376b9fd2abd23ec94b22335f285190",
+        "kernel.planned.mlir": "85415093f9c26e25796cf8ce407f18b80ff34f8d263b4193495008a7c647cfbc",
+        "kernel.bufferized.mlir": "1ef98484088bcbed51093af6860024f3e6aab2e2756a6e1f20a22e865fb62c4f",
+        "kernel.ttir": "1e0d382ae636de9a110790ca9125be18f77227b95912b97d3a1e7bfb8534820f",
+        "kernel.s": "0000cb55f8b79018c830e3c3c3f0edf5de9e36b65744d4bbbb5304decd8b84dc"
+      },
+      "kernel_module_sha256": "b7c38417847c27ac5b995e1ce6c7f9fba63c2c1c7a0adbe2f1a6d312774fa65c"
+    },
+    {
+      "name": "matmul_i8_1x1000x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_1x1000x768",
+      "artifacts": {
+        "kernel.ll": "55cbab3feed319b726ab244fae79068d271296e320dc9741964960c52ce7b3e9",
+        "kernel.llvm.mlir": "58f958a81169fcb15c07717b2d10198f689447f97a18397a600f30a6d1e3bfc2",
+        "kernel.encoded.s": "f75cb8b50def2564696ea57031cc2046646161b47bf1cb875ffe8d26a6684bf2",
+        "kernel.nr.s": "cfa07b1d480383ecc7329ac1d1d8b81d635f35cd454ee3cd5ab46efe7806ca33",
+        "kernel.boscame.mlir": "7ab00d65a08491ebf55aa62f3f81b8be90cd2d8178f55a158da9427bf87a9511",
+        "kernel.frontend.mlir": "fbadc8db1b8d97ab94297e8d4b2cfa5b86f682ccdd16874e2e794fcef1574af9",
+        "kernel.o": "e4ee8d9dc2130f5ff2051ae79b9659e591a210970e48002a90df9722bdcdeae5",
+        "kernel.planned.mlir": "aa96b876cbcec6f16f8114af10efb2dba019064b69764f7a1c2cae64abadd352",
+        "kernel.bufferized.mlir": "fbadc8db1b8d97ab94297e8d4b2cfa5b86f682ccdd16874e2e794fcef1574af9",
+        "kernel.ttir": "8eed56a7cc8b47cf1e54c6982d8e6b0a9944968d2a93b7c05ddd505c29526042",
+        "kernel.s": "b912ff95dd68fedc3559fe4f37916fd9702761deef3c4f15be94972173ffdde4"
+      },
+      "kernel_module_sha256": "de90cfa8254f7ccd692093a36da2d36f4ccd7340e66381392e83bb611dcf8928"
+    },
+    {
+      "name": "matmul_i8_overwrite_196x768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_overwrite_196x768x768",
+      "artifacts": {
+        "kernel.ll": "7fee2d4ff296ab05331ca26c3b166e0307ca92c272dda7b3d6be8a3e321d609a",
+        "kernel.llvm.mlir": "577fbcfd36029b0b7902f1ec3c82402abaa76c135e70f1583fc312b726fcdf81",
+        "kernel.encoded.s": "4b6eb651503e64911adda80edd8a6a003e69789ae548a8466f01563cb24849c7",
+        "kernel.nr.s": "d0033407fde96dad0af2fe4b852dcb4525621d507085dc2f4f56ac299a4adc5b",
+        "kernel.boscame.mlir": "5455207842a6098381a9bd8ce5ed7e06e6cbc4c19abaca605066099193bd5e22",
+        "kernel.frontend.mlir": "5eb2ed7853c38670656c3fd9915d05c7b027101f8582150d20d12527204c15f8",
+        "kernel.o": "0bafdfc6c40872e9cb8069d6d13e3f8015f329b88bf5ffd545c3e4d2fac442f2",
+        "kernel.planned.mlir": "0b7e46ba4fbe9e20dccb68f06c7f944aa0cc3039cec48f2745934cf892d076a0",
+        "kernel.bufferized.mlir": "5eb2ed7853c38670656c3fd9915d05c7b027101f8582150d20d12527204c15f8",
+        "kernel.ttir": "5e55fabe975c3f3d8c1024d1fe9ed03c2cdc73d04e59d9d577916abdc92ed146",
+        "kernel.s": "e058af9cc6d9fac2f782c2d66aa0e38501c458ee62f9cda12ca8494c68e89f50"
+      },
+      "kernel_module_sha256": "124069ef98c40b70685d06a1388c1d85e1f2fef9b78dc0652d9b3eae11b8cde3"
+    },
+    {
+      "name": "matmul_i8_overwrite_197x3072x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_overwrite_197x3072x768",
+      "artifacts": {
+        "kernel.ll": "1202e78a497efdd8e12918acdff8d16e2194ef6bd62d58b933e03ed6582ea5c5",
+        "kernel.llvm.mlir": "afa8aa4c15c68b0329da05394d25518fe0c470cebb58cacac58df085d16c34a2",
+        "kernel.encoded.s": "df04ebb004fb36559112ced1f45976ab495d7a096f676ce2a4e7836bf36db2b0",
+        "kernel.nr.s": "0e305e57f1fc3ca59729f3ff7cbd98d389c79fd5e86acf6a8b2d0dac0094ac84",
+        "kernel.boscame.mlir": "0ce14d85bae1360d8a3ca38ba6fa889b392ec89e47a116997fbce9a06942ebd0",
+        "kernel.frontend.mlir": "372c2c97a1a0716950b41ecc30490ad6e111c58a1874452f22d0ba5573d10b3e",
+        "kernel.o": "127f3ec091ce82b7d681f8b5350e4019ecb17fd0156f5120b8ed01572e50c9f5",
+        "kernel.planned.mlir": "8f2cd78552003a9c6fabc1ad4b0a3e0c9164731e1339e062344a3415e69bf0d1",
+        "kernel.bufferized.mlir": "372c2c97a1a0716950b41ecc30490ad6e111c58a1874452f22d0ba5573d10b3e",
+        "kernel.ttir": "7ddb9604625b2706627fca5aba411bb25ad370761b1ef0447a25706a44049420",
+        "kernel.s": "e0e16e4d059b608f2c6dcded0b3ea641e13fad59933772e2390b7cb68d437987"
+      },
+      "kernel_module_sha256": "2b3ef2b0f053e34be5198cc4c71924d8258d5400d6d6590dcfb3b5271449c7ab"
+    },
+    {
+      "name": "matmul_i8_overwrite_197x768x3072",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_overwrite_197x768x3072",
+      "artifacts": {
+        "kernel.ll": "7117871751115d02bdb9f88e9d901e30b495be348703eaee309bc5badb91ace3",
+        "kernel.llvm.mlir": "b3b969b9632a8b74984502f953bd5ad384cd10cb01ddf5398b166924ba2184c1",
+        "kernel.encoded.s": "3c73341937281499df6f43dcdf7d1b89ab75f2eca07599af086e912237356627",
+        "kernel.nr.s": "77142170183fc3f70df3347f3c97f852d9fbcd2f6fdaeb131199835bc50368e9",
+        "kernel.boscame.mlir": "ff034de2bb8155da67689b209681667a8efaf9c6a2e610452b73dd2930742d9d",
+        "kernel.frontend.mlir": "e6424c47e79901814e9af1438f3c2b4a53601da668c2bc9742b151e44ba2add9",
+        "kernel.o": "8a0725614b1bc9fc31623b7623b7cf6f5e44ad0ef527b32adc5cee84b906d36d",
+        "kernel.planned.mlir": "ba2b2cca9a29a1b588f18bc3f6bd788d1cc941168343272acf8b443b8e2a7b89",
+        "kernel.bufferized.mlir": "e6424c47e79901814e9af1438f3c2b4a53601da668c2bc9742b151e44ba2add9",
+        "kernel.ttir": "f591d7777edc3468300eb20f882d7f7e9eed5bf1f3b9864644dc937b7218aaf3",
+        "kernel.s": "d9c5035e06f0716c1cd366d77d494bca37cc248d8b83234a079a5bdf6e68f92d"
+      },
+      "kernel_module_sha256": "c8b773deb03c7bfe4c0d1161bd6ca6ec192fcdfe3193e30e157ef784d861778f"
+    },
+    {
+      "name": "matmul_i8_overwrite_197x768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_overwrite_197x768x768",
+      "artifacts": {
+        "kernel.ll": "5933a84e2f28629a3729f83811195e7bd10df344913922a413a0960aff8038e3",
+        "kernel.llvm.mlir": "5a9155ef84c7af4b25de94792bc961b3c0c4968dc87b9883a7245027e60cd06c",
+        "kernel.encoded.s": "b401a855f98aad8117c1d6f0cf85bc20fb5c9885c6fdf5a88f22959905fd2b94",
+        "kernel.nr.s": "6cd0d45c07bd2b83c30ae3edce1b56b88c512926373b53d64d06f63a62afa967",
+        "kernel.boscame.mlir": "826d1e26c1766ab95a75aaf8ae97e73e80557561ef68baa5fb331da94db4a23e",
+        "kernel.frontend.mlir": "f70704fc21a97f244be1335f818ab5d54c5bb996bd9fe45047a3bd54d11cf542",
+        "kernel.o": "e9463846972025a5a9a6c45e3ed1e535fb1a9ca1a3e4d742e73342f822346afc",
+        "kernel.planned.mlir": "9c0302bf9c0049c797a9a6398bf9d843fcf09be6c075e0368a6126ac09749db3",
+        "kernel.bufferized.mlir": "f70704fc21a97f244be1335f818ab5d54c5bb996bd9fe45047a3bd54d11cf542",
+        "kernel.ttir": "48687d9eda167b561dedc3211ed5e90d3b2bd3d87e3cc7b5f06a70eb01e9e564",
+        "kernel.s": "ce1227a4118205900597ea7d9b40ec732d94f202f2eb058aa59b6d7d600235ea"
+      },
+      "kernel_module_sha256": "008e82500f9afec61e80672ae8aba4fbc25c08eb6cd9a6edbd7df0aa143bc969"
+    },
+    {
+      "name": "matmul_i8_overwrite_1x1000x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/matmul_i8_overwrite_1x1000x768",
+      "artifacts": {
+        "kernel.ll": "67f600b0699fe68d570377d35aa2a005229f0e1eca34f57ee9ee01d1137c5454",
+        "kernel.llvm.mlir": "bf84467705d63152c2697c407353293f4f880c8a3471a9d8628df2ccc1bc1d9e",
+        "kernel.encoded.s": "b55969241315756f7729b06c0cb8b50de6620e1b8f2f6dea72e0c3c7e426b4f8",
+        "kernel.nr.s": "9d56818e8a8d8a0130e1859af28255e9015e80d2c3df96a9a1c38452c47df528",
+        "kernel.boscame.mlir": "e4794d34ba80e73905ed7a8654abf9b1d6ca74f21012dff1e340c8e1ea83bfbd",
+        "kernel.frontend.mlir": "6e65e307eba381c859b40829573151afb3dd5cf0b219b27980c0403e128852eb",
+        "kernel.o": "d4826a512f3520232c6ce41514c421cdf12ab91465c61ca9a35804bde2f18aa5",
+        "kernel.planned.mlir": "37cc2ffdfd7fad0ad2eb4f923a2c2004c788355253a8a1349a398d8154c2caff",
+        "kernel.bufferized.mlir": "6e65e307eba381c859b40829573151afb3dd5cf0b219b27980c0403e128852eb",
+        "kernel.ttir": "769d87c2e33a028e06cd3c006eef4d070007e1d1ac24f42b38f062553356a472",
+        "kernel.s": "5bef96c7d34b5d0fb096be3823c618216eac5d7767d849bfab5de3eefd5df0d5"
+      },
+      "kernel_module_sha256": "8fe76234fac335ca97f8c1afea1a064f954b11c5953de984999de198af91c730"
+    },
+    {
+      "name": "patch_embed_196x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/patch_embed_196x768",
+      "artifacts": {
+        "kernel.ll": "e200f2dc11c6e5acc12af38423418a91f4febe87786f816ece0256bcebb4136e",
+        "kernel.llvm.mlir": "a23a52bc3297251129233122521aba4061bcad388c0512bd720476288f69d10c",
+        "kernel.encoded.s": "41c57ed9a3fc34e732c47a383d4faffecbe0dcc3412d8237260f58a1524a4b8f",
+        "kernel.nr.s": "4464eb51fb3321416544e8df59b7d98c559b4f46ed133ed442010382b0b5f464",
+        "kernel.boscame.mlir": "a055d46190276e446c560e9452ac3b66777d340068bb8f8ced008349da8e7f11",
+        "kernel.frontend.mlir": "27fe08bd7a5c19b2790b6a0f04b4db793570bef3d209274095ba7632300c24ca",
+        "kernel.o": "8865c74e1af387a9310aaab42c4a1c05b70d072e34347ce902ab5e8b620a2529",
+        "kernel.planned.mlir": "0cc129a0dc20bbe0f42a13d71671683536d7c6105525f33da479e53257badd60",
+        "kernel.bufferized.mlir": "27fe08bd7a5c19b2790b6a0f04b4db793570bef3d209274095ba7632300c24ca",
+        "kernel.ttir": "46ca4656927527e117d7af46fef8bceccb82d1db0c8a7815fee53f2f3b1fa476",
+        "kernel.s": "41c57ed9a3fc34e732c47a383d4faffecbe0dcc3412d8237260f58a1524a4b8f"
+      },
+      "kernel_module_sha256": "396e0057adf2a5e7222350ff7f8855020c53be7b3dc340e8d85bec4d3ad48b9e"
+    },
+    {
+      "name": "quantize_1000x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/quantize_1000x768",
+      "artifacts": {
+        "kernel.ll": "a87aad8007cda30a90f57119df45f16c75d7555175cd975aa64785e824f4884a",
+        "kernel.llvm.mlir": "545f4f3244f8324076ce14648c74259a17c4ca1b2bbe4e63f886daec4de1d1a4",
+        "kernel.encoded.s": "21a55071fc99ad3b89172cf86bde8d96bea8221f0c771af891dd343f4dca6811",
+        "kernel.nr.s": "16009cd5f4b1f34d072bd6470aa7c127a800d57800385a94259789790e3a17db",
+        "kernel.boscame.mlir": "33414980427b88c49f835f9ed2cfc29486c14373047b31078a21b4e9e46e5a76",
+        "kernel.frontend.mlir": "3401771a8c181a88413d0d57298062b6923de1a1bee6ad49955b3a0f5be97ee1",
+        "kernel.o": "799d21e5b0a72ff5ec94ac8d1c9ecc99907f4793030bc46787217b8e98343584",
+        "kernel.planned.mlir": "b5f296904b69332300c2e87de8963a9ab200029f4c3bbd50b8d3e196e0c94a17",
+        "kernel.bufferized.mlir": "3401771a8c181a88413d0d57298062b6923de1a1bee6ad49955b3a0f5be97ee1",
+        "kernel.ttir": "cd4c79aea111c37595802705404f047d1cb0b87740c436959b6396295ddbc4b9",
+        "kernel.s": "21a55071fc99ad3b89172cf86bde8d96bea8221f0c771af891dd343f4dca6811"
+      },
+      "kernel_module_sha256": "d1f9a70b3e52909e70801b70119c19488bb0a8ff453a8f77110b5b2b4e9aa22f"
+    },
+    {
+      "name": "quantize_196x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/quantize_196x768",
+      "artifacts": {
+        "kernel.ll": "a5e6d462aed768f4cd9a4887684276ffdbc7c0e1c6aaaaf3483783cecb22bc65",
+        "kernel.llvm.mlir": "45dd59619321a754e6295d5a860aa2a5d26cfd5225676b859f22084f083c8927",
+        "kernel.encoded.s": "ea197866c53b24183ae1edf3d3464f7cf8b3e919332e97574fa90d94a6dd0c7f",
+        "kernel.nr.s": "af1bbb222e2da12c5536e5dac4354b5dc61ab8cee2818e2f6f7cef9b02ea927d",
+        "kernel.boscame.mlir": "653722a78d6f0d9262e5821bc5714c4443701b70fce79bd706214268368ca32d",
+        "kernel.frontend.mlir": "b4b08b471447fa220cc9523d26def880c2fef0162d8edbca168cd5ea2ede9eef",
+        "kernel.o": "e65ad42f310c08603cf947eec8ea87f2459bc7b79d6f4fe1beda5de541334af9",
+        "kernel.planned.mlir": "71d8d2e21c5f35235bf52fa345cdd5b8976cb73f88575843473c4ed105916dc6",
+        "kernel.bufferized.mlir": "b4b08b471447fa220cc9523d26def880c2fef0162d8edbca168cd5ea2ede9eef",
+        "kernel.ttir": "765bcaa99fa9d65e99f1453644615fe0df5c252df53963801512f1fbc1f14a33",
+        "kernel.s": "ea197866c53b24183ae1edf3d3464f7cf8b3e919332e97574fa90d94a6dd0c7f"
+      },
+      "kernel_module_sha256": "a286291b6aed0afc539157c79e89d4968147ef6f70a51a9eabca1f9b761709ee"
+    },
+    {
+      "name": "quantize_197x3072",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/quantize_197x3072",
+      "artifacts": {
+        "kernel.ll": "674b9c5d1d0359855238d0471267f79c095a6d59f2104c27e20a8393982a801d",
+        "kernel.llvm.mlir": "8fd982450be0c64d6bf4dc3886eb9a9a93e3e120711bf1807794ceba5929a604",
+        "kernel.encoded.s": "bfe709eb93881fb9259a47ab80b47fcad57f3e0a40ac8fc3e354ee1b72d632f0",
+        "kernel.nr.s": "93963765aee81f78097858db1fa64df292466880c4a2514a51d3926b78876e72",
+        "kernel.boscame.mlir": "b4b4539bb1d245ed56daa549e4af38217423053d608a071b61db718dfbf65236",
+        "kernel.frontend.mlir": "51c1f7b816493b6d1e8494e74901868143c7f156b0357ed6d7aa3837753d1a3a",
+        "kernel.o": "a073b0c6c1dc3add10f124d98c868bcad5533be28f8fa8b52911dcddcdb6018b",
+        "kernel.planned.mlir": "a5a0cec5b0d0fa3c2356b420e71ef5671c11e0dfd2534f863df685f5f3e29c84",
+        "kernel.bufferized.mlir": "51c1f7b816493b6d1e8494e74901868143c7f156b0357ed6d7aa3837753d1a3a",
+        "kernel.ttir": "173129beb85e479e02dfd0388ea6cf61dabfe421e6fadc267da271081acc3984",
+        "kernel.s": "bfe709eb93881fb9259a47ab80b47fcad57f3e0a40ac8fc3e354ee1b72d632f0"
+      },
+      "kernel_module_sha256": "ca1bc5c825aaa4bb44762145bc27c21bf75e787d7f1890d6de94e347fe1479e5"
+    },
+    {
+      "name": "quantize_197x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/quantize_197x768",
+      "artifacts": {
+        "kernel.ll": "e86fe10c5a7f0397b126e637af13be3f78f51c8c756b14c0eb9565af85298b95",
+        "kernel.llvm.mlir": "de4f7414285ef5c530af2f871cbcb3d45342f6deeb4ec78772dd6be456b2f7d3",
+        "kernel.encoded.s": "f77672b4f26d9000f598b0fb8dbc38cf5aacd5ca69853276ec487a2eb41b8beb",
+        "kernel.nr.s": "70124b5c590e8f4f05da07632594a3833ccbf7822c7261027fdddcad4568bd9f",
+        "kernel.boscame.mlir": "da55ec845cbfdc3aaba3459d5329975aa459162463392a9fc6d732aaf1cffc9d",
+        "kernel.frontend.mlir": "894c0e9662b22a8b10f0658e5bc66caffe5cb7acd7a10e6f083c3b2d7573ed78",
+        "kernel.o": "9c84632e7a09cac8b6606adc8215ce1de9ba042f7dd0b5fefc46a616446b4486",
+        "kernel.planned.mlir": "992eb4298af74152df1399a3a60a261b305270b44dc890f52520a65e45964521",
+        "kernel.bufferized.mlir": "894c0e9662b22a8b10f0658e5bc66caffe5cb7acd7a10e6f083c3b2d7573ed78",
+        "kernel.ttir": "77fcd6e5e280a0f64a3f5106d8773a567796459fa58193607a7e8eb2aa5931e1",
+        "kernel.s": "f77672b4f26d9000f598b0fb8dbc38cf5aacd5ca69853276ec487a2eb41b8beb"
+      },
+      "kernel_module_sha256": "a1839ae2501149a13eaa3997c940bfd68d5831942434f6515a9caf150c425533"
+    },
+    {
+      "name": "quantize_1x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/quantize_1x768",
+      "artifacts": {
+        "kernel.ll": "bed80ce2442bd4ef1d3c7e7a7ed87930b75b2efbb0e4c666e3a722283668eab4",
+        "kernel.llvm.mlir": "21c606d83b5d4c8f14e78fca4f37b3dfe27dd41248257bb3f1564fc7395f1637",
+        "kernel.encoded.s": "136b2b002b802ec2e82722de3364340e56671ea9889f91591d9b772a45e8bf52",
+        "kernel.nr.s": "9f1b845c62592904ce4d187cde6369ddca877b8aa758e1febc0671f2eb6a991c",
+        "kernel.boscame.mlir": "c3ac389c38dc8339b0717818fa09899a50e3606b46fb4160aa49d3fb5cd8393c",
+        "kernel.frontend.mlir": "baa4532ac7067b3507cd171da53094de325ae723bdd45ae394fb982486855e69",
+        "kernel.o": "59e2035fc14e527ffd05ee59ca3474e730de52e91b38e48a68e648a84b14a80b",
+        "kernel.planned.mlir": "3a849cda87ed04b4f60cae0b1a39ce5043cba27a6a487760dcd32644cb2d8c5e",
+        "kernel.bufferized.mlir": "baa4532ac7067b3507cd171da53094de325ae723bdd45ae394fb982486855e69",
+        "kernel.ttir": "69cefae639becc0f33ac5c4218630cd897ebbd93c386802d280918d7928e7413",
+        "kernel.s": "136b2b002b802ec2e82722de3364340e56671ea9889f91591d9b772a45e8bf52"
+      },
+      "kernel_module_sha256": "b869adceb4348d58a9be48c55119513e8267816900b98bd36ebe9810d3d1a8b5"
+    },
+    {
+      "name": "quantize_768x768",
+      "status": "PASS",
+      "stage": "asm",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/quantize_768x768",
+      "artifacts": {
+        "kernel.ll": "204b866efa339a4bad8ac05c4365694d2216e55d3c771d27a6a40a2761995d5b",
+        "kernel.llvm.mlir": "de776a0b63c659e34d58bc3f88ded692588ab063bda5a3e08f58ee3224f80edc",
+        "kernel.encoded.s": "84c292ca6266bf2a2bf631d12a49d5e831e10ae50dd7c63f17bbc2f7d5be20dc",
+        "kernel.nr.s": "26c44d74c5ca087aec92801af20a105733c7c5ebdb2a9926e141d49806f0ba6f",
+        "kernel.boscame.mlir": "befb0bf2f27b8a3c66dc395bff831addc1e2fb6065a3fc020f4a2c0286a9a5f9",
+        "kernel.frontend.mlir": "ec9d3aa2dc56e7e619a03d47c8db74794e425001eda9d1a0084913c2ff854900",
+        "kernel.o": "81c89f368e933464e7b64356b2bcad0783e5419621e5db52e9c597d06ab54f4c",
+        "kernel.planned.mlir": "81b73c681e767f00477bb771024f2fdebccd7375bae43e811dfcccc743ca6d27",
+        "kernel.bufferized.mlir": "ec9d3aa2dc56e7e619a03d47c8db74794e425001eda9d1a0084913c2ff854900",
+        "kernel.ttir": "0d65f43c63185ea566253efac22f1050b9933373691bb3a0bf8d782810ab4daa",
+        "kernel.s": "84c292ca6266bf2a2bf631d12a49d5e831e10ae50dd7c63f17bbc2f7d5be20dc"
+      },
+      "kernel_module_sha256": "fa3e4a6a1e54bfb92420854a77f9e12ddec2385df1203172b63ebad696bf4395"
+    },
+    {
+      "name": "softmax_12x197x197",
+      "status": "BLOCKED",
+      "stage": "planned",
+      "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/softmax_12x197x197",
+      "reason": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/softmax_12x197x197/kernel.bufferized.mlir:30:5: error: unsupported lane-wise scalar expression\n    linalg.generic {indexing_maps = [#map, #map1, #map], iterator_types = [\"parallel\"]} ins(%alloc, %2 : memref<256xf32>, f32) outs(%alloc_3 : memref<256xf32>) attrs =  {contract.provenance = {source_lineage_complete = true, source_load_origin_ids = array<i64: 0>}, contract.task = {barrier_after = false, id = 6 : i64, input_values = array<i64: 3>, kind = \"elementwise\", output_values = array<i64: 7>, predecessors = array<i64: 1, 4, 5>, rematerializable = false, scope = 0 : i64, stage = 2 : i64}} {\n    ^\nexamples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/softmax_12x197x197/kernel.bufferized.mlir:30:5: note: see current operation: \n\"linalg.generic\"(%6, %10, %11) <{indexing_maps = [affine_map<(d0) -> (d0)>, affine_map<(d0) -> ()>, affine_map<(d0) -> (d0)>], iterator_types = [#linalg.iterator_type<parallel>], operandSegmentSizes = array<i32: 2, 1>}> ({\n^bb0(%arg16: f32, %arg17: f32, %arg18: f32):\n  %20 = \"arith.subf\"(%arg16, %arg17) <{fastmath = #arith.fastmath<none>}> : (f32, f32) -> f32\n  %21 = \"math.exp\"(%20) <{fastmath = #arith.fastmath<none>}> : (f32) -> f32\n  \"linalg.yield\"(%21) : (f32) -> ()\n}) {contract.provenance = {source_lineage_complete = true, source_load_origin_ids = array<i64: 0>}, contract.task = {barrier_after = false, id = 6 : i64, input_values = array<i64: 3>, kind = \"elementwise\", output_values = array<i64: 7>, predecessors = array<i64: 1, 4, 5>, rematerializable = false, scope = 0 : i64, stage = 2 : i64}} : (memref<256xf32>, f32, memref<256xf32>) -> ()"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "algorithm": "sha256",
+  "artifact_reference": "qk-final-build-report.json",
+  "final_emitted_equals_simulation_input": true,
+  "simulation_input_sha256": "67e5190b4c17d2ee714801ef6beb5bb2cf7b17ac8c9ffc7fb0e5ad49e58a1d8e",
+  "before_frontend_sha256": "318ee301b78b9b6c418928ed41d3d728b60a0bb2c18e9fedc961f23ca0985018",
+  "after_frontend_sha256": "e43f3b9bd1a587624d9bf2d0f9faaf06b7c259210feb1f5ab58037f2e1564a20",
+  "final_frontend_sha256": "e43f3b9bd1a587624d9bf2d0f9faaf06b7c259210feb1f5ab58037f2e1564a20",
+  "sources": {
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/attention_qk_12x197x197x64/kernel.py": "4a363070691a4c6204385e8b39d07f3289de08dede14c4a48add0759f4b61875",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/build.py": "fd59d40a938bf6d77e7de7fe70cc821f5f0da64925169654b1f290d2778f34a8",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/cases.py": "7e41503b7c0a00a61cc806bc19de5e006389c8fb9c3bc98a19c158d03e32d450",
+    "midend/lib/Conversion/TritonToLinalgExperimental/TritonToLinalgExperimentalPass.cpp": "c5f03fa0d4231092813625d1c10adf8de03fd9360ffd626b1c0f1f7ad8d2b4e1",
+    "midend/lib/Analysis/KernelContract.cpp": "1fb93a8c2aeb6c611df0b989a809df2f6cca137bb4c79aef3149323b8c8457e8",
+    "midend/lib/Conversion/LowerLinalgToBOSCAME/BOSCAMEPlan.cpp": "5097c68d6fce69966d562f5ccc3487cb6a523096f0d89d1e99cee3862ba7b364",
+    "midend/lib/Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanVerify.cpp": "963247acc2ef51f98489d13346cbaa371b7c4485f299c20f2b6aa997fc709aee",
+    "midend/lib/Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanEmit.cpp": "91ad51778a2a43348a87b7fd11005bcc5c2f7d6202300da64d85716a618d3c57",
+    "midend/include/Dialect/BOSCAME/MatrixTransfer.h": "61ce123fff2cfb541fd71b2f8b2b65143c5d9814c9a8a0fe3dbd166e29c4dbf5",
+    "midend/lib/Dialect/BOSCAME/IR/TileOps.cpp": "5e0724d282b5273f610275049d7eacc328911f20f7f91bd83ebfb2501c3a04c3",
+    "examples/FPGA-BOSCAME/tools/boscame_buffer_sim.py": "759297dc094b3bdd382272d1e269f9eaa94aa3dc31cab9c94d7954e8371b3444",
+    "tests/Conversion/LowerLinalgToBOSCAME/PlanInternalCopies.py": "b092d7b036caff672f2c9e2fe2f6656c26b9b8e7db5dfcc72c4cb983363251b8"
+  },
+  "scope": "Snapshot of the actual final compiler build and relevant sources; matching emitted module passes all 2028 programs in reverse order on one normal input, with 465708 outputs equal bit for bit to the independent ordered-f32 oracle (max_abs=0). This is not a full-model, board or performance result.",
+  "full_grid_simulation_report": "qk-full-simcheck-report.json"
+}

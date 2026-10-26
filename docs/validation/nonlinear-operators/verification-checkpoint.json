@@ -1,0 +1,28 @@
+{
+  "status": "PASS",
+  "checks": {
+    "check_buddy": {
+      "command": "ninja -C build check-buddy -j2",
+      "examples": {
+        "passed": 239,
+        "unsupported": 2
+      },
+      "regressions": {
+        "passed": 629,
+        "unsupported": 2,
+        "expected_failure": 1
+      },
+      "unexpected_failures": 0,
+      "log_sha256": "b1e019532ddda1c54e7fb680cf1cf5bddc5d84018a6891646e1a3fd6de8aa23b"
+    },
+    "format": {
+      "scope": "all task C++, Python, documentation and evidence files; unrelated changes excluded",
+      "status": "PASS",
+      "log_sha256": "f918273093fd435f31d71b30c24360137508292caa99b89d35b38987083627c7"
+    },
+    "working_tree_diff_check": "PASS",
+    "cached_diff_check": "PASS",
+    "original_kernel_sources_unchanged": true,
+    "scope": "two operator numerical acceptance; full 40-case compilation; previous 38 cases unchanged artifacts; no model, board or performance claim"
+  }
+}

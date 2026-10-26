@@ -1,0 +1,41 @@
+{
+  "scope": "actual PV frontend through restricted assembly and object; source and compiler-tool hashes",
+  "artifacts": {
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/adapter.c": "13749833cdf0575292790b7d1bb45b3f6f2fbe97a27b4946492ddf140ab97162",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/frontend.json": "a32b982f677699b292e987ff10650dc0eb7bd2856423acb9b7cb2490d8f96cfe",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.boscame.mlir": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.bufferized.mlir": "7841c7e2166cafffe75f4daa3a061ebf2c17e510aa69af9f80607a042b962818",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.encoded.s": "9c708dce2a5cc6b67b1d560af5fb2434ca84c9892fa7e2e32e7f7462acb008a3",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.frontend.mlir": "7841c7e2166cafffe75f4daa3a061ebf2c17e510aa69af9f80607a042b962818",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.ll": "0253fc42c76b9eedd8da7ee4b3fd6ef7fb69adfd4e6b0e197d7caa88dd8b2df4",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.llvm.mlir": "ff10c85cfb8c1766f6abda0b27f6aaab80d59d7f07b9d164941147d4114ecf79",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.nr.s": "c4a66aeee785c2a9b15390fc48c5048895468f97149c626de018e117651d7e4f",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.o": "9a494b62180dd48d4d2aaf7563ebaccec2ea5966e1f59997a5db9bf325c8514a",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.planned.mlir": "4417e9abb09a2292673651afa286ec3bd7e5cb6fae5cf559b79b17c15116f069",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.s": "bc31e92e152213126bd45423ce8b50c5d51a6265f944ea57f4a27070601f927d",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197/kernel.ttir": "d0674ddda51408f9cf5f331b93df8de6e336fd72c31ac615ecc27e217dd5a486"
+  },
+  "sources": {
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/attention_pv_12x197x64x197/kernel.py": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/cases.py": "390ca9214edf9e347176a9b9a2e3574a140a1767436ec067453dfd5fedf01981",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/build.py": "1733c0df1271cc70794dddcaf79983f86f8f41de00ac3f76038a70b00533a7a6",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/simcheck.py": "35b97ecde803f174596fa58b92eb0e354ac6d49d62b7cf746ab30000af0f91e6",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/oracles.py": "c3f495a18cc022ee9a0f90d15ce7306086c131a5ad50a42aeb9cda29aa7d4021",
+    "midend/lib/Conversion/TritonToLinalgExperimental/ContractTileSpecialization.cpp": "5f38b971a6d79c58b9ed3aa6497cdc5ebb88527ca2fd9577c299dd67887ff103",
+    "midend/lib/Conversion/TritonToLinalgExperimental/ContractTileSpecialization.h": "102cfd1078f8bc8497ff1d00411858564102ad9f6aaa011368e8701f7f1dca87",
+    "midend/lib/Conversion/TritonToLinalgExperimental/TritonToLinalgExperimentalPass.cpp": "b590aee2fcac24614db41625d77c6776d325d11f3f8f356ed391ac6de0bc6af4",
+    "midend/lib/Analysis/KernelContract.cpp": "068515190bbccfbd9227294a7218e9a2fb4f09585cf1fb4373ee0f33ec6b19d6",
+    "midend/lib/Conversion/StructuredToMemref/StructuredToMemref.cpp": "306a277a5f78e466fe023e13114ce0ea437e02ccb268c1a204b4067a0be045e7",
+    "tests/Conversion/TritonToLinalgExperimental/vit-pv-oracle.py": "e139c640958d558876374a46ea422092c78d38563c39632bd8d5ebe89c4edbf1",
+    "tests/Conversion/TritonToLinalgExperimental/boscame-k-tail-specialization.py": "72b493718ade6d23efad81239b633679e1890b802ba2d4160a63d72a0f61f1ab",
+    "tests/KernelContract/reaching-zero-loop-copy.py": "5770808570d845b8476df9abbaffd211e8fcdfa222dc3b3926b12d9c9874df8d",
+    "examples/FPGA-BOSCAME/tools/boscame_buffer_sim.py": "9d1964c81f393451c5eac2d10b25345ebd3594957229a4e957b5effa945fbe1d",
+    "docs/validation/pv-k-tail/capture.py": "87306199ac122e1d0130bba8353cbcb311b1fd301b9581a9a385d3c536ac2cf8"
+  },
+  "tools": {
+    "buddy-opt": "d2d6dc5fbf6629e1d1aec800ef2d79a6842a0e6359542c04ab4a3c6b1f7ca059",
+    "buddy-translate": "96f4c8c335773bd3ff47b14d69c3401b90e8a9a65c45ebac19c495a937449ef5",
+    "llc": "40fc7ff18e2122512298194aee334dc8068ec7b306c3caa3214e072c284b1e8c",
+    "clang": "a41adb22e963f95cc6117eabf8085b2f0cd3bce40fe69c2b614b56b699406448"
+  }
+}

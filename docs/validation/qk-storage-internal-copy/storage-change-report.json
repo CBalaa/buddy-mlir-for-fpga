@@ -1,0 +1,29 @@
+{
+  "root_cause": "DenseConstantConverter produces linalg.fill before MatmulConverter zero recognition; CSE merges zero init with C while final add keeps old C live; One-Shot must copy before matmul update.",
+  "compiler_policy": "MatmulConverter skipC unchanged; normalize only already-existing zero-product floating add.",
+  "artifacts": {
+    "before": {
+      "allocations": 20,
+      "matrix_16x16_allocations": 12,
+      "copies": 16,
+      "private_initialization_copies": 4,
+      "tasks": 40,
+      "matmuls": 4,
+      "floating_adds": 4
+    },
+    "after": {
+      "allocations": 16,
+      "matrix_16x16_allocations": 8,
+      "copies": 12,
+      "private_initialization_copies": 0,
+      "tasks": 36,
+      "matmuls": 4,
+      "floating_adds": 4
+    }
+  },
+  "remaining_steps": "ordered f32 zero-product reduction, scalar +0, scale multiplication, exact valid-range external store",
+  "bank_high_water_bytes": [
+    5120,
+    5120
+  ]
+}

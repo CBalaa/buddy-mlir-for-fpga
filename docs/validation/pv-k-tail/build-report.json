@@ -1,0 +1,20 @@
+{
+  "name": "attention_pv_12x197x64x197",
+  "status": "PASS",
+  "stage": "asm",
+  "artifact_dir": "examples/FPGA-BOSCAME/vit-base-patch16-224/build/kernels/attention_pv_12x197x64x197",
+  "artifacts": {
+    "kernel.ll": "0253fc42c76b9eedd8da7ee4b3fd6ef7fb69adfd4e6b0e197d7caa88dd8b2df4",
+    "kernel.llvm.mlir": "ff10c85cfb8c1766f6abda0b27f6aaab80d59d7f07b9d164941147d4114ecf79",
+    "kernel.encoded.s": "9c708dce2a5cc6b67b1d560af5fb2434ca84c9892fa7e2e32e7f7462acb008a3",
+    "kernel.nr.s": "c4a66aeee785c2a9b15390fc48c5048895468f97149c626de018e117651d7e4f",
+    "kernel.boscame.mlir": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+    "kernel.frontend.mlir": "7841c7e2166cafffe75f4daa3a061ebf2c17e510aa69af9f80607a042b962818",
+    "kernel.o": "9a494b62180dd48d4d2aaf7563ebaccec2ea5966e1f59997a5db9bf325c8514a",
+    "kernel.planned.mlir": "4417e9abb09a2292673651afa286ec3bd7e5cb6fae5cf559b79b17c15116f069",
+    "kernel.bufferized.mlir": "7841c7e2166cafffe75f4daa3a061ebf2c17e510aa69af9f80607a042b962818",
+    "kernel.ttir": "d0674ddda51408f9cf5f331b93df8de6e336fd72c31ac615ecc27e217dd5a486",
+    "kernel.s": "bc31e92e152213126bd45423ce8b50c5d51a6265f944ea57f4a27070601f927d"
+  },
+  "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7"
+}

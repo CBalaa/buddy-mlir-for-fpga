@@ -1,0 +1,658 @@
+[
+  {
+    "name": "gelu_197x3072",
+    "scope": "selected real emitted programs, three rounds, same Machine/SPM; not full grid",
+    "status": "PASS",
+    "elapsed_seconds": 3.847702576313168,
+    "actual_launches": 15,
+    "shard": {
+      "programs": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          16,
+          0,
+          0
+        ],
+        [
+          32,
+          0,
+          0
+        ],
+        [
+          48,
+          0,
+          0
+        ],
+        [
+          4727,
+          0,
+          0
+        ]
+      ],
+      "runs": [
+        {
+          "name": "normal",
+          "programs": 5,
+          "total_programs": 4728,
+          "outputs": 640,
+          "max_abs": 2.384185791015625e-07,
+          "module_sha256": "0affa4f969e839ed5215a08006365d5cfb1b3c69a12f3bc46e38244d0d0b2360",
+          "kernel_module_sha256": "be1649f2a52554152038b26c37c2b6269eb86721d8b8abb6dc2089b86d9ea6d1",
+          "order": "forward",
+          "ddr_accesses": 645,
+          "dma_transfers": 5,
+          "output_sha256": {
+            "Out": "b7a0e1df309ca3fab866f341b118fb6f971bbc7655584ddd088b71fde12bff41"
+          },
+          "nonlinear_error": {
+            "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+            "rtol": 2e-05,
+            "atol": 2e-05,
+            "max_abs": 2.0440560266621333e-07,
+            "max_tolerance_fraction": 0.0027105937902601363,
+            "finite_outputs": 640,
+            "nan_outputs": 0,
+            "positive_infinity_outputs": 0,
+            "negative_infinity_outputs": 0,
+            "mathematical_reference_sha256": "7d7bd6d18284fe6c1abf6f58861739119835b379f32ac581d7e0202057368bc7",
+            "ordered_f32_reference_sha256": "63a57014f4d28197cbdfaf4f737e9e011ec7cd5a1473ce402ad9eb0281f385c6"
+          },
+          "nonlinear_ddr_bytes": {
+            "%arg0": 2560,
+            "%arg1": 2560
+          },
+          "selected_programs": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              16,
+              0,
+              0
+            ],
+            [
+              32,
+              0,
+              0
+            ],
+            [
+              48,
+              0,
+              0
+            ],
+            [
+              4727,
+              0,
+              0
+            ]
+          ],
+          "input_sha256": "91d1f60ffccb14836a0ec7277d805045185d7a4043f0a91a065067f149907f61"
+        },
+        {
+          "name": "boundaries-special-reverse",
+          "programs": 5,
+          "total_programs": 4728,
+          "outputs": 640,
+          "max_abs": 4.76837158203125e-07,
+          "module_sha256": "0affa4f969e839ed5215a08006365d5cfb1b3c69a12f3bc46e38244d0d0b2360",
+          "kernel_module_sha256": "be1649f2a52554152038b26c37c2b6269eb86721d8b8abb6dc2089b86d9ea6d1",
+          "order": "reverse",
+          "ddr_accesses": 645,
+          "dma_transfers": 5,
+          "output_sha256": {
+            "Out": "f5079d0cccae12a7629a75c9cdc55dc6e2022b7e9c11592ece4df1598e33c27b"
+          },
+          "nonlinear_error": {
+            "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+            "rtol": 2e-05,
+            "atol": 2e-05,
+            "max_abs": 1.5154223698132796e-07,
+            "max_tolerance_fraction": 0.003930612568133191,
+            "finite_outputs": 631,
+            "nan_outputs": 6,
+            "positive_infinity_outputs": 3,
+            "negative_infinity_outputs": 0,
+            "mathematical_reference_sha256": "77b5ed5a90d4598298b35431c795cc4b4b2fe47afde5e6478b965b639076b7d3",
+            "ordered_f32_reference_sha256": "4dd2cb0cc26f452ae4add6d633071d7e6c471ae1b4b227242a13cd8471852262"
+          },
+          "nonlinear_ddr_bytes": {
+            "%arg0": 2560,
+            "%arg1": 2560
+          },
+          "selected_programs": [
+            [
+              4727,
+              0,
+              0
+            ],
+            [
+              48,
+              0,
+              0
+            ],
+            [
+              32,
+              0,
+              0
+            ],
+            [
+              16,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          "input_sha256": "f7ed4749791da53a6224022e4cc8373247a64b5e54ed45f5f00482024f54973a"
+        },
+        {
+          "name": "boundaries-special-forward",
+          "programs": 5,
+          "total_programs": 4728,
+          "outputs": 640,
+          "max_abs": 4.76837158203125e-07,
+          "module_sha256": "0affa4f969e839ed5215a08006365d5cfb1b3c69a12f3bc46e38244d0d0b2360",
+          "kernel_module_sha256": "be1649f2a52554152038b26c37c2b6269eb86721d8b8abb6dc2089b86d9ea6d1",
+          "order": "forward",
+          "ddr_accesses": 645,
+          "dma_transfers": 5,
+          "output_sha256": {
+            "Out": "f5079d0cccae12a7629a75c9cdc55dc6e2022b7e9c11592ece4df1598e33c27b"
+          },
+          "nonlinear_error": {
+            "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+            "rtol": 2e-05,
+            "atol": 2e-05,
+            "max_abs": 1.5154223698132796e-07,
+            "max_tolerance_fraction": 0.003930612568133191,
+            "finite_outputs": 631,
+            "nan_outputs": 6,
+            "positive_infinity_outputs": 3,
+            "negative_infinity_outputs": 0,
+            "mathematical_reference_sha256": "77b5ed5a90d4598298b35431c795cc4b4b2fe47afde5e6478b965b639076b7d3",
+            "ordered_f32_reference_sha256": "4dd2cb0cc26f452ae4add6d633071d7e6c471ae1b4b227242a13cd8471852262"
+          },
+          "nonlinear_ddr_bytes": {
+            "%arg0": 2560,
+            "%arg1": 2560
+          },
+          "selected_programs": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              16,
+              0,
+              0
+            ],
+            [
+              32,
+              0,
+              0
+            ],
+            [
+              48,
+              0,
+              0
+            ],
+            [
+              4727,
+              0,
+              0
+            ]
+          ],
+          "input_sha256": "f7ed4749791da53a6224022e4cc8373247a64b5e54ed45f5f00482024f54973a"
+        }
+      ]
+    }
+  },
+  {
+    "name": "softmax_12x197x197",
+    "scope": "selected real emitted programs, three rounds, same Machine/SPM; not full grid",
+    "status": "PASS",
+    "elapsed_seconds": 15.745569303166121,
+    "actual_launches": 48,
+    "shard": {
+      "programs": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          0,
+          0
+        ],
+        [
+          2,
+          0,
+          0
+        ],
+        [
+          3,
+          0,
+          0
+        ],
+        [
+          4,
+          0,
+          0
+        ],
+        [
+          5,
+          0,
+          0
+        ],
+        [
+          6,
+          0,
+          0
+        ],
+        [
+          7,
+          0,
+          0
+        ],
+        [
+          8,
+          0,
+          0
+        ],
+        [
+          9,
+          0,
+          0
+        ],
+        [
+          10,
+          0,
+          0
+        ],
+        [
+          11,
+          0,
+          0
+        ],
+        [
+          12,
+          0,
+          0
+        ],
+        [
+          13,
+          0,
+          0
+        ],
+        [
+          14,
+          0,
+          0
+        ],
+        [
+          15,
+          0,
+          0
+        ]
+      ],
+      "runs": [
+        {
+          "name": "normal",
+          "programs": 16,
+          "total_programs": 2364,
+          "outputs": 3152,
+          "max_abs": 7.450580596923828e-09,
+          "module_sha256": "f07b1e5d5a243b256f56b8eef3a12395ebe5f586750615db47d7d73aec924e8a",
+          "kernel_module_sha256": "027b5c5abf69656fcb354b2231a2018cb1b2a304398ffeb5e1d22a337bbef29e",
+          "order": "forward",
+          "ddr_accesses": 416,
+          "dma_transfers": 0,
+          "output_sha256": {
+            "Out": "1115aa650f2ba247b8c94c803ab69193e1559377e156e82d0062c1039886e4f8"
+          },
+          "nonlinear_error": {
+            "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+            "rtol": 2e-05,
+            "atol": 2e-05,
+            "max_abs": 3.9287611247607046e-08,
+            "max_tolerance_fraction": 0.001820559046009452,
+            "finite_outputs": 3152,
+            "nan_outputs": 0,
+            "positive_infinity_outputs": 0,
+            "negative_infinity_outputs": 0,
+            "mathematical_reference_sha256": "90f8739ea63f6cc37e03f9b8fb47cdd6b8995136e7a2b3de5c479b1dc295e8c1",
+            "ordered_f32_reference_sha256": "fe8afd9020d61982962a02a449a46851a0deeef6d327f673bd5763adf1492296"
+          },
+          "nonlinear_ddr_bytes": {
+            "%arg0": 12608,
+            "%arg1": 12608
+          },
+          "selected_programs": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              2,
+              0,
+              0
+            ],
+            [
+              3,
+              0,
+              0
+            ],
+            [
+              4,
+              0,
+              0
+            ],
+            [
+              5,
+              0,
+              0
+            ],
+            [
+              6,
+              0,
+              0
+            ],
+            [
+              7,
+              0,
+              0
+            ],
+            [
+              8,
+              0,
+              0
+            ],
+            [
+              9,
+              0,
+              0
+            ],
+            [
+              10,
+              0,
+              0
+            ],
+            [
+              11,
+              0,
+              0
+            ],
+            [
+              12,
+              0,
+              0
+            ],
+            [
+              13,
+              0,
+              0
+            ],
+            [
+              14,
+              0,
+              0
+            ],
+            [
+              15,
+              0,
+              0
+            ]
+          ],
+          "input_sha256": "96b2b0eefda7f8cf025b37729eabff854a1c3f806a67490bd6781b4d5fc34a94"
+        },
+        {
+          "name": "boundaries-special-reverse",
+          "programs": 16,
+          "total_programs": 2364,
+          "outputs": 3152,
+          "max_abs": 7.450580596923828e-09,
+          "module_sha256": "f07b1e5d5a243b256f56b8eef3a12395ebe5f586750615db47d7d73aec924e8a",
+          "kernel_module_sha256": "027b5c5abf69656fcb354b2231a2018cb1b2a304398ffeb5e1d22a337bbef29e",
+          "order": "reverse",
+          "ddr_accesses": 416,
+          "dma_transfers": 0,
+          "output_sha256": {
+            "Out": "14d79cefbfb77e5dbd4a45753ae2a4510f40ad88e63cdb19f8872277219488ba"
+          },
+          "nonlinear_error": {
+            "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+            "rtol": 2e-05,
+            "atol": 2e-05,
+            "max_abs": 2.7685779779851316e-08,
+            "max_tolerance_fraction": 0.0008443091853420119,
+            "finite_outputs": 2364,
+            "nan_outputs": 788,
+            "positive_infinity_outputs": 0,
+            "negative_infinity_outputs": 0,
+            "mathematical_reference_sha256": "07478b697f4297352cbba03eb2678846182b0e2c64d817ebcacb2a0da762b9cb",
+            "ordered_f32_reference_sha256": "3598256e48b07ecf0608a1e2291f3e36d74fbcf0cb0a0ef38d23bfdcc6a89cf0"
+          },
+          "nonlinear_ddr_bytes": {
+            "%arg0": 12608,
+            "%arg1": 12608
+          },
+          "selected_programs": [
+            [
+              15,
+              0,
+              0
+            ],
+            [
+              14,
+              0,
+              0
+            ],
+            [
+              13,
+              0,
+              0
+            ],
+            [
+              12,
+              0,
+              0
+            ],
+            [
+              11,
+              0,
+              0
+            ],
+            [
+              10,
+              0,
+              0
+            ],
+            [
+              9,
+              0,
+              0
+            ],
+            [
+              8,
+              0,
+              0
+            ],
+            [
+              7,
+              0,
+              0
+            ],
+            [
+              6,
+              0,
+              0
+            ],
+            [
+              5,
+              0,
+              0
+            ],
+            [
+              4,
+              0,
+              0
+            ],
+            [
+              3,
+              0,
+              0
+            ],
+            [
+              2,
+              0,
+              0
+            ],
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0
+            ]
+          ],
+          "input_sha256": "117092599cb7223acf0a969f378726258c97008f457c6ee3693aef4ad2d36384"
+        },
+        {
+          "name": "boundaries-special-forward",
+          "programs": 16,
+          "total_programs": 2364,
+          "outputs": 3152,
+          "max_abs": 7.450580596923828e-09,
+          "module_sha256": "f07b1e5d5a243b256f56b8eef3a12395ebe5f586750615db47d7d73aec924e8a",
+          "kernel_module_sha256": "027b5c5abf69656fcb354b2231a2018cb1b2a304398ffeb5e1d22a337bbef29e",
+          "order": "forward",
+          "ddr_accesses": 416,
+          "dma_transfers": 0,
+          "output_sha256": {
+            "Out": "14d79cefbfb77e5dbd4a45753ae2a4510f40ad88e63cdb19f8872277219488ba"
+          },
+          "nonlinear_error": {
+            "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+            "rtol": 2e-05,
+            "atol": 2e-05,
+            "max_abs": 2.7685779779851316e-08,
+            "max_tolerance_fraction": 0.0008443091853420119,
+            "finite_outputs": 2364,
+            "nan_outputs": 788,
+            "positive_infinity_outputs": 0,
+            "negative_infinity_outputs": 0,
+            "mathematical_reference_sha256": "07478b697f4297352cbba03eb2678846182b0e2c64d817ebcacb2a0da762b9cb",
+            "ordered_f32_reference_sha256": "3598256e48b07ecf0608a1e2291f3e36d74fbcf0cb0a0ef38d23bfdcc6a89cf0"
+          },
+          "nonlinear_ddr_bytes": {
+            "%arg0": 12608,
+            "%arg1": 12608
+          },
+          "selected_programs": [
+            [
+              0,
+              0,
+              0
+            ],
+            [
+              1,
+              0,
+              0
+            ],
+            [
+              2,
+              0,
+              0
+            ],
+            [
+              3,
+              0,
+              0
+            ],
+            [
+              4,
+              0,
+              0
+            ],
+            [
+              5,
+              0,
+              0
+            ],
+            [
+              6,
+              0,
+              0
+            ],
+            [
+              7,
+              0,
+              0
+            ],
+            [
+              8,
+              0,
+              0
+            ],
+            [
+              9,
+              0,
+              0
+            ],
+            [
+              10,
+              0,
+              0
+            ],
+            [
+              11,
+              0,
+              0
+            ],
+            [
+              12,
+              0,
+              0
+            ],
+            [
+              13,
+              0,
+              0
+            ],
+            [
+              14,
+              0,
+              0
+            ],
+            [
+              15,
+              0,
+              0
+            ]
+          ],
+          "input_sha256": "117092599cb7223acf0a969f378726258c97008f457c6ee3693aef4ad2d36384"
+        }
+      ]
+    }
+  }
+]

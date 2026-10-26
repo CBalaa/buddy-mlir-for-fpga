@@ -1,0 +1,320 @@
+{
+  "status": "PASS",
+  "scope": "two actual selected full-M/tail-M shards, three rounds each; intentionally not full-grid aggregate evidence",
+  "shards": [
+    {
+      "programs": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          12,
+          0,
+          0
+        ]
+      ],
+      "runs": [
+        {
+          "name": "normal",
+          "metrics": {
+            "programs": 2,
+            "total_programs": 624,
+            "outputs": 336,
+            "max_abs": 0.0,
+            "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+            "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+            "order": "forward",
+            "ddr_accesses": 499,
+            "dma_transfers": 415,
+            "output_sha256": {
+              "C": "683ffd50a7096233ed611f5440bbd9e18c7295f841414766ef0c112649854d90"
+            },
+            "pv_access_audit": {
+              "a_matrix_geometry": {
+                "full-M/full-K": 3,
+                "full-M/tail-K": 1,
+                "tail-M/full-K": 3,
+                "tail-M/tail-K": 1
+              },
+              "b_dma_packets": 394,
+              "ddr_bytes": {
+                "%arg0": 16548,
+                "%arg1": 25216,
+                "%arg2": 1344
+              }
+            },
+            "bit_exact_f32": true,
+            "reference_sha256": {
+              "C": "683ffd50a7096233ed611f5440bbd9e18c7295f841414766ef0c112649854d90"
+            },
+            "selected_programs": [
+              [
+                0,
+                0,
+                0
+              ],
+              [
+                12,
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "name": "ordered-blocks-tail-first",
+          "metrics": {
+            "programs": 2,
+            "total_programs": 624,
+            "outputs": 336,
+            "max_abs": 0.0,
+            "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+            "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+            "order": "tail-first",
+            "ddr_accesses": 499,
+            "dma_transfers": 415,
+            "output_sha256": {
+              "C": "8b35906ee91f7496476b997b7743cdeb9a0658ca7171bbd7e652332fa8ed8384"
+            },
+            "pv_access_audit": {
+              "a_matrix_geometry": {
+                "tail-M/full-K": 3,
+                "tail-M/tail-K": 1,
+                "full-M/full-K": 3,
+                "full-M/tail-K": 1
+              },
+              "b_dma_packets": 394,
+              "ddr_bytes": {
+                "%arg0": 16548,
+                "%arg1": 25216,
+                "%arg2": 1344
+              }
+            },
+            "bit_exact_f32": true,
+            "reference_sha256": {
+              "C": "8b35906ee91f7496476b997b7743cdeb9a0658ca7171bbd7e652332fa8ed8384"
+            },
+            "selected_programs": [
+              [
+                12,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "name": "ordered-blocks-reverse",
+          "metrics": {
+            "programs": 2,
+            "total_programs": 624,
+            "outputs": 336,
+            "max_abs": 0.0,
+            "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+            "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+            "order": "reverse",
+            "ddr_accesses": 499,
+            "dma_transfers": 415,
+            "output_sha256": {
+              "C": "8b35906ee91f7496476b997b7743cdeb9a0658ca7171bbd7e652332fa8ed8384"
+            },
+            "pv_access_audit": {
+              "a_matrix_geometry": {
+                "tail-M/full-K": 3,
+                "tail-M/tail-K": 1,
+                "full-M/full-K": 3,
+                "full-M/tail-K": 1
+              },
+              "b_dma_packets": 394,
+              "ddr_bytes": {
+                "%arg0": 16548,
+                "%arg1": 25216,
+                "%arg2": 1344
+              }
+            },
+            "bit_exact_f32": true,
+            "reference_sha256": {
+              "C": "8b35906ee91f7496476b997b7743cdeb9a0658ca7171bbd7e652332fa8ed8384"
+            },
+            "selected_programs": [
+              [
+                12,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "programs": [
+        [
+          0,
+          3,
+          11
+        ],
+        [
+          12,
+          3,
+          11
+        ]
+      ],
+      "runs": [
+        {
+          "name": "normal",
+          "metrics": {
+            "programs": 2,
+            "total_programs": 624,
+            "outputs": 336,
+            "max_abs": 0.0,
+            "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+            "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+            "order": "forward",
+            "ddr_accesses": 499,
+            "dma_transfers": 415,
+            "output_sha256": {
+              "C": "e712cf59a5c0a51a7a3a34eefe5094668093879b8bd5a0f111d3be14d32739ea"
+            },
+            "pv_access_audit": {
+              "a_matrix_geometry": {
+                "full-M/full-K": 3,
+                "full-M/tail-K": 1,
+                "tail-M/full-K": 3,
+                "tail-M/tail-K": 1
+              },
+              "b_dma_packets": 394,
+              "ddr_bytes": {
+                "%arg0": 16548,
+                "%arg1": 25216,
+                "%arg2": 1344
+              }
+            },
+            "bit_exact_f32": true,
+            "reference_sha256": {
+              "C": "e712cf59a5c0a51a7a3a34eefe5094668093879b8bd5a0f111d3be14d32739ea"
+            },
+            "selected_programs": [
+              [
+                0,
+                3,
+                11
+              ],
+              [
+                12,
+                3,
+                11
+              ]
+            ]
+          }
+        },
+        {
+          "name": "ordered-blocks-tail-first",
+          "metrics": {
+            "programs": 2,
+            "total_programs": 624,
+            "outputs": 336,
+            "max_abs": 0.0,
+            "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+            "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+            "order": "tail-first",
+            "ddr_accesses": 499,
+            "dma_transfers": 415,
+            "output_sha256": {
+              "C": "7a75558e3f9fac667d35579867d72e9dc2d40c78d2fe1953e54880b1bd05f294"
+            },
+            "pv_access_audit": {
+              "a_matrix_geometry": {
+                "tail-M/full-K": 3,
+                "tail-M/tail-K": 1,
+                "full-M/full-K": 3,
+                "full-M/tail-K": 1
+              },
+              "b_dma_packets": 394,
+              "ddr_bytes": {
+                "%arg0": 16548,
+                "%arg1": 25216,
+                "%arg2": 1344
+              }
+            },
+            "bit_exact_f32": true,
+            "reference_sha256": {
+              "C": "7a75558e3f9fac667d35579867d72e9dc2d40c78d2fe1953e54880b1bd05f294"
+            },
+            "selected_programs": [
+              [
+                12,
+                3,
+                11
+              ],
+              [
+                0,
+                3,
+                11
+              ]
+            ]
+          }
+        },
+        {
+          "name": "ordered-blocks-reverse",
+          "metrics": {
+            "programs": 2,
+            "total_programs": 624,
+            "outputs": 336,
+            "max_abs": 0.0,
+            "module_sha256": "2ff4336ebfe949c9e594556d5598bf46573779ff606cc2a8b104fa2d09b8a80a",
+            "kernel_module_sha256": "67e476d628c3ae2b1683984fe2b1d4ebd9504a41ab018e8c07fa7baa1c65f9a7",
+            "order": "reverse",
+            "ddr_accesses": 499,
+            "dma_transfers": 415,
+            "output_sha256": {
+              "C": "7a75558e3f9fac667d35579867d72e9dc2d40c78d2fe1953e54880b1bd05f294"
+            },
+            "pv_access_audit": {
+              "a_matrix_geometry": {
+                "tail-M/full-K": 3,
+                "tail-M/tail-K": 1,
+                "full-M/full-K": 3,
+                "full-M/tail-K": 1
+              },
+              "b_dma_packets": 394,
+              "ddr_bytes": {
+                "%arg0": 16548,
+                "%arg1": 25216,
+                "%arg2": 1344
+              }
+            },
+            "bit_exact_f32": true,
+            "reference_sha256": {
+              "C": "7a75558e3f9fac667d35579867d72e9dc2d40c78d2fe1953e54880b1bd05f294"
+            },
+            "selected_programs": [
+              [
+                12,
+                3,
+                11
+              ],
+              [
+                0,
+                3,
+                11
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

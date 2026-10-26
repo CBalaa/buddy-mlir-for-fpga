@@ -1,0 +1,117 @@
+{
+  "scope": "static audit of actual planned/frontend IR; byte expectations are checked independently by strict simulation",
+  "status": "PASS",
+  "compute_graph": {
+    "complete": true,
+    "scope_count": 5,
+    "source_task_count": 29,
+    "task_map": "29 retained tasks; loop dependencies regenerated"
+  },
+  "grid": [
+    13,
+    4,
+    12
+  ],
+  "programs": 624,
+  "outputs_per_round": 151296,
+  "branches": {
+    "full_M_programs": 576,
+    "tail_M_programs": 48
+  },
+  "reduction": {
+    "prefix_loop_iterations": 3,
+    "static_tail_block": 3,
+    "tail_valid_K": 5,
+    "arithmetic_BK": 64,
+    "A_shape": [
+      16,
+      64
+    ],
+    "B_shape": [
+      64,
+      16
+    ],
+    "order": "each zero-initialized product reduced sequentially over64 K; separate block add; no new FMA"
+  },
+  "a_routes": [
+    {
+      "valid_shape": [
+        16,
+        64
+      ],
+      "engine": "matrix",
+      "register_class": "acc",
+      "instruction_bits": 32,
+      "source_pitch": 788,
+      "target_pitch": 256,
+      "row_bytes": 256,
+      "reason": "dma-illegal-exact-acc32-rectangle"
+    },
+    {
+      "valid_shape": [
+        16,
+        5
+      ],
+      "engine": "matrix",
+      "register_class": "acc",
+      "instruction_bits": 32,
+      "source_pitch": 788,
+      "target_pitch": 256,
+      "row_bytes": 20,
+      "reason": "dma-illegal-exact-acc32-rectangle"
+    },
+    {
+      "valid_shape": [
+        5,
+        64
+      ],
+      "engine": "matrix",
+      "register_class": "acc",
+      "instruction_bits": 32,
+      "source_pitch": 788,
+      "target_pitch": 256,
+      "row_bytes": 256,
+      "reason": "dma-illegal-exact-acc32-rectangle"
+    },
+    {
+      "valid_shape": [
+        5,
+        5
+      ],
+      "engine": "matrix",
+      "register_class": "acc",
+      "instruction_bits": 32,
+      "source_pitch": 788,
+      "target_pitch": 256,
+      "row_bytes": 20,
+      "reason": "dma-illegal-exact-acc32-rectangle"
+    }
+  ],
+  "b_route": {
+    "engine": "dma",
+    "packets_per_program": 197,
+    "packet_bytes": 64,
+    "source_pitch": 256,
+    "tail_rows": 5,
+    "reason": "bounded-external-boundary"
+  },
+  "c_route": {
+    "engine": "dma",
+    "old_C_read": false,
+    "full_M_rows": 16,
+    "tail_M_rows": 5,
+    "packet_bytes": 64,
+    "reason": "bounded-external-boundary"
+  },
+  "spm_high_water_bytes": [
+    10240,
+    9216
+  ],
+  "expected_ddr_bytes_per_program": {
+    "full_M": 26240,
+    "tail_M": 16868
+  },
+  "expected_ddr_bytes_full_grid": 15923904,
+  "ame_f32_mma_count": 0,
+  "new_fma_count": 0
+}

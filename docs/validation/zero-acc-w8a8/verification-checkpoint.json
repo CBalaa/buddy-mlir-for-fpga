@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "scope": "Acc zero and emitted W8A8 Linear implementation; not full-model accuracy or a board run",
+  "compiler_build": "PASS",
+  "check_buddy": {
+    "command": "ninja -C build check-buddy -j2",
+    "status": "PASS",
+    "examples": {
+      "discovered": 241,
+      "passed": 239,
+      "unsupported": 2
+    },
+    "regressions": {
+      "discovered": 622,
+      "passed": 619,
+      "unsupported": 2,
+      "expected_failure": 1,
+      "unexpected_failure": 0
+    }
+  },
+  "design_fixtures": {
+    "command": "plan/tools/check_examples.sh",
+    "status": "PASS",
+    "fixtures": 6,
+    "positive_and_mutation_tests": 40,
+    "deterministic_regeneration": true
+  },
+  "production_object_audit": {
+    "passed": 37,
+    "failed": 0,
+    "instruction_whitelist_extended": false
+  },
+  "standalone_build_check_simcheck": "PASS",
+  "changed_file_pre_commit": "PASS",
+  "git_diff_check": "PASS",
+  "git_diff_cached_check": "PASS",
+  "staging_or_commit_performed": false,
+  "new_board_run": false,
+  "full_model_executed": false,
+  "model_accuracy_accepted": false
+}

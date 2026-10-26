@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "qk_asm_build": "PASS",
+  "qk_old_new_four_branch_comparison": "PASS",
+  "qk_old_emitted_four_branch_comparison": "PASS",
+  "qk_full_2028_program_simulation": "PASS",
+  "full_model_verification": "NOT_CLAIMED",
+  "check_buddy": {
+    "status": "PASS",
+    "example_tests": 239,
+    "example_unsupported": 2,
+    "regression_tests": 609,
+    "regression_unsupported": 2,
+    "expected_failures": 1,
+    "unexpected_failures": 0
+  },
+  "design_checks": {
+    "status": "PASS",
+    "tests": 40
+  },
+  "dynamic_type_offset_internal_copy_rejection": "PASS",
+  "hardware_board_execution": "NOT_RUN",
+  "qk_full_grid_scope": {
+    "normal_input_datasets": 1,
+    "program_order": "reverse",
+    "programs": 2028,
+    "outputs": 465708,
+    "max_abs": 0,
+    "comparison": "Bitwise equality with the independent ordered-f32 oracle on this normal input.",
+    "report": "qk-full-simcheck-report.json"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "numerical_contract": "ordered f32 multiply and add, zero product per full BK64 including positive-zero padded tail, separate block add, SCALE after reduction",
+  "references": {
+    "normal": {
+      "outputs": 151296,
+      "output_sha256": "5ff2e2fba234e34b9c290feaf6e6bf7ab00df82bb9e7b68d2bef511d72548cb4"
+    },
+    "stress": {
+      "outputs": 151296,
+      "output_sha256": "5692f1d27ac16a9b7b70ae63e18c675b4206b1b3dc117a6b65e85b581e44f8b9"
+    }
+  }
+}

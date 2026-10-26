@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "stack_capacity_bytes": 65536,
+  "examples": {
+    "matmul_i8_128x1024x128": {
+      "make": "PASS",
+      "check": "PASS",
+      "simcheck": "PASS",
+      "elf_audit_status": "PASS",
+      "elf_sha256": "4f790c53dc28e21128e122d31b97cb3823d3506c89331c31eadbd581cd68cbda",
+      "stack_audit_status": "PASS",
+      "stack_peak_bytes": 656,
+      "programs": 32,
+      "output_elements": 131072,
+      "numerics": "Exact signed i8 accumulation to i32"
+    },
+    "matmul_i8_196x768x768": {
+      "make": "PASS",
+      "check": "PASS",
+      "simcheck": "PASS",
+      "elf_audit_status": "PASS",
+      "elf_sha256": "95335a64afee404cc1171d6561f669629f2b5f622960a1ee133be96067dd0948",
+      "stack_audit_status": "PASS",
+      "stack_peak_bytes": 1216,
+      "programs_per_grid": 42,
+      "complete_stress_grids": 3,
+      "output_elements_per_grid": 150528,
+      "numerics": "Exact signed extrema, nonzero accumulator and i32 wrap; tail-first and reverse order"
+    },
+    "layernorm_197x768": {
+      "make": "PASS",
+      "check": "PASS",
+      "simcheck": "PASS",
+      "elf_audit_status": "PASS",
+      "elf_sha256": "818766ad1504f30b99aed59a28c08b33d2b704a7cea28b40940ce3b8f62c480a",
+      "stack_audit_status": "PASS",
+      "stack_peak_bytes": 1168,
+      "programs": 197,
+      "output_elements": 151296,
+      "numerics": "Ordered f32 operations, unchanged rtol=atol=2e-5"
+    }
+  }
+}

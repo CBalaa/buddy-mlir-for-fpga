@@ -1,0 +1,341 @@
+{
+  "schema": 1,
+  "compiler_sha256": "aaa5cacc8e23e5d7281f2efb4b62314384a2a44619c0739b59eaba8c78675cf1",
+  "compile": {
+    "requested_stage": "asm",
+    "total": 34,
+    "pass": 16,
+    "blocked": 18,
+    "status": "PARTIAL",
+    "suite_exit_code": 1,
+    "expected_nonzero_for_blocked_cases": true,
+    "passing_cases": [
+      "add_197x768",
+      "add_1x1000",
+      "add_1x768",
+      "attention_qk_12x197x197x64",
+      "bias_add_196x768",
+      "bias_add_197x3072",
+      "bias_add_197x768",
+      "bias_add_1x1000",
+      "bias_add_1x768",
+      "layernorm_197x768",
+      "layernorm_1x768",
+      "matmul_i8_196x768x768",
+      "matmul_i8_197x3072x768",
+      "matmul_i8_197x768x3072",
+      "matmul_i8_197x768x768",
+      "matmul_i8_1x1000x768"
+    ],
+    "blocked_cases": [
+      {
+        "name": "attention_pv_12x197x64x197",
+        "stage": "frontend",
+        "first_diagnostic": "'memref.copy' op kernel contract V4: static valid shape must match the access rank and be positive"
+      },
+      {
+        "name": "dequantize_196x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract gather/scatter load is unsupported in contract v1"
+      },
+      {
+        "name": "dequantize_197x3072",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract gather/scatter load is unsupported in contract v1"
+      },
+      {
+        "name": "dequantize_197x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract gather/scatter load is unsupported in contract v1"
+      },
+      {
+        "name": "dequantize_1x1000",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract gather/scatter load is unsupported in contract v1"
+      },
+      {
+        "name": "gelu_197x3072",
+        "stage": "frontend",
+        "first_diagnostic": "'linalg.generic' op kernel contract V25: generic requires one pure arithmetic operation"
+      },
+      {
+        "name": "linear_196x768x768",
+        "stage": "frontend",
+        "first_diagnostic": "'memref.copy' op kernel contract V19: cross-scope edge is not a registered loop init/exit edge"
+      },
+      {
+        "name": "linear_197x3072x768",
+        "stage": "frontend",
+        "first_diagnostic": "'memref.copy' op kernel contract V19: cross-scope edge is not a registered loop init/exit edge"
+      },
+      {
+        "name": "linear_197x768x3072",
+        "stage": "frontend",
+        "first_diagnostic": "'memref.copy' op kernel contract V19: cross-scope edge is not a registered loop init/exit edge"
+      },
+      {
+        "name": "linear_197x768x768",
+        "stage": "frontend",
+        "first_diagnostic": "'memref.copy' op kernel contract V19: cross-scope edge is not a registered loop init/exit edge"
+      },
+      {
+        "name": "linear_1x1000x768",
+        "stage": "frontend",
+        "first_diagnostic": "'memref.copy' op kernel contract V19: cross-scope edge is not a registered loop init/exit edge"
+      },
+      {
+        "name": "patch_embed_196x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1"
+      },
+      {
+        "name": "quantize_196x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1"
+      },
+      {
+        "name": "quantize_197x3072",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1"
+      },
+      {
+        "name": "quantize_197x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1"
+      },
+      {
+        "name": "quantize_1x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1"
+      },
+      {
+        "name": "quantize_768x768",
+        "stage": "frontend",
+        "first_diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1"
+      },
+      {
+        "name": "softmax_12x197x197",
+        "stage": "frontend",
+        "first_diagnostic": "'linalg.generic' op kernel contract V25: generic requires one pure arithmetic operation"
+      }
+    ],
+    "identical_first_diagnostic_groups": [
+      {
+        "diagnostic": "'memref.copy' op kernel contract V4: static valid shape must match the access rank and be positive",
+        "cases": [
+          "attention_pv_12x197x64x197"
+        ],
+        "count": 1
+      },
+      {
+        "diagnostic": "neutral contract gather/scatter load is unsupported in contract v1",
+        "cases": [
+          "dequantize_196x768",
+          "dequantize_197x3072",
+          "dequantize_197x768",
+          "dequantize_1x1000"
+        ],
+        "count": 4
+      },
+      {
+        "diagnostic": "'linalg.generic' op kernel contract V25: generic requires one pure arithmetic operation",
+        "cases": [
+          "gelu_197x3072",
+          "softmax_12x197x197"
+        ],
+        "count": 2
+      },
+      {
+        "diagnostic": "'memref.copy' op kernel contract V19: cross-scope edge is not a registered loop init/exit edge",
+        "cases": [
+          "linear_196x768x768",
+          "linear_197x3072x768",
+          "linear_197x768x3072",
+          "linear_197x768x768",
+          "linear_1x1000x768"
+        ],
+        "count": 5
+      },
+      {
+        "diagnostic": "neutral contract unstructured/scalar memory access is unsupported in contract v1",
+        "cases": [
+          "patch_embed_196x768",
+          "quantize_196x768",
+          "quantize_197x3072",
+          "quantize_197x768",
+          "quantize_1x768",
+          "quantize_768x768"
+        ],
+        "count": 6
+      }
+    ],
+    "behavior_groups": [
+      {
+        "family": "attention_pv",
+        "cases": [
+          "attention_pv_12x197x64x197"
+        ],
+        "count": 1,
+        "discussion": "Masked multidimensional access rank and valid-shape contract."
+      },
+      {
+        "family": "dequantization",
+        "cases": [
+          "dequantize_196x768",
+          "dequantize_197x3072",
+          "dequantize_197x768",
+          "dequantize_1x1000"
+        ],
+        "count": 4,
+        "discussion": "Broadcasted scale reads currently form gather/scatter accesses."
+      },
+      {
+        "family": "gelu",
+        "cases": [
+          "gelu_197x3072"
+        ],
+        "count": 1,
+        "discussion": "Pointwise transcendental payload and exact floating-point semantics."
+      },
+      {
+        "family": "softmax",
+        "cases": [
+          "softmax_12x197x197"
+        ],
+        "count": 1,
+        "discussion": "Exponential pointwise payload, reductions, masking and floating-point order."
+      },
+      {
+        "family": "linear",
+        "cases": [
+          "linear_196x768x768",
+          "linear_197x3072x768",
+          "linear_197x768x3072",
+          "linear_197x768x768",
+          "linear_1x1000x768"
+        ],
+        "count": 5,
+        "discussion": "Cross-scope content dependencies around serial accumulation loops."
+      },
+      {
+        "family": "patch_embed",
+        "cases": [
+          "patch_embed_196x768"
+        ],
+        "count": 1,
+        "discussion": "Structured im2col scalar address calculations and masked boundary loads."
+      },
+      {
+        "family": "quantization",
+        "cases": [
+          "quantize_196x768",
+          "quantize_197x3072",
+          "quantize_197x768",
+          "quantize_1x768",
+          "quantize_768x768"
+        ],
+        "count": 5,
+        "discussion": "Scalar scale store and subsequent reduction, rounding and conversion semantics."
+      }
+    ],
+    "fresh_frontend_comparison": {
+      "case_count": 18,
+      "same_blocked_set": true,
+      "same_first_diagnostic_for_every_case": true
+    }
+  },
+  "existing_examples": {
+    "matmul_i8_128x1024x128": {
+      "make": "PASS",
+      "make_check": "PASS",
+      "kernel_artifact_count": 11,
+      "all_kernel_artifacts_byte_identical_to_before_rebuild": true,
+      "all_kernel_hashes_identical_to_previously_simulated_artifacts": true,
+      "simulator_rerun": false,
+      "kernel_artifact_hashes": {
+        "kernel.ll": "0b91d6ceb47564bfa55ef76340b772d957ede60ce3c0e97c3ece8c6f32d54c41",
+        "kernel.llvm.mlir": "b40f44ec3c46ad9cf299b73d88e1fd636ed4c26be060adc23311262ed9485743",
+        "kernel.encoded.s": "af179d722c5a651364f53145a2a427ef4e0adfe842dd9f8e021033faf3fd718a",
+        "kernel.nr.s": "7165e0cfe6b542e2e992f51f5cd43d2c333e04ec82a0edb46f00653a0be54152",
+        "kernel.boscame.mlir": "2c003671ea83041d5939e7c4ad5ec180a09bd1927e5b7b0168f0e5036f996828",
+        "kernel.frontend.mlir": "89f2fd16c887de99bd7b34cd15478d70cd494ca7ea1f81c4318ab0b6caf297ed",
+        "kernel.o": "5661e9d81b6a22925402b9028c8e92b5618682e8db246c6c9f1bd9862f84e999",
+        "kernel.planned.mlir": "f2b0422e7608651a4f08fa6d94a866e9381d74d52dea831334361b6311787f22",
+        "kernel.bufferized.mlir": "89f2fd16c887de99bd7b34cd15478d70cd494ca7ea1f81c4318ab0b6caf297ed",
+        "kernel.ttir": "aef569acfcd64269daca214ef6e7bfa0b923d85ef230c3da0dc52ff6e06289b5",
+        "kernel.s": "85fb52c87d691b1812163d80ab9c49ff5d6165dffe28b6fae5ee5d22f53c8088"
+      },
+      "linked_artifact_hashes": {
+        "matmul_i8_128x1024x128.elf": {
+          "sha256": "4f790c53dc28e21128e122d31b97cb3823d3506c89331c31eadbd581cd68cbda",
+          "same_as_before_rebuild": true
+        },
+        "elf-audit.json": {
+          "sha256": "39af4d70b596a08bf0233492b5255a5a5b9bcb953afd7b7e201620f4aa458d97",
+          "same_as_before_rebuild": true
+        }
+      }
+    },
+    "matmul_i8_196x768x768": {
+      "make": "PASS",
+      "make_check": "PASS",
+      "kernel_artifact_count": 11,
+      "all_kernel_artifacts_byte_identical_to_before_rebuild": true,
+      "all_kernel_hashes_identical_to_previously_simulated_artifacts": true,
+      "simulator_rerun": false,
+      "kernel_artifact_hashes": {
+        "kernel.ll": "f960bdb10d35319683fccf85400af21139ee1d50ace57d3f020721d46a211732",
+        "kernel.llvm.mlir": "fccb6802992a199b6c14a4c1fa0175f11eafce74de3bc7c64b06d23db24edd33",
+        "kernel.encoded.s": "4ca938bc190605a119456b7f20fb68913a63c7d0e9ac530bf41cb62da41fc6f7",
+        "kernel.nr.s": "4a334485bdf4c54e4ac0be2c0dcab63e9fe6e7c8a42dbded6b40686aa6752a39",
+        "kernel.boscame.mlir": "9513d7f7732e15183b4d73494f295a6785f906fc94e2de4c4c1ec0c2eea4701a",
+        "kernel.frontend.mlir": "4bb93a6b21893c2752b3f5807ae54a8f3a90addd371b864d7b4520b9f0c70885",
+        "kernel.o": "ba23a7e08c7a079f10199e37ca7b67a52fd323bf48dd770c028d1101f0dc7024",
+        "kernel.planned.mlir": "2a7f26c6c81bd6acb785a647772ff7ae810aadb37c94c1b0a11a7b51b81e25ed",
+        "kernel.bufferized.mlir": "4bb93a6b21893c2752b3f5807ae54a8f3a90addd371b864d7b4520b9f0c70885",
+        "kernel.ttir": "96dfaa49277c48264a124ade7d40aa69f80ef7df473f0d12a61428b5cc9f6a5c",
+        "kernel.s": "b2ab7b2ab7179977aca721fbcb8d79918ceb0c7bb790aae3e42884f9d4ed869a"
+      },
+      "linked_artifact_hashes": {
+        "matmul_i8_196x768x768.elf": {
+          "sha256": "95335a64afee404cc1171d6561f669629f2b5f622960a1ee133be96067dd0948",
+          "same_as_before_rebuild": true
+        },
+        "elf-audit.json": {
+          "sha256": "bc57f76bcb73aae64bf66e8557a89ecc720568b95a9f5c9c25400e11269a21f6",
+          "same_as_before_rebuild": true
+        }
+      }
+    },
+    "layernorm_197x768": {
+      "make": "PASS",
+      "make_check": "PASS",
+      "kernel_artifact_count": 10,
+      "all_kernel_artifacts_byte_identical_to_before_rebuild": true,
+      "all_kernel_hashes_identical_to_previously_simulated_artifacts": true,
+      "simulator_rerun": false,
+      "kernel_artifact_hashes": {
+        "kernel.ll": "582bd3b81636294f63991cba129f8d5691052cbc3d8ac518faea7fe5f47a7b2f",
+        "kernel.llvm.mlir": "27851f1f53d138268b0ef70b6bc6c27803c8ae2ec7f9aa91f9df385ef0cfc307",
+        "kernel.nr.s": "81a2ee4a7691b796d005ed23f3e75da6f41c8e5e3873ee3a3d026e6c991ad209",
+        "kernel.boscame.mlir": "b176cbdfedcca1fd37348e4e5ea12493f7dc1b2824fc52aa805572ad3f2952b2",
+        "kernel.frontend.mlir": "7bfc7f084c2bae9fc8762ccbb2c6f5190e608bc897e044d8545b7b4358e0d34b",
+        "kernel.o": "16bb3ef83c84744ddd9e29e7b4c3f39d1c76b297fd8da6dcbaf8f7fb79160918",
+        "kernel.planned.mlir": "bb62dbf07c6071ad5f76f6208af9c7dee14eeb9413730a3ca35e8ca4a8a722ff",
+        "kernel.bufferized.mlir": "7bfc7f084c2bae9fc8762ccbb2c6f5190e608bc897e044d8545b7b4358e0d34b",
+        "kernel.ttir": "2166c568752fd7869d019c3596e7d452d16d6a74dfcbc791af0d57c02798737f",
+        "kernel.s": "b9e8fe33751d7133f8150ec24ed3326d9dae12dc344bc52c3f7e27916ddb70da"
+      },
+      "linked_artifact_hashes": {
+        "layernorm_197x768.elf": {
+          "sha256": "818766ad1504f30b99aed59a28c08b33d2b704a7cea28b40940ce3b8f62c480a",
+          "same_as_before_rebuild": true
+        },
+        "elf-audit.json": {
+          "sha256": "8590d0caf064de8ee9a7dbf8c016e8b099e6bb77ab2c2c7430e5c7e08a3d3ab7",
+          "same_as_before_rebuild": true
+        }
+      }
+    }
+  }
+}

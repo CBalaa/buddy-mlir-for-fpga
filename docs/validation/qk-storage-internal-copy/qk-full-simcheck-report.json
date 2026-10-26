@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "cases": [
+    {
+      "name": "attention_qk_12x197x197x64",
+      "status": "PASS",
+      "programs": 2028,
+      "total_programs": 2028,
+      "outputs": 465708,
+      "max_abs": 0,
+      "reason": "",
+      "module_sha256": "67e5190b4c17d2ee714801ef6beb5bb2cf7b17ac8c9ffc7fb0e5ad49e58a1d8e",
+      "full_grid_programs": 2028,
+      "kernel_module_sha256": "4a363070691a4c6204385e8b39d07f3289de08dede14c4a48add0759f4b61875",
+      "comparison_rounds": 1,
+      "runs": [
+        {
+          "name": "normal",
+          "programs": 2028,
+          "total_programs": 2028,
+          "outputs": 465708,
+          "max_abs": 0.0,
+          "module_sha256": "67e5190b4c17d2ee714801ef6beb5bb2cf7b17ac8c9ffc7fb0e5ad49e58a1d8e",
+          "kernel_module_sha256": "4a363070691a4c6204385e8b39d07f3289de08dede14c4a48add0759f4b61875",
+          "order": "reverse",
+          "ddr_accesses": 191256,
+          "dma_transfers": 30732,
+          "output_sha256": {
+            "C": "0a919e5a8060a35236e6ace1b85246b10bd42f1110051a1922774f6db29b4078"
+          }
+        }
+      ]
+    }
+  ]
+}

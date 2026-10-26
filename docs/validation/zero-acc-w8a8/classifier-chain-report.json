@@ -1,0 +1,416 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "scope": "emitted classifier Linear chain",
+  "full_model_executed": false,
+  "accuracy_accepted": false,
+  "runs": [
+    {
+      "name": "ties-and-channel-scales",
+      "order": "forward",
+      "stages": [
+        {
+          "case": "quantize_1x768",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 769,
+          "max_abs": 0.0,
+          "module_sha256": "c3ac389c38dc8339b0717818fa09899a50e3606b46fb4160aa49d3fb5cd8393c",
+          "kernel_module_sha256": "b869adceb4348d58a9be48c55119513e8267816900b98bd36ebe9810d3d1a8b5",
+          "order": "forward",
+          "ddr_accesses": 3,
+          "dma_transfers": 2,
+          "output_sha256": {
+            "Q": "f24a68bd38bd7d42121242e43cab75db5fd70723e0d4509f126be668ea211ab0",
+            "Scale": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+          }
+        },
+        {
+          "case": "quantize_1000x768",
+          "programs": 1000,
+          "total_programs": 1000,
+          "outputs": 769000,
+          "max_abs": 0.0,
+          "module_sha256": "33414980427b88c49f835f9ed2cfc29486c14373047b31078a21b4e9e46e5a76",
+          "kernel_module_sha256": "d1f9a70b3e52909e70801b70119c19488bb0a8ff453a8f77110b5b2b4e9aa22f",
+          "order": "forward",
+          "ddr_accesses": 3000,
+          "dma_transfers": 2000,
+          "output_sha256": {
+            "Q": "9083785a6317b94f9276dd3c49ed4035725a48ac7d38d1239a1bdf63346bc57c",
+            "Scale": "b04eae14bbffc0f4bf895e54f5c1e72c1fe41e1e250bad344c53b93a241a3dec"
+          }
+        },
+        {
+          "case": "matmul_i8_overwrite_1x1000x768",
+          "programs": 16,
+          "total_programs": 16,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "e4794d34ba80e73905ed7a8654abf9b1d6ca74f21012dff1e340c8e1ea83bfbd",
+          "kernel_module_sha256": "8fe76234fac335ca97f8c1afea1a064f954b11c5953de984999de198af91c730",
+          "order": "forward",
+          "ddr_accesses": 11872,
+          "dma_transfers": 351,
+          "output_sha256": {
+            "C": "724b49396ccab21206b5124a490078555631547f2bcd6061fcf442581145b63e"
+          }
+        },
+        {
+          "case": "dequantize_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "60dae67dd809d06f2c3e89d65f46bb1586f224c5b62bb5d33478e8aeb69b2f1a",
+          "kernel_module_sha256": "742153aed96935813901c78bdd96238bed3dbd3916376bf677f04f9ebe80b9c0",
+          "order": "forward",
+          "ddr_accesses": 35,
+          "dma_transfers": 24,
+          "output_sha256": {
+            "Out": "be38e0cb502555e635a9b9998fef1c161bf60cbf8e5b28560491fa274964b12e"
+          }
+        },
+        {
+          "case": "bias_add_1x1000",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "0d863f30f0b719ab40723fde514ef31b4f7a062e67f3c52f671e8a61e17e1be2",
+          "kernel_module_sha256": "05f69a185f998164b0777e259d0bc82379cb4b94e039b3c06dc96de7ec1c29c4",
+          "order": "forward",
+          "ddr_accesses": 128,
+          "dma_transfers": 1,
+          "output_sha256": {
+            "Out": "f6a8d97b3acdf4d332cfc39cd9448fe42390ef9e8718be88258cfbbcc0d5d7c5"
+          }
+        },
+        {
+          "case": "add_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "d2c1150379cafbc2b841216e13dd9fcc143005e9581dbf41f45680bd4687931d",
+          "kernel_module_sha256": "c8fb65fa71a2811a9242aa474f4c76c301b651b6f3cfca8f066b9f770da43e69",
+          "order": "forward",
+          "ddr_accesses": 76,
+          "dma_transfers": 17,
+          "output_sha256": {
+            "Out": "6fd45bf8e66f0ece5dba6b00939e45e8cf66098c4ae9bc5431496f130d64ec22"
+          }
+        }
+      ],
+      "output_sha256": "6fd45bf8e66f0ece5dba6b00939e45e8cf66098c4ae9bc5431496f130d64ec22",
+      "max_abs_vs_ordered_fp32": 1052592.0,
+      "exact_integer_and_quantized_float_oracles": true
+    },
+    {
+      "name": "repeated-workspace-reuse",
+      "order": "reverse",
+      "stages": [
+        {
+          "case": "quantize_1x768",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 769,
+          "max_abs": 0.0,
+          "module_sha256": "c3ac389c38dc8339b0717818fa09899a50e3606b46fb4160aa49d3fb5cd8393c",
+          "kernel_module_sha256": "b869adceb4348d58a9be48c55119513e8267816900b98bd36ebe9810d3d1a8b5",
+          "order": "reverse",
+          "ddr_accesses": 3,
+          "dma_transfers": 2,
+          "output_sha256": {
+            "Q": "f24a68bd38bd7d42121242e43cab75db5fd70723e0d4509f126be668ea211ab0",
+            "Scale": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+          }
+        },
+        {
+          "case": "quantize_1000x768",
+          "programs": 1000,
+          "total_programs": 1000,
+          "outputs": 769000,
+          "max_abs": 0.0,
+          "module_sha256": "33414980427b88c49f835f9ed2cfc29486c14373047b31078a21b4e9e46e5a76",
+          "kernel_module_sha256": "d1f9a70b3e52909e70801b70119c19488bb0a8ff453a8f77110b5b2b4e9aa22f",
+          "order": "reverse",
+          "ddr_accesses": 3000,
+          "dma_transfers": 2000,
+          "output_sha256": {
+            "Q": "9083785a6317b94f9276dd3c49ed4035725a48ac7d38d1239a1bdf63346bc57c",
+            "Scale": "b04eae14bbffc0f4bf895e54f5c1e72c1fe41e1e250bad344c53b93a241a3dec"
+          }
+        },
+        {
+          "case": "matmul_i8_overwrite_1x1000x768",
+          "programs": 16,
+          "total_programs": 16,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "e4794d34ba80e73905ed7a8654abf9b1d6ca74f21012dff1e340c8e1ea83bfbd",
+          "kernel_module_sha256": "8fe76234fac335ca97f8c1afea1a064f954b11c5953de984999de198af91c730",
+          "order": "reverse",
+          "ddr_accesses": 11872,
+          "dma_transfers": 351,
+          "output_sha256": {
+            "C": "724b49396ccab21206b5124a490078555631547f2bcd6061fcf442581145b63e"
+          }
+        },
+        {
+          "case": "dequantize_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "60dae67dd809d06f2c3e89d65f46bb1586f224c5b62bb5d33478e8aeb69b2f1a",
+          "kernel_module_sha256": "742153aed96935813901c78bdd96238bed3dbd3916376bf677f04f9ebe80b9c0",
+          "order": "reverse",
+          "ddr_accesses": 35,
+          "dma_transfers": 24,
+          "output_sha256": {
+            "Out": "be38e0cb502555e635a9b9998fef1c161bf60cbf8e5b28560491fa274964b12e"
+          }
+        },
+        {
+          "case": "bias_add_1x1000",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "0d863f30f0b719ab40723fde514ef31b4f7a062e67f3c52f671e8a61e17e1be2",
+          "kernel_module_sha256": "05f69a185f998164b0777e259d0bc82379cb4b94e039b3c06dc96de7ec1c29c4",
+          "order": "reverse",
+          "ddr_accesses": 128,
+          "dma_transfers": 1,
+          "output_sha256": {
+            "Out": "f6a8d97b3acdf4d332cfc39cd9448fe42390ef9e8718be88258cfbbcc0d5d7c5"
+          }
+        },
+        {
+          "case": "add_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "d2c1150379cafbc2b841216e13dd9fcc143005e9581dbf41f45680bd4687931d",
+          "kernel_module_sha256": "c8fb65fa71a2811a9242aa474f4c76c301b651b6f3cfca8f066b9f770da43e69",
+          "order": "reverse",
+          "ddr_accesses": 76,
+          "dma_transfers": 17,
+          "output_sha256": {
+            "Out": "6fd45bf8e66f0ece5dba6b00939e45e8cf66098c4ae9bc5431496f130d64ec22"
+          }
+        }
+      ],
+      "output_sha256": "6fd45bf8e66f0ece5dba6b00939e45e8cf66098c4ae9bc5431496f130d64ec22",
+      "max_abs_vs_ordered_fp32": 1052592.0,
+      "exact_integer_and_quantized_float_oracles": true
+    },
+    {
+      "name": "changed-token-scale",
+      "order": "tail-first",
+      "stages": [
+        {
+          "case": "quantize_1x768",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 769,
+          "max_abs": 0.0,
+          "module_sha256": "c3ac389c38dc8339b0717818fa09899a50e3606b46fb4160aa49d3fb5cd8393c",
+          "kernel_module_sha256": "b869adceb4348d58a9be48c55119513e8267816900b98bd36ebe9810d3d1a8b5",
+          "order": "tail-first",
+          "ddr_accesses": 3,
+          "dma_transfers": 2,
+          "output_sha256": {
+            "Q": "f24a68bd38bd7d42121242e43cab75db5fd70723e0d4509f126be668ea211ab0",
+            "Scale": "31b67dba7cfd6e2d7540f9c96d90a45b8f2d44956620723024d4e1beeacd4602"
+          }
+        },
+        {
+          "case": "quantize_1000x768",
+          "programs": 1000,
+          "total_programs": 1000,
+          "outputs": 769000,
+          "max_abs": 0.0,
+          "module_sha256": "33414980427b88c49f835f9ed2cfc29486c14373047b31078a21b4e9e46e5a76",
+          "kernel_module_sha256": "d1f9a70b3e52909e70801b70119c19488bb0a8ff453a8f77110b5b2b4e9aa22f",
+          "order": "tail-first",
+          "ddr_accesses": 3000,
+          "dma_transfers": 2000,
+          "output_sha256": {
+            "Q": "9083785a6317b94f9276dd3c49ed4035725a48ac7d38d1239a1bdf63346bc57c",
+            "Scale": "b04eae14bbffc0f4bf895e54f5c1e72c1fe41e1e250bad344c53b93a241a3dec"
+          }
+        },
+        {
+          "case": "matmul_i8_overwrite_1x1000x768",
+          "programs": 16,
+          "total_programs": 16,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "e4794d34ba80e73905ed7a8654abf9b1d6ca74f21012dff1e340c8e1ea83bfbd",
+          "kernel_module_sha256": "8fe76234fac335ca97f8c1afea1a064f954b11c5953de984999de198af91c730",
+          "order": "tail-first",
+          "ddr_accesses": 11872,
+          "dma_transfers": 351,
+          "output_sha256": {
+            "C": "724b49396ccab21206b5124a490078555631547f2bcd6061fcf442581145b63e"
+          }
+        },
+        {
+          "case": "dequantize_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "60dae67dd809d06f2c3e89d65f46bb1586f224c5b62bb5d33478e8aeb69b2f1a",
+          "kernel_module_sha256": "742153aed96935813901c78bdd96238bed3dbd3916376bf677f04f9ebe80b9c0",
+          "order": "tail-first",
+          "ddr_accesses": 35,
+          "dma_transfers": 24,
+          "output_sha256": {
+            "Out": "2d7d17e9dfd74f6d9ad6bacb1f307d7ef1625d217bfac972fda406212928f47e"
+          }
+        },
+        {
+          "case": "bias_add_1x1000",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "0d863f30f0b719ab40723fde514ef31b4f7a062e67f3c52f671e8a61e17e1be2",
+          "kernel_module_sha256": "05f69a185f998164b0777e259d0bc82379cb4b94e039b3c06dc96de7ec1c29c4",
+          "order": "tail-first",
+          "ddr_accesses": 128,
+          "dma_transfers": 1,
+          "output_sha256": {
+            "Out": "678a606d044cd1452b8de691e9f59876473399c80fd61fa3a931d158d9ed0c07"
+          }
+        },
+        {
+          "case": "add_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "d2c1150379cafbc2b841216e13dd9fcc143005e9581dbf41f45680bd4687931d",
+          "kernel_module_sha256": "c8fb65fa71a2811a9242aa474f4c76c301b651b6f3cfca8f066b9f770da43e69",
+          "order": "tail-first",
+          "ddr_accesses": 76,
+          "dma_transfers": 17,
+          "output_sha256": {
+            "Out": "4c0651f4193a5de69ee3c51e396ccd589104aea07cae0db478edf12021296b56"
+          }
+        }
+      ],
+      "output_sha256": "4c0651f4193a5de69ee3c51e396ccd589104aea07cae0db478edf12021296b56",
+      "max_abs_vs_ordered_fp32": 131574.0,
+      "exact_integer_and_quantized_float_oracles": true
+    },
+    {
+      "name": "zero-token-and-zero-channel",
+      "order": "reverse",
+      "stages": [
+        {
+          "case": "quantize_1x768",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 769,
+          "max_abs": 0.0,
+          "module_sha256": "c3ac389c38dc8339b0717818fa09899a50e3606b46fb4160aa49d3fb5cd8393c",
+          "kernel_module_sha256": "b869adceb4348d58a9be48c55119513e8267816900b98bd36ebe9810d3d1a8b5",
+          "order": "reverse",
+          "ddr_accesses": 3,
+          "dma_transfers": 2,
+          "output_sha256": {
+            "Q": "ef115a0e0c15cdc41958ca46b5b14b456115f4baec5e3ca68599d2a8f435e3b8",
+            "Scale": "e00e5eb9444182f352323374ef4e08ebcb784725fdd4fd612d7730540b3e0c8c"
+          }
+        },
+        {
+          "case": "quantize_1000x768",
+          "programs": 1000,
+          "total_programs": 1000,
+          "outputs": 769000,
+          "max_abs": 0.0,
+          "module_sha256": "33414980427b88c49f835f9ed2cfc29486c14373047b31078a21b4e9e46e5a76",
+          "kernel_module_sha256": "d1f9a70b3e52909e70801b70119c19488bb0a8ff453a8f77110b5b2b4e9aa22f",
+          "order": "reverse",
+          "ddr_accesses": 3000,
+          "dma_transfers": 2000,
+          "output_sha256": {
+            "Q": "9083785a6317b94f9276dd3c49ed4035725a48ac7d38d1239a1bdf63346bc57c",
+            "Scale": "b04eae14bbffc0f4bf895e54f5c1e72c1fe41e1e250bad344c53b93a241a3dec"
+          }
+        },
+        {
+          "case": "matmul_i8_overwrite_1x1000x768",
+          "programs": 16,
+          "total_programs": 16,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "e4794d34ba80e73905ed7a8654abf9b1d6ca74f21012dff1e340c8e1ea83bfbd",
+          "kernel_module_sha256": "8fe76234fac335ca97f8c1afea1a064f954b11c5953de984999de198af91c730",
+          "order": "reverse",
+          "ddr_accesses": 11872,
+          "dma_transfers": 351,
+          "output_sha256": {
+            "C": "fc19b1997119425765295aeab72d76faa6927d4f83985d328c26f20468d6cc76"
+          }
+        },
+        {
+          "case": "dequantize_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "60dae67dd809d06f2c3e89d65f46bb1586f224c5b62bb5d33478e8aeb69b2f1a",
+          "kernel_module_sha256": "742153aed96935813901c78bdd96238bed3dbd3916376bf677f04f9ebe80b9c0",
+          "order": "reverse",
+          "ddr_accesses": 35,
+          "dma_transfers": 24,
+          "output_sha256": {
+            "Out": "fc19b1997119425765295aeab72d76faa6927d4f83985d328c26f20468d6cc76"
+          }
+        },
+        {
+          "case": "bias_add_1x1000",
+          "programs": 1,
+          "total_programs": 1,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "0d863f30f0b719ab40723fde514ef31b4f7a062e67f3c52f671e8a61e17e1be2",
+          "kernel_module_sha256": "05f69a185f998164b0777e259d0bc82379cb4b94e039b3c06dc96de7ec1c29c4",
+          "order": "reverse",
+          "ddr_accesses": 128,
+          "dma_transfers": 1,
+          "output_sha256": {
+            "Out": "90033786fed36c58aeb0a382cfeda9975068d055235f61cacb2065aceba8a976"
+          }
+        },
+        {
+          "case": "add_1x1000",
+          "programs": 8,
+          "total_programs": 8,
+          "outputs": 1000,
+          "max_abs": 0.0,
+          "module_sha256": "d2c1150379cafbc2b841216e13dd9fcc143005e9581dbf41f45680bd4687931d",
+          "kernel_module_sha256": "c8fb65fa71a2811a9242aa474f4c76c301b651b6f3cfca8f066b9f770da43e69",
+          "order": "reverse",
+          "ddr_accesses": 76,
+          "dma_transfers": 17,
+          "output_sha256": {
+            "Out": "233cb3747363fef1c8733b84cb08d0e1a41b5f66612e207d5b76e5004db1c9f1"
+          }
+        }
+      ],
+      "output_sha256": "233cb3747363fef1c8733b84cb08d0e1a41b5f66612e207d5b76e5004db1c9f1",
+      "max_abs_vs_ordered_fp32": 0.0,
+      "exact_integer_and_quantized_float_oracles": true
+    }
+  ],
+  "simulator": "strict emitted DDR/SPM/REG",
+  "old_c_reads": 0,
+  "bias_and_residual": "after ordered dequantization"
+}

@@ -1,0 +1,49 @@
+{
+  "status": "PASS",
+  "build": "actual PV frontend -> contract -> plan -> emit -> LLVM -> restricted NR asm -> RISC-V object",
+  "simulation": {
+    "execution": "48 fixed (head,N tile) strict-interpreter shards; retained Machine/SPM per shard",
+    "rounds": 3,
+    "programs_per_round": 624,
+    "outputs_per_round": 151296,
+    "total_programs": 1872,
+    "total_outputs": 453888,
+    "comparison": "uint32 bit-exact ordered f32",
+    "max_abs": 0,
+    "ddr_bytes_per_round": 15923904,
+    "current_collect": "PASS"
+  },
+  "focused_lit": {
+    "passed": 4,
+    "tests": [
+      "boscame-k-tail-specialization.py",
+      "vit-pv-oracle.py",
+      "reaching-zero-loop-copy.py",
+      "immutable-zero-copy.py"
+    ]
+  },
+  "check_buddy": {
+    "examples": {
+      "passed": 239,
+      "unsupported": 2
+    },
+    "regressions": {
+      "passed": 622,
+      "unsupported": 2,
+      "expected_failures": 1
+    },
+    "unexpected_failures": 0
+  },
+  "changed_file_pre_commit": "PASS",
+  "staged_binary_diff_sha256": "a4297dbe73bd167e6bb3edf9baaaf4884178de7c555f9a4671866c8cc240e253",
+  "remaining_compilation_limitations": [
+    "gelu_197x3072: math.erf target numerical recipe",
+    "softmax_12x197x197: math.exp target numerical recipe"
+  ],
+  "scope_limitations": [
+    "emitted IR interpreted; assembly/object audited, not executed",
+    "no FPGA run or hardware performance measurement",
+    "historical all-case checkpoint retained; only PV rebuilt here",
+    "full-model execution and accuracy not verified"
+  ]
+}

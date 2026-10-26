@@ -1,0 +1,110 @@
+{
+  "certificate": {
+    "erf": {
+      "contract_max_abs_error": 2e-06,
+      "global_finite_abs_upper": 1.1375955096585261e-07,
+      "saturated_tail_abs_upper": 1.58727933398332e-08,
+      "segments": [
+        {
+          "coefficient_and_fp32_upper": 1.0653971841135754e-07,
+          "interval": [
+            0.5,
+            1.0
+          ],
+          "taylor_remainder_upper": 5.710560599557949e-10,
+          "total_abs_upper": 1.0711077447131334e-07
+        },
+        {
+          "coefficient_and_fp32_upper": 8.506998840366678e-08,
+          "interval": [
+            1.0,
+            1.5
+          ],
+          "taylor_remainder_upper": 1.7023618452783073e-09,
+          "total_abs_upper": 8.677235024894509e-08
+        },
+        {
+          "coefficient_and_fp32_upper": 7.868409660774059e-08,
+          "interval": [
+            1.5,
+            2.0
+          ],
+          "taylor_remainder_upper": 2.571385478550845e-09,
+          "total_abs_upper": 8.125548208629144e-08
+        },
+        {
+          "coefficient_and_fp32_upper": 7.902610180049426e-08,
+          "interval": [
+            2.0,
+            2.5
+          ],
+          "taylor_remainder_upper": 2.0126381761153245e-09,
+          "total_abs_upper": 8.103873997660958e-08
+        },
+        {
+          "coefficient_and_fp32_upper": 6.897201517342303e-08,
+          "interval": [
+            2.5,
+            3.0
+          ],
+          "taylor_remainder_upper": 8.329152945442905e-10,
+          "total_abs_upper": 6.980493046796731e-08
+        },
+        {
+          "coefficient_and_fp32_upper": 7.085509629821354e-08,
+          "interval": [
+            3.0,
+            3.5
+          ],
+          "taylor_remainder_upper": 1.85524445227446e-10,
+          "total_abs_upper": 7.104062074344098e-08
+        },
+        {
+          "coefficient_and_fp32_upper": 6.50868813014126e-08,
+          "interval": [
+            3.5,
+            4.0
+          ],
+          "taylor_remainder_upper": 2.2588458459285248e-11,
+          "total_abs_upper": 6.510946975987188e-08
+        }
+      ],
+      "small_interval_abs_upper": 1.1375955096585261e-07
+    },
+    "exp": {
+      "coefficient_and_fp32_abs_upper": 1.4308220157723996e-07,
+      "contract_max_rel_error": 2e-06,
+      "contract_subnormal_max_abs_error": 1.1210387714598537e-44,
+      "normal_relative_upper": 2.582284212358473e-07,
+      "range_reduction_abs_upper": 4.535776037050091e-08,
+      "reduced_exact_radius_upper": 0.3465873970786183,
+      "subnormal_abs_upper": 3.736109736007374e-45,
+      "taylor_remainder_upper": 7.375907473562767e-09,
+      "thresholds": {
+        "first_overflow_f32": 88.72283935546875,
+        "last_zero_f32": -103.97208404541016,
+        "next_nonzero_f32": -103.97207641601562,
+        "previous_f32": 88.72283172607422,
+        "previous_result_finite_even_with_approximation_bound": true,
+        "round_to_nearest_thresholds_proved_by_rational_exp_enclosures": true
+      }
+    },
+    "not_proved": [
+      "correct rounding or <=1 ULP",
+      "whole-model accuracy",
+      "SFU exp2 accuracy",
+      "NaN payload/signaling behavior"
+    ],
+    "operator_composition": {
+      "existing_output_atol": 2e-05,
+      "existing_output_rtol": 2e-05,
+      "gelu_finite_output_abs_upper": 1.8611971353536047e-06,
+      "scope": "source operation order with mathematically RN-f32 elementary references, finite inputs; NumPy correct rounding not assumed; see README for small-probability split",
+      "softmax_normal_output_relative_upper": 3.115419157854739e-05,
+      "softmax_small_probability_absolute_upper": 8.077935669463161e-28,
+      "softmax_sum_cells": 256
+    },
+    "proof": "analytic rational enclosures plus forward binary32 rounding bounds; independent mul/add, RN-even, gradual underflow"
+  },
+  "coefficient_sha256": "80605f7408b497465aaf9787a8acb58409573baea84f4af0285a1b54d2fc64c9"
+}

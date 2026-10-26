@@ -1,0 +1,62 @@
+{
+  "repository_head": "c068060350d7044802923655fca93a70fe3f4116",
+  "source_sha256": {
+    "midend/include/Analysis/MathAccuracy.h": "922032a492da28de1f475485f43dee889299f8e1da525d8482bee68b7f8f076e",
+    "midend/include/Conversion/LowerLinalgToBOSCAME/BOSCAMEMathApprox.h": "d8f2bb465e24f54810207f105baded2c7180b99229619bcb69310832efbc58ff",
+    "midend/include/Conversion/LowerLinalgToBOSCAME/BOSCAMEMathApproxCoefficients.h": "80605f7408b497465aaf9787a8acb58409573baea84f4af0285a1b54d2fc64c9",
+    "midend/include/Conversion/LowerLinalgToBOSCAME/BOSCAMEPointwise.h": "a9f82ca60faaf30a0e9c4447238a03dd394acb08b61ebc44493c6dc44e18636b",
+    "midend/lib/Analysis/KernelContract.cpp": "d72b2bb1904308ad69a8bbe6cde2229fc8149981c35e0a08f57b02974c836797",
+    "midend/lib/Conversion/LowerLinalgToBOSCAME/BOSCAMEPlan.cpp": "1691e1bf1c246aaaed00bdf90fd9a43dd6fe8a0e02e8a7558a251bc67df4a70a",
+    "midend/lib/Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanVerify.cpp": "ecb2d832cdc6d1a4af26e0132d3e59c78d9f56124384a4e02efacd6365359e12",
+    "midend/lib/Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanEmit.cpp": "4003b2c2fd17fd698406656a51c430f339fb3f56fa5bb87efaf573d21d1d4c7c",
+    "examples/FPGA-BOSCAME/tools/ame_to_word.py": "0981cebe3de471fce68da2f76696850a19b6725141653772eaa8f24b0b0f47cf",
+    "examples/FPGA-BOSCAME/tools/boscame_buffer_sim.py": "72c96850ec21fe545b9bf08b851ef291ad59a83d3d6ef0189a4aee51852a3c81",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/cases.py": "6a219089725cbf140690ab0b2764dee729cae3bdb2ce83cb0a842cc789e762f9",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/build.py": "9f887594616091383d04189010719c9f3953f54a420c117703806ea28fd4789a",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/oracles.py": "f300289b7bfd340fd2dfbad557ac45da597c8eb3081f52838634d13a073b9d4c",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/simcheck.py": "a211f61bab3744645fbaf29b8cfe0315ef44dd8a45c7a3ade42414336eb12030",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/nonlinear_simcheck.py": "cb448342d9d0e660c8e0e3b3d0804b2a0a6a27dbb751fc0312c199e9d2dc6c80",
+    "examples/FPGA-BOSCAME/vit-base-patch16-224/tools/check_nonlinear_numerics.py": "105932afc83a00bd95c1fdaef32a0838b8570ea92192a1dc8f4eff58dcc87341",
+    "docs/validation/nonlinear-math/generate.py": "a2a1be3d04c68909826169417c41d91a0ab49217e8941068ab99374d8881bf51",
+    "docs/validation/nonlinear-math/error-certificate.json": "f3d3771f959051a06458f51da8ee8d4dd6dda1202049ab6b3bd9e1a45ff86f7a",
+    "docs/validation/nonlinear-math/numerical-evidence.json": "56518ec3d452fe1027b866c629c8b46ab374050c109c98fa708f01acbb0cd67d",
+    "docs/validation/nonlinear-operators/capture.py": "6f3532e8a7743887dbf1b64899da7497ef49e2b990edfd6f684df847eab4e51e",
+    "tests/Conversion/LowerLinalgToBOSCAME/PlanMathApprox.py": "443033d89401fc973728e0db625b2fdbe9bad9efeffa23e1a8b2ad07befe7780",
+    "tests/Conversion/LowerLinalgToBOSCAME/math-approx-numerics.py": "10d599721cc8f1af200b875c733a283b1719073a9f4f79dc54de51504f9e4bfa",
+    "tests/Conversion/LowerLinalgToBOSCAME/maxnum-reduction.py": "4dda5391f7cddedb469f3382b9f4ce0564208d5681c3c53f0eb5b2af1c3c5b56",
+    "tests/Conversion/LowerLinalgToBOSCAME/buffer-ieee-arithmetic.py": "a055deed5b4e556709d74d3c1fcf834eb3419db0d51b04fa86081952ce34032b",
+    "tests/Conversion/LowerLinalgToBOSCAME/ame-vector-mask-classification.py": "5ac57854f72fff0b262ec29cfa9e55674374f98a112b04f3a9119b21ef13476b",
+    "tests/Conversion/TritonToLinalgExperimental/vit-nonlinear-oracle.py": "4591563d0b810a74a025f557aa1f42c46ea322ae5ff542a29bc51897309bd7aa",
+    "tests/Conversion/TritonToLinalgExperimental/vit-nonlinear-collection.py": "95545c65382773f62bda3891398436d9e1a35febdb1fe16f099760a379221a8e"
+  },
+  "cases": {
+    "gelu_197x3072": {
+      "kernel.ll": "d7e64e8470819d532f9e03724d230172ef60f31a2183a516bef5ef8e139f5a43",
+      "kernel.llvm.mlir": "8c7dffba67d2ea7561185e3b63c8d52f06c4425ba3a16f21eb7be4af2a1c6d1a",
+      "kernel.encoded.s": "b84ed900cb9d2b585f2f0d520ba6fe53828836e2ad263ea2815ea3aba5d109d8",
+      "kernel.nr.s": "8856e8e7ef9e9944733e65471a0085637472dad89213fc92c112217d7f5390ac",
+      "kernel.boscame.mlir": "0affa4f969e839ed5215a08006365d5cfb1b3c69a12f3bc46e38244d0d0b2360",
+      "kernel.frontend.mlir": "2d284273021e2fe5e3e083066e181f0690ddab79a0c956a3ca533ce37e34480f",
+      "kernel.o": "ba63712863cc1c77e4cfa1054beb41598aa6f62802055aa4cc45336fa796b0ee",
+      "kernel.planned.mlir": "a36d38edb9ae1eb0e53e8182e3eb516468519b4fccc73c1a7795d9a46611c71e",
+      "kernel.bufferized.mlir": "2d284273021e2fe5e3e083066e181f0690ddab79a0c956a3ca533ce37e34480f",
+      "kernel.ttir": "04ca21aeea64531b0a0c923b24718ef1b2f6d7ccfb1985b0de51fbe940022401",
+      "kernel.s": "b84ed900cb9d2b585f2f0d520ba6fe53828836e2ad263ea2815ea3aba5d109d8",
+      "kernel_source": "be1649f2a52554152038b26c37c2b6269eb86721d8b8abb6dc2089b86d9ea6d1"
+    },
+    "softmax_12x197x197": {
+      "kernel.ll": "869bfd419b1d7af795d4e70139394e5c2f1fb9f2832d37173b3c1b5026346feb",
+      "kernel.llvm.mlir": "49a03decea8c62a449daf7975f7686310d61097d2aaa2573ce5368ddcf66389c",
+      "kernel.encoded.s": "d1dc8925e259527078fa2a7f83dd3723d07a95cf86b26bcb6e80072187123b93",
+      "kernel.nr.s": "69475a5748d66fdf0cfd8dc3bccea9d3ed911ac2dfa42c51081d42bba7c8296f",
+      "kernel.boscame.mlir": "f07b1e5d5a243b256f56b8eef3a12395ebe5f586750615db47d7d73aec924e8a",
+      "kernel.frontend.mlir": "61886110934c4b35a6fe1e060f826a5964cb32415a6fffa23da23523d2f8629f",
+      "kernel.o": "0e2f2a0c3e54eb01765ad8b6f30d97c956b89484be573f0aa1376afec02de8af",
+      "kernel.planned.mlir": "463d80fd9bae7647a917787ec8286eb6ab2dfbfc4aeea39d94365cf36a618f84",
+      "kernel.bufferized.mlir": "61886110934c4b35a6fe1e060f826a5964cb32415a6fffa23da23523d2f8629f",
+      "kernel.ttir": "7ffe5f7fac03bcad72f1102b25e23a820e522b254920026275644833c8b63d0d",
+      "kernel.s": "d1dc8925e259527078fa2a7f83dd3723d07a95cf86b26bcb6e80072187123b93",
+      "kernel_source": "027b5c5abf69656fcb354b2231a2018cb1b2a304398ffeb5e1d22a337bbef29e"
+    }
+  }
+}

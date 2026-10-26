@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "scope": "graph structure and generated ABI",
+  "dense_rewrites": 73,
+  "external_calls": 219,
+  "fallback_to_accumulating_kernel_rejected": true,
+  "numerical_validation": false,
+  "full_model_executed": false
+}

@@ -1,0 +1,38 @@
+{
+  "status": "PASS",
+  "points": [
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      12,
+      0
+    ],
+    [
+      12,
+      0,
+      0
+    ],
+    [
+      12,
+      12,
+      0
+    ]
+  ],
+  "compared_elements": 465708,
+  "nan_elements": 32,
+  "finite_bitwise": true,
+  "exact_access_rectangles": true,
+  "input_and_ddr_guards": true,
+  "compared_elements_scope": "Entire 12x197x197 C allocation, including elements not written by the four tested head-zero programs.",
+  "written_elements": 441,
+  "unchanged_output_elements": 465267,
+  "whole_array_non_nan_bitwise_comparisons": 465676,
+  "written_non_nan_elements": 409,
+  "written_nan_elements": 32,
+  "initial_unwritten_output": "Deterministic finite random C values retained outside the four valid output rectangles.",
+  "comparison_scope_note": "The original scripts compare the full C allocation; arithmetic NaN equality means classification, not payload equality. Coverage asserts 441 distinct written elements in four head-zero rectangles."
+}
