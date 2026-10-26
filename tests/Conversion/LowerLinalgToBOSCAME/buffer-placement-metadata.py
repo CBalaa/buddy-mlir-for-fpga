@@ -147,7 +147,7 @@ def main():
     # relying on retired prefix-mask/scalar-forwarding metadata.
     fixture = (
         Path(__file__).resolve().parents[3]
-        / "plan/examples/layernorm.contract.mlir"
+        / "tests/Conversion/LowerLinalgToBOSCAME/Inputs/contracts/layernorm.contract.mlir"
     )
     planned = subprocess.run(
         [binary, str(fixture), "--bosc-ame-plan", "--bosc-ame-plan-verify"],

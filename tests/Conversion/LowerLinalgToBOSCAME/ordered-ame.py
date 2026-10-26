@@ -89,9 +89,7 @@ def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
     opt = Path(buddy_opt_path())
-    original = (
-        REPO / "examples/FPGA-BOSCAME/linalg-boscame/gemm.bufferized.mlir"
-    ).read_text()
+    original = (Path(__file__).parent / "Inputs/ordered-ame.mlir").read_text()
     # Keep the historical raw K tail as an explicit boundary test. Frontends
     # pad that logical K=160 to 192 before this v1 backend boundary.
     tail = work / "raw-k160.mlir"

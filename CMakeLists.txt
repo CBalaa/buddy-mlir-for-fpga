@@ -245,9 +245,7 @@ include_directories(${BUDDY_MIDEND_INCLUDE_DIR})
 include_directories(${BUDDY_MIDEND_INCLUDE_DIR}/Interface)
 include_directories(${BUDDY_MIDEND_INCLUDE_DIR}/Dialect)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/midend/include/Dialect)
-# Generated files of midend headers that are not part of a dialect (e.g. the
-# TableGen'd Conversion/TritonToLinalgExperimental/Passes.h.inc) are included
-# with their path relative to midend/include.
+# Generated non-dialect headers are included relative to midend/include.
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/midend/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${BUDDY_SOURCE_DIR}/lib)

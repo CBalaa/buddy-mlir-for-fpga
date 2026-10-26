@@ -8,12 +8,12 @@
 // RUN: not buddy-opt %t/shifted-init.mlir --kernel-contract-annotate 2>&1 | FileCheck %s --check-prefix=SHIFT
 // RUN: not buddy-opt %t/hidden-target.mlir --kernel-contract-annotate 2>&1 | FileCheck %s --check-prefix=HIDDEN
 // RUN: not buddy-opt %t/hidden-tensor.mlir --kernel-contract-annotate 2>&1 | FileCheck %s --check-prefix=TENSOR
-// RUN: buddy-opt %S/../../plan/examples/kernel.contract.mlir --kernel-contract-verify -o /dev/null
-// RUN: buddy-opt %S/../../plan/examples/matmul128.contract.mlir --kernel-contract-verify -o /dev/null
-// RUN: buddy-opt %S/../../plan/examples/layernorm.contract.mlir --kernel-contract-verify -o /dev/null
-// RUN: buddy-opt %S/../../plan/examples/kernel.contract.mlir --kernel-contract-annotate --kernel-contract-verify -o /dev/null
-// RUN: buddy-opt %S/../../plan/examples/matmul128.contract.mlir --kernel-contract-annotate --kernel-contract-verify -o /dev/null
-// RUN: buddy-opt %S/../../plan/examples/layernorm.contract.mlir --kernel-contract-annotate --kernel-contract-verify -o /dev/null
+// RUN: buddy-opt %S/Inputs/kernel.contract.mlir --kernel-contract-verify -o /dev/null
+// RUN: buddy-opt %S/Inputs/matmul128.contract.mlir --kernel-contract-verify -o /dev/null
+// RUN: buddy-opt %S/Inputs/layernorm.contract.mlir --kernel-contract-verify -o /dev/null
+// RUN: buddy-opt %S/Inputs/kernel.contract.mlir --kernel-contract-annotate --kernel-contract-verify -o /dev/null
+// RUN: buddy-opt %S/Inputs/matmul128.contract.mlir --kernel-contract-annotate --kernel-contract-verify -o /dev/null
+// RUN: buddy-opt %S/Inputs/layernorm.contract.mlir --kernel-contract-annotate --kernel-contract-verify -o /dev/null
 
 // Full kills need WAW ordering across both loop boundaries, but do not read
 // the old version. Static versions describe distinct dynamic loop instances.

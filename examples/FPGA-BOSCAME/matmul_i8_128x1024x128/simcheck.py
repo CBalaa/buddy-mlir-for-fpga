@@ -10,7 +10,7 @@ oracle. SPM persists between programs, and guards/access logs check excluded DDR
     python3 simcheck.py [--module PATH] [--programs N]
 
 The oracle and launch read the shape and grid from ``build.py``; this keeps
-the simulator aligned with ``kernels.py``. Requires numpy.
+the simulator aligned with the Contract ABI. Requires numpy.
 """
 
 import argparse

@@ -271,3 +271,11 @@ If you find our project and research useful or refer to it in your own work, ple
 ```
 
 For direct access to the paper, please visit [Compiler Technologies in Deep Learning Co-Design: A Survey](https://spj.science.org/doi/10.34133/icomputing.0040).
+
+### Triton FPGA frontend boundary
+
+Triton AST/TTIR compilation is provided by the external triton-riscv AOT
+frontend. Buddy consumes verified standard buffer Contracts and owns BOSCAME
+planning, emission and firmware construction. All Triton Python examples and the
+ViT model live in `triton-riscv/examples/BOSCAMEFPGA`; Buddy's three standalone
+examples start at `kernel.frontend.mlir`. See [Triton Contract handoff](docs/TritonContract.md).

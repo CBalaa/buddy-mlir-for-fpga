@@ -1,8 +1,13 @@
 # Triton LayerNorm on the NH/E6 FPGA
 
+This directory consumes the checked-in `kernel.frontend.mlir` standard MLIR
+Contract. It builds and checks the complete backend image without a Triton
+Python installation. The original kernel and frontend exporter live in
+`triton-riscv/examples/BOSCAMEFPGA/layernorm_197x768`.
+See [the Contract handoff guide](../../../docs/TritonContract.md).
+
 This example lowers the ViT-B/16 LayerNorm operator over a `[197,768] f32`
-hidden state through the experimental BOSCAME backend. The Triton source is
-[kernel.py](kernel.py); the fixed problem size (`ROWS=197`, `WIDTH=768`,
+hidden state through the experimental BOSCAME backend. The fixed problem size (`ROWS=197`, `WIDTH=768`,
 `BLOCK=1024`, `EPS=1e-12`) and the one-program-per-row launch grid are
 defined in [build.py](build.py). The operator has no dot: the reductions,
 elementwise and select operations stay in Linalg and lower to SPM vector code.
@@ -10,16 +15,14 @@ elementwise and select operations stay in Linalg and lower to SPM vector code.
 The only lowering route in this directory is:
 
 ```text
-TTIR -> triton-to-linalg-experimental (contract=true; includes bufferization)
-     -> neutral contract IR -> bosc-ame-plan -> verified planned IR
+kernel.frontend.mlir -> Contract verify -> bosc-ame-plan -> verified planned IR
      -> bosc-ame-emit -> lower-bosc-ame -> LLVM IR -> RVV assembly -> ELF
 ```
 
 ## Quick start
 
 ```bash
-make ttir            # Triton frontend -> kernel.ttir
-make boscame llvm    # TTIR -> frontend/bufferized/BOSCAME IR -> LLVM IR
+make boscame llvm    # Contract -> planned/BOSCAME IR -> LLVM IR
 make adapter asm     # typed ABI bridge and the restricted NR assembly
 make check           # typed ABI, boundary DMA and NR ELF audits (no board)
 make simcheck        # functional SPM/DMA model over all 197 programs
@@ -27,23 +30,30 @@ make                 # full pipeline -> build/layernorm_197x768/*.bin
 ```
 
 `make boscame`, `make llvm` and `make asm` stop at the named stage.
-The TTIR export imports Triton, so that step runs with the Triton/triton-riscv
-environment. The makefile prefers in-tree Buddy/LLVM tools
-and accepts `PYTHON`, `BUDDY_OPT`, `BUDDY_TRANSLATE`, `LLC`, `RISCV_CC` and linker
-overrides, for example:
+Only ordinary Python and NumPy are needed for the backend helpers and
+simulator. Select tools explicitly or through PATH:
 
-```bash
-make boscame llvm simcheck PYTHON=/path/to/boscame/python
+```sh
+make BUDDY_MLIR_BINARY_DIR=/path/to/buddy-build/bin \
+  LLVM_BIN=/path/to/llvm-build/bin PYTHON=python3 all check simcheck
 ```
+
+To consume a fresh export without copying it into this directory:
+
+```sh
+make FRONTEND_IR=/path/to/handoff/kernel.frontend.mlir all check simcheck
+```
+
+The input must match this example's fixed entry symbol, dimensions, launch grid,
+aligned/disjoint buffer promises and launcher ABI. Generate a new handoff in the
+frontend repository with `make ttir` or `build.py --export-contract`; this
+makefile starts at Contract verification and has no Python-to-TTIR target.
 
 ## Pipeline
 
 The conversion commands used by `make boscame llvm` are:
 
 ```bash
-buddy-opt build/layernorm_197x768/kernel.ttir \
-  --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_layernorm_197x768:197,1,1" \
-  -o build/layernorm_197x768/kernel.frontend.mlir
 buddy-opt build/layernorm_197x768/kernel.frontend.mlir \
   --kernel-contract-verify -o build/layernorm_197x768/kernel.bufferized.mlir
 buddy-opt build/layernorm_197x768/kernel.bufferized.mlir \
@@ -194,7 +204,7 @@ images. The current vector-reduction image has not been revalidated on a board.
 
 | File | Role |
 | --- | --- |
-| `kernel.py` | Original Triton computation |
+| `kernel.frontend.mlir` | Standard Contract input, exported in triton-riscv |
 | `build.py` | Triton frontend export, fixed shape, typed ABI adapter and LLVM ABI check |
 | `makefile` | TTIR -> BOSCAME -> LLVM -> assembly -> ELF/image pipeline |
 | `link.ld` | NH/E6 entries, user DDR windows and stack cache policy |

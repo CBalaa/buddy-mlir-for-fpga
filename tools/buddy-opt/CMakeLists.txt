@@ -80,15 +80,4 @@ target_link_libraries(buddy-opt
   EliminateMemRefCopyPass
   EliminateLargeZeroConstants
   TraceInsert
-  BuddyTritonIR
-  BuddyTritonToBOSCAME
-  BuddyTritonAnalysisStructured
-  BuddyTritonArithToLinalg
-  BuddyTritonToStructured
-  BuddyTritonToUnstructured
-  BuddyTritonStructuredToMemref
-  BuddyTritonUnstructuredToMemref
-  BuddyTritonPtrToMemref
-  BuddyTritonToLinalgExperimental
-  BuddyTPtrIR
   )

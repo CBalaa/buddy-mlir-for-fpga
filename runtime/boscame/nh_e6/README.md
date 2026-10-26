@@ -2,7 +2,8 @@
 
 此目录是 BOSCAME SPM/DMA 样例的 NH/E6 平台运行环境：NH 从 `0x80000000`
 启动，独占物理 UART 并持有最终判定；E6 从 `0x80010000` 启动，运行应用算法
-并通过 SYSCTRL 发布完成状态。`gemm_64x64x64` 是当前唯一使用它的样例。
+并通过 SYSCTRL 发布完成状态。`layernorm_197x768`、`matmul_i8_128x1024x128`
+和 `matmul_i8_196x768x768` 使用这套运行环境。
 
 `nh_e6` 是平台名称，与 [`../nr`](../nr/README.md) 并列但不同：NR 用
 `0x80010000` 作为 DDR 信号 mailbox，完成状态编码和链接布局也不同。两者不能
@@ -17,7 +18,7 @@
 | `nh_e6_platform.h` | 平台 | 固定硬件地址与完成码、链接脚本必须导出的 DDR 窗口符号、平台服务与应用必须提供的三个钩子、平台诊断单元的声明 |
 | `test_nh_e6_platform.c` | 测试 | host 测试：把 SYSCTRL、UART 与 CSR 写入换成内存假寄存器并直接 include 生产实现 |
 
-应用侧只需一个 C 文件（GEMM 的 `gemm_64x64x64_launch.c`）：它提供
+应用侧的 `launch.c` 提供
 `e6_main()`、`nh_e6_app_tag()` 和 `nh_e6_app_report()`，通过
 `nh_e6_platform.h` 使用平台服务。平台不知道矩阵尺寸或应用诊断字段；应用也
 不直接写 SYSCTRL、不自己实现启动或停机，不写 PMP／`satp`／CSR `0xbc0`。
@@ -62,7 +63,7 @@ experimental 样例为用户 DDR 保留上述静态区间，并将 E6 栈置于 
 entry 6 在两种 CSR 策略下均为 `0x0f`，保持 write-through，使编译器 spill/reload
 不会在 cached/uncached 之间切换。内部栈 pack 仅作为 DMA 源；SPM 结果用显式
 vector store 写回普通栈 buffer。`link.ld` 用 `ASSERT` 保证用户数据及 guards
-处于 entry 5，栈处于 entry 6；GEMM 的 `make audit` 复查边界和 PMP/satp 顺序。
+处于 entry 5，栈处于 entry 6；样例的 `make check` 复查镜像边界和 PMP/satp 顺序。
 其他链接脚本仍可导出自身的 DDR 区间；平台从符号读取边界。
 
 **CSR `0xbc0` 缓存策略** 由平台统一提供。参考程序的 `shared_writes()`／
@@ -74,7 +75,7 @@ vector store 写回普通栈 buffer。`link.ld` 用 `ASSERT` 保证用户数据�
 | `nh_e6_cache_uncached_loads()` | `0x0f0f000f000f000f` | uncached load；读取 DMA 刚写入的数据前使用，随后写 DDR 时必须恢复写策略 |
 
 `dma_wait` 返回时保留读策略。读完 DMA 结果后若要写 DDR，必须重新选择写策略；
-不能把读策略当成可持续写入的状态。TTIR → BOSCAME pass 通过 DMA runtime 的
+不能把读策略当成可持续写入的状态。BOSCAME emitter 通过 DMA runtime 的
 `bosc_ame_ddr_read_begin()`／`bosc_ame_ddr_write_begin()` 为 DDR packing、初值填充
 和收尾的 load/add/store 生成这两个切换，顺序是读策略 → load → 写策略 → store。
 这些 helper 与上表使用同样的 fence/CSR 值，不访问 SPM。
@@ -135,14 +136,12 @@ vector store 写回普通栈 buffer。`link.ld` 用 `ASSERT` 保证用户数据�
 
 ```sh
 cc -std=c11 -Wall -Wextra -Werror \
-   -I examples/FPGA-BOSCAME/common/runtime \
-   -I examples/FPGA-BOSCAME/common/uart \
-   -I examples/FPGA-BOSCAME/common/nh_e6 \
-   examples/FPGA-BOSCAME/common/nh_e6/test_nh_e6_platform.c \
+   -I runtime/boscame/runtime \
+   -I runtime/boscame/uart \
+   -I runtime/boscame/nh_e6 \
+   runtime/boscame/nh_e6/test_nh_e6_platform.c \
    -o /tmp/nh_e6_platform_test && /tmp/nh_e6_platform_test
 # nh_e6_platform: all checks passed
-
-python3 -m unittest discover examples/FPGA-BOSCAME/tools -p 'test_nh_e6_platform.py'
 ```
 
 host 测试覆盖：PMP／`pmpcfg0` 的写入值与顺序、`fence`／`satp=0`／
@@ -161,7 +160,7 @@ FPGA 上成立。
 
 ## 其他样例
 
-`vit-base-patch16-224/linear_196x768x768_ame_dma_spm/` 仍保留自己的
-`launcher.S`（同样是 NH/E6 协议，但诊断字段和消息不同），本次拆分没有改动
-它；如需迁移，应复用本目录，并在其 `link.ld` 中导出 DDR staging 窗口符号
-（`__nh_e6_ddr_window_start`／`__nh_e6_ddr_window_end`），再单独做板上复测。
+完整 ViT 模型和 Triton 算例位于外部前端仓库的
+`examples/BOSCAMEFPGA/vit-base-patch16-224/`。前端的完整镜像构建和模拟流程
+通过显式 `BUDDY_ROOT` 使用这里的运行时与工具；Buddy 的三个独立算例只接收
+`kernel.frontend.mlir`，从 Contract 验证开始构建固件。

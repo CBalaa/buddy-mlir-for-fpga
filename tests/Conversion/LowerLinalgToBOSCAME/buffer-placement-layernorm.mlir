@@ -1,5 +1,5 @@
 // RUN: not buddy-opt %S/Inputs/layernorm-197x768-bufferized.mlir --linalg-to-boscame -o /dev/null 2>&1 | FileCheck %s --check-prefix=LEGACY
-// RUN: buddy-opt %S/../../../plan/examples/layernorm.contract.mlir --bosc-ame-plan='plan-report=true' --bosc-ame-emit -o %t 2>%t.plan
+// RUN: buddy-opt %S/Inputs/contracts/layernorm.contract.mlir --bosc-ame-plan='plan-report=true' --bosc-ame-emit -o %t 2>%t.plan
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
 // RUN: FileCheck %s --check-prefix=IR < %t
 // RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null

@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Recover local content facts after full kills without completing opaque scopes."""
 
 import re

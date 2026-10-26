@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Explicit reference order preserves aliasing without claiming snapshot safety."""
 
 import re

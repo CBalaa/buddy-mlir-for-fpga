@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Reject valid MLIR whose declared content history crosses a loop incorrectly."""
 
 import subprocess
@@ -7,7 +7,7 @@ from pathlib import Path
 
 tool = sys.argv[1]
 reference = (
-    Path(__file__).resolve().parents[2] / "plan/examples/kernel.contract.mlir"
+    Path(__file__).resolve().parent / "Inputs/kernel.contract.mlir"
 ).read_text()
 
 

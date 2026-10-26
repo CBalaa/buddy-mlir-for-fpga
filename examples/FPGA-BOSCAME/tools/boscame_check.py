@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structural checks on the output of `--triton-to-boscame`.
+"""Structural checks on emitted BOSCAME IR.
 
 `boscame_sim.py` answers "what does this module compute and which DDR bytes
 does it touch".  This module answers the structural questions a lit test wants
@@ -25,70 +25,16 @@ SPM_BANK_BYTES = 128 * 1024
 
 
 def buddy_opt_path():
-    """`buddy-opt` from PATH (lit sets it up), or from the repo build tree."""
+    """Explicit tool override or `buddy-opt` from PATH (lit sets it up)."""
     from shutil import which
 
+    override = os.environ.get("BUDDY_OPT")
+    if override:
+        return override
     found = which("buddy-opt")
     if found:
         return found
-    return os.path.abspath(
-        os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..",
-            "..",
-            "..",
-            "build",
-            "bin",
-            "buddy-opt",
-        )
-    )
-
-
-def run_pass(buddy_opt, fixture, output, dma_abi=True, extra=None):
-    """Run `--triton-to-boscame` on a fixture, returning (rc, stderr)."""
-    command = [buddy_opt, fixture, "--triton-to-boscame"]
-    if dma_abi:
-        command[-1] += "=dma-abi=args_aligned64_nonalias"
-    if extra:
-        command.extend(extra)
-    command.extend(["-o", output])
-    result = subprocess.run(command, capture_output=True, text=True)
-    return result.returncode, result.stderr
-
-
-def experimental_pipeline(launch_grid=None):
-    """Neutral frontend followed by explicit plan verification and emission."""
-    frontend = "--triton-to-linalg-experimental=contract=true caller-contract=args_aligned64_nonalias"
-    if launch_grid:
-        frontend += f" launch-grid={launch_grid}"
-    return [
-        frontend,
-        "--kernel-contract-verify",
-        "--bosc-ame-plan",
-        "--bosc-ame-plan-verify",
-        "--bosc-ame-emit",
-    ]
-
-
-def specialize_full_gemm(source, output):
-    """Remove redundant exported bounds masks for the exact 128x1024x128 grid.
-
-    Dynamic mask extents are outside the standalone backend's static footprint
-    contract. The original source is checked separately for a failing status.
-    """
-    from pathlib import Path
-
-    text = Path(source).read_text()
-    for original, replacement in (
-        ("tt.load %48, %42, %cst_0", "tt.load %48"),
-        ("tt.load %51, %46, %cst", "tt.load %51"),
-        ("tt.load %33, %27, %cst_7", "tt.load %33"),
-        ("tt.store %33, %35, %27", "tt.store %33, %35"),
-    ):
-        assert original in text, original
-        text = text.replace(original, replacement)
-    Path(output).write_text(text)
-    return Path(output)
+    raise RuntimeError("missing buddy-opt; set BUDDY_OPT or add it to PATH")
 
 
 def run_lower(buddy_opt, module, output):

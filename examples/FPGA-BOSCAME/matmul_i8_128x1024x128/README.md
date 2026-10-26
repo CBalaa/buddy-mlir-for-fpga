@@ -1,9 +1,14 @@
 # Triton INT8 GEMM on the NH/E6 FPGA
 
+This directory consumes the checked-in `kernel.frontend.mlir` standard MLIR
+Contract. It builds and checks the complete backend image without a Triton
+Python installation. The original kernel and frontend exporter live in
+`triton-riscv/examples/BOSCAMEFPGA/matmul_i8_128x1024x128`.
+See [the Contract handoff guide](../../../docs/TritonContract.md).
+
 This example lowers `A[128,128] i8 @ B[1024,128] i8ᵀ + C[128,1024] i32`
 through the experimental BOSCAME backend. B is physically `[N,K]`, with K
-contiguous. The Triton source is [kernels.py](kernels.py); the global
-compile-time constants are `M=128`, `N=1024`, `K=128`, `BM=64`, `BN=64` and
+contiguous. The fixed Contract ABI dimensions are `M=128`, `N=1024`, `K=128`, `BM=64`, `BN=64` and
 `BK=128`. Each program computes a 64x64 tile; the launch grid is 2x16x1
 (32 programs). The single Triton K block is lowered to two internal 64-wide
 AME blocks.
@@ -11,39 +16,44 @@ AME blocks.
 The only lowering route in this directory is:
 
 ```text
-TTIR -> triton-to-linalg-experimental (contract=true; includes bufferization)
-     -> neutral contract IR -> bosc-ame-plan -> verified planned IR
+kernel.frontend.mlir -> Contract verify -> bosc-ame-plan -> verified planned IR
      -> bosc-ame-emit -> lower-bosc-ame -> LLVM IR -> AME assembly -> ELF
 ```
 
 ## Quick start
 
 ```bash
-make ttir            # Triton frontend -> kernel.ttir
-make boscame llvm    # TTIR -> frontend/bufferized/BOSCAME IR -> LLVM IR
+make boscame llvm    # Contract -> planned/BOSCAME IR -> LLVM IR
 make check           # typed ABI, AME instruction and NR ELF audits (no board)
 make simcheck        # functional DMA/SPM/AME model over the whole grid
 make                 # full pipeline -> build/matmul_i8_128x1024x128/*.bin
 ```
 
 `make boscame`, `make llvm` and `make asm` stop at the named stage.
-The TTIR export and the generated ABI/config helpers import Triton, so those
-Python steps run with the Triton/triton-riscv environment. The makefile
-prefers in-tree Buddy/LLVM tools and accepts `PYTHON`, `BUDDY_OPT`,
-`BUDDY_TRANSLATE`, `LLC`, `RISCV_CC` and linker overrides, for example:
+Only ordinary Python and NumPy are needed for the backend helpers and
+simulator. Select tools explicitly or through PATH:
 
-```bash
-make boscame llvm simcheck PYTHON=/path/to/boscame/python
+```sh
+make BUDDY_MLIR_BINARY_DIR=/path/to/buddy-build/bin \
+  LLVM_BIN=/path/to/llvm-build/bin PYTHON=python3 all check simcheck
 ```
+
+To consume a fresh export without copying it into this directory:
+
+```sh
+make FRONTEND_IR=/path/to/handoff/kernel.frontend.mlir all check simcheck
+```
+
+The input must match this example's fixed entry symbol, dimensions, launch grid,
+aligned/disjoint buffer promises and launcher ABI. Generate a new handoff in the
+frontend repository with `make ttir` or `build.py --export-contract`; this
+makefile starts at Contract verification and has no Python-to-TTIR target.
 
 ## Pipeline
 
 The conversion commands used by `make boscame llvm` are:
 
 ```bash
-buddy-opt build/matmul_i8_128x1024x128/kernel.ttir \
-  --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_matmul_i8_128x1024x128:2,16,1" \
-  -o build/matmul_i8_128x1024x128/kernel.frontend.mlir
 buddy-opt build/matmul_i8_128x1024x128/kernel.frontend.mlir \
   --kernel-contract-verify -o build/matmul_i8_128x1024x128/kernel.bufferized.mlir
 buddy-opt build/matmul_i8_128x1024x128/kernel.bufferized.mlir \
@@ -187,7 +197,7 @@ comparison has been made.
 
 | File | Role |
 | --- | --- |
-| `kernels.py` | Original Triton computation and fixed shape/tile constants |
+| `kernel.frontend.mlir` | Standard Contract input, exported in triton-riscv |
 | `build.py` | Triton frontend export, fixed shape, typed ABI adapter and C shape header, LLVM ABI check |
 | `makefile` | TTIR -> BOSCAME -> LLVM -> AME assembly -> ELF/image pipeline and variants |
 | `link.ld` | NH/E6 entries, DDR operand windows and stack cache policy |

@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Prove zero rematerialization before creating loop content versions."""
 
 import subprocess

@@ -1,9 +1,9 @@
-// RUN: buddy-opt %S/../../../plan/examples/matmul128.contract.mlir --linalg-to-boscame='plan-report=true' 2>&1 | FileCheck %s
-// RUN: buddy-opt %S/../../../plan/examples/matmul128.contract.mlir --lower-linalg-to-boscame='plan-report=true' 2>&1 | FileCheck %s
-// RUN: buddy-opt %S/../../../plan/examples/matmul128.planned.mlir --linalg-to-boscame | FileCheck %s --check-prefix=EMIT
-// RUN: buddy-opt %S/../../../plan/examples/matmul128.planned.mlir --lower-linalg-to-boscame | FileCheck %s --check-prefix=EMIT
-// RUN: not buddy-opt %S/../../../plan/examples/matmul128.contract.mlir --linalg-to-boscame='target=unsupported' 2>&1 | FileCheck %s --check-prefix=TARGET
-// RUN: not buddy-opt %S/../../../plan/examples/matmul128.contract.mlir --lower-linalg-to-boscame='bm=1' 2>&1 | FileCheck %s --check-prefix=GEOMETRY
+// RUN: buddy-opt %S/Inputs/contracts/matmul128.contract.mlir --linalg-to-boscame='plan-report=true' 2>&1 | FileCheck %s
+// RUN: buddy-opt %S/Inputs/contracts/matmul128.contract.mlir --lower-linalg-to-boscame='plan-report=true' 2>&1 | FileCheck %s
+// RUN: buddy-opt %S/Inputs/contracts/matmul128.planned.mlir --linalg-to-boscame | FileCheck %s --check-prefix=EMIT
+// RUN: buddy-opt %S/Inputs/contracts/matmul128.planned.mlir --lower-linalg-to-boscame | FileCheck %s --check-prefix=EMIT
+// RUN: not buddy-opt %S/Inputs/contracts/matmul128.contract.mlir --linalg-to-boscame='target=unsupported' 2>&1 | FileCheck %s --check-prefix=TARGET
+// RUN: not buddy-opt %S/Inputs/contracts/matmul128.contract.mlir --lower-linalg-to-boscame='bm=1' 2>&1 | FileCheck %s --check-prefix=GEOMETRY
 
 // CHECK-DAG: plan.budget=
 // CHECK-DAG: plan.route=

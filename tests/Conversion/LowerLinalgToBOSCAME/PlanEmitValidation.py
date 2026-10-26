@@ -16,7 +16,7 @@ from boscame_check import buddy_opt_path  # noqa: E402
 def main():
     work = Path(sys.argv[1])
     work.mkdir(parents=True, exist_ok=True)
-    examples = ROOT / "plan/examples"
+    examples = ROOT / "tests/Conversion/LowerLinalgToBOSCAME/Inputs/contracts"
     direct = (examples / "matmul128.planned.mlir").read_text()
     mixed = (examples / "kernel.planned.mlir").read_text()
     norm = (examples / "layernorm.planned.mlir").read_text()

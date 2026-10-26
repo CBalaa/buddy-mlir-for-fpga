@@ -60,7 +60,9 @@ def main():
         ("layernorm", 21, 6, 24576, 21),
     ):
         result = invoke(
-            ROOT / "plan/examples" / f"{name}.contract.mlir",
+            ROOT
+            / "tests/Conversion/LowerLinalgToBOSCAME/Inputs/contracts"
+            / f"{name}.contract.mlir",
             "--bosc-ame-plan=plan-report=true",
             "--bosc-ame-plan-verify",
         )

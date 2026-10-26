@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Source access history survives storage rewrites independently of graph IDs."""
 
 import re
@@ -125,7 +125,7 @@ module {
     memref.copy %source, %snapshot {
       contract.access = {kind = "load", boundary = "external_ddr",
         mask = {kind = "none"}},
-      contract.provenance = {generated_by = "planner-staging",
+      contract.provenance = {generated_by = "test-staging",
         source_load_origin_ids = array<i64: 42, 75>, source_lineage_complete = true}}
       : memref<4xi32> to memref<4xi32>
     return
@@ -140,7 +140,7 @@ assert not re.search(r"\borigin_id\s*=", output)
 # Accumulator source history follows the loop slot's initial C load, rather
 # than expanding the preceding iteration's A/B arithmetic into a source set.
 reference = (
-    Path(__file__).resolve().parents[2] / "plan/examples/kernel.contract.mlir"
+    Path(__file__).resolve().parent / "Inputs/kernel.contract.mlir"
 ).read_text()
 output = annotate(reference)
 graph_complete(output, True)

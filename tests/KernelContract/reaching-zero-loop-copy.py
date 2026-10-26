@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Fold a loop's zero snapshot without hiding writes in a shared lifetime."""
 
 import re

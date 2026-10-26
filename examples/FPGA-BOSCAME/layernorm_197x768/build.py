@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
-"""Triton LayerNorm inputs for the NH/E6 BOSCAME image.
+"""Fixed Contract ABI metadata and NH/E6 launcher adapter generation.
 
-The makefile owns the full lowering pipeline::
-
-    kernel.ttir --triton-to-linalg-experimental=contract=true
-      -> kernel.frontend.mlir --kernel-contract-verify
-      -> kernel.bufferized.mlir --bosc-ame-plan
-      -> kernel.planned.mlir --bosc-ame-emit
-      -> kernel.boscame.mlir --lower-bosc-ame --buddy-to-llvmir -> kernel.ll
-
-This file owns the real Triton frontend export, the fixed problem size and the
-typed unranked ABI adapter used by the launcher.  Only `kernel.ttir` is
-generated here; the remaining stages belong to the makefile.
-
-    layernorm_197x768: X[197,768] f32, Weight[768] f32, Bias[768] f32
-                       -> Out[197,768] f32, one program per row
-
-Run with the boscame Python environment:
-
-    python build.py --ttir-only       # Triton frontend -> kernel.ttir
-    python build.py --adapter         # typed launcher ABI bridge to stdout
+The makefile consumes kernel.frontend.mlir and owns verification, planning,
+emission, LLVM lowering and the final image. This module needs only Python's
+standard library; it also supplies the simulator's shape and grid metadata.
 """
 
 import argparse
@@ -34,7 +18,6 @@ BUILD_ROOT = Path(
     os.environ.get("LAYERNORM_197X768_BUILD_ROOT", str(ROOT / "build"))
 ).resolve()
 OUT = BUILD_ROOT / "layernorm_197x768"
-sys.path.insert(0, str(ROOT))
 
 # ---------------------------------------------------------------------------
 # Fixed problem size (the only place these numbers are defined).
@@ -45,94 +28,14 @@ EPS = 1.0e-12
 GRID = (ROWS, 1, 1)  # one program per row
 NAME = "layernorm_197x768"
 SYMBOL = "triton_" + NAME
-KERNEL = "layernorm"
 SIGNATURE = {
     "X": "*fp32",
     "Weight": "*fp32",
     "Bias": "*fp32",
     "Out": "*fp32",
 }
-CONSTEXPRS = {"ROWS": ROWS, "WIDTH": WIDTH, "BLOCK": BLOCK, "EPS": EPS}
 
 assert BLOCK >= WIDTH and BLOCK & (BLOCK - 1) == 0, "BLOCK must be a power of 2"
-
-
-def configure_environment():
-    """Point Triton at the triton-riscv plugin before ``import triton``."""
-    plugin = REPO / "thirdparty/triton-riscv"
-    os.environ.setdefault("TRITON_RISCV_DIR", str(plugin))
-    os.environ.setdefault("TRITON_PLUGIN_DIRS", str(plugin))
-    if not os.environ.get("TRITON_SHARED_OPT_PATH"):
-        for checkout in (plugin / "triton", REPO / "thirdparty/triton"):
-            candidates = sorted(
-                (checkout / "build").glob(
-                    "*/third_party/triton_shared/tools/triton-shared-opt/triton-shared-opt"
-                )
-            )
-            if candidates:
-                os.environ["TRITON_SHARED_OPT_PATH"] = str(candidates[-1])
-                break
-
-
-def verify_ttir(ttir):
-    """Fail the export unless the TTIR still carries the operator's structure.
-
-    Two `tt.reduce` (mean and variance over the hidden dimension) plus the
-    `math.rsqrt` of the shifted variance are the whole point of the kernel;
-    an export that loses one of them is not this operator.
-    """
-    missing = [
-        token for token in ("@" + SYMBOL, "math.rsqrt") if token not in ttir
-    ]
-    if ttir.count('"tt.reduce"') != 2:
-        missing.append("two tt.reduce")
-    if ttir.count("tt.store") != 1:
-        missing.append("one tt.store")
-    if missing:
-        raise RuntimeError(
-            "exported TTIR is not " + NAME + ": missing " + ", ".join(missing)
-        )
-
-
-def export_frontend():
-    """Compile the real `@triton.jit` kernel into TTIR."""
-    configure_environment()
-    import kernel
-    import triton
-    from triton._C.libtriton import ir
-    from triton.backends.compiler import GPUTarget
-    from triton.backends.triton_shared.compiler import CPUBackend
-    from triton.compiler import ASTSource
-
-    fn = getattr(kernel, KERNEL)
-    target = GPUTarget("cpu", 0, 0)
-    backend = CPUBackend(target)
-    options = backend.parse_options({"enable_fp_fusion": False})
-    source = ASTSource(fn=fn, signature=SIGNATURE, constexprs=CONSTEXPRS)
-    context = ir.context()
-    ir.load_dialects(context)
-    backend.load_dialects(context)
-    module = source.make_ir(
-        target,
-        options,
-        backend.get_codegen_implementation(options),
-        backend.get_module_map(),
-        context,
-    )
-    module = backend.make_ttir(module, {}, options)
-    ttir = str(module)
-    # Symbol namespacing only, after genuine Triton/triton-riscv passes: no
-    # computation, loop body or linalg op is synthesized here.
-    pattern = r"@" + re.escape(KERNEL) + r"(?=[\s(])"
-    if not re.search(pattern, ttir):
-        raise RuntimeError(f"Cannot identify compiled entry symbol {KERNEL!r}")
-    ttir = re.sub(pattern, "@" + SYMBOL, ttir)
-    verify_ttir(ttir)
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "kernel.ttir").write_text(ttir)
-    print(
-        "exported " + NAME + " (triton " + triton.__version__ + ")", flush=True
-    )
 
 
 def adapter_source():
@@ -193,14 +96,14 @@ def verify_abi(path):
         r"define\s+void\s+@" + re.escape(SYMBOL) + r"\((.*?)\)", contents, re.S
     )
     if not match:
-        raise RuntimeError("Missing Triton entry definition: " + SYMBOL)
+        raise RuntimeError("Missing Contract entry definition: " + SYMBOL)
     actual = [part.strip().split()[0] for part in match.group(1).split(",")]
     expected = [value for _name in SIGNATURE for value in ("i64", "ptr")] + [
         "i32"
     ] * 6
     if actual != expected:
         raise RuntimeError(
-            f"Triton ABI changed: expected {expected}, got {actual}"
+            f"Contract ABI changed: expected {expected}, got {actual}"
         )
     if re.search(
         r"\b(?:call|declare)\b[^\n]*@(?:malloc|aligned_alloc|realloc|free)\b",
@@ -222,17 +125,9 @@ def main():
         help="Write the typed-unranked C ABI adapter to stdout",
     )
     parser.add_argument(
-        "--ttir-only",
-        action="store_true",
-        help="Only export kernel.ttir from the Triton frontend",
-    )
-    parser.add_argument(
         "--check-abi",
         type=Path,
         help="Verify the typed entry LLVM ABI and absence of heap allocation",
-    )
-    parser.add_argument(
-        "--output", type=Path, help="Build root (defaults to build/)"
     )
     args = parser.parse_args()
     if args.check_abi:
@@ -241,15 +136,8 @@ def main():
     if args.adapter:
         sys.stdout.write(adapter_source())
         return
-    global BUILD_ROOT, OUT
-    if args.output is not None:
-        BUILD_ROOT = args.output.resolve()
-        OUT = BUILD_ROOT / NAME
-    if args.ttir_only:
-        export_frontend()
-        return
     raise SystemExit(
-        "build.py only generates frontend/ABI inputs; use make for the image"
+        "build.py only generates ABI inputs; use make for the image"
     )
 
 

@@ -1,9 +1,14 @@
 # matmul_i8_196x768x768 — Triton INT8 GEMM on the NH/E6 FPGA
 
+This directory consumes the checked-in `kernel.frontend.mlir` standard MLIR
+Contract. It builds and checks the complete backend image without a Triton
+Python installation. The original kernel and frontend exporter live in
+`triton-riscv/examples/BOSCAMEFPGA/matmul_i8_196x768x768`.
+See [the Contract handoff guide](../../../docs/TritonContract.md).
+
 This example lowers `A[196,768] i8 @ B[768,768] i8ᵀ + C[196,768] i32`
 through the experimental BOSCAME backend.  B is physically `[N,K]`, with K
-contiguous.  The Triton source is [kernels.py](kernels.py); the global
-compile-time constants are `M=196`, `N=768`, `K=768`, `BM=32`, `BN=128` and
+contiguous.  The fixed Contract ABI dimensions are `M=196`, `N=768`, `K=768`, `BM=32`, `BN=128` and
 `BK=128`.  Each program computes a 32x128 logical tile; the launch grid is
 7x6x1 (42 programs).  M=196 is not a multiple of BM=32, so the last M program
 is the boundary tile. The frontend specializes the complete C load, K loop
@@ -14,30 +19,38 @@ and six-iteration K loop.
 The only lowering route in this directory is:
 
 ```text
-TTIR -> triton-to-linalg-experimental (contract=true; includes bufferization)
-     -> neutral contract IR -> bosc-ame-plan -> verified planned IR
+kernel.frontend.mlir -> Contract verify -> bosc-ame-plan -> verified planned IR
      -> bosc-ame-emit -> lower-bosc-ame -> LLVM IR -> AME assembly -> ELF
 ```
 
 ## Quick start
 
 ```bash
-make ttir            # Triton frontend -> kernel.ttir
-make boscame llvm    # TTIR -> frontend/bufferized/BOSCAME IR -> LLVM IR
+make boscame llvm    # Contract -> planned/BOSCAME IR -> LLVM IR
 make check           # typed ABI, AME instruction and NR ELF audits (no board)
 make simcheck        # builds BOSCAME IR; full-grid and signed/wrap stress checks
 make                 # full pipeline -> build/matmul_i8_196x768x768/*.bin
 ```
 
 `make boscame`, `make llvm` and `make asm` stop at the named stage.
-The TTIR export and the generated ABI/config helpers import Triton, so those
-Python steps run with the Triton/triton-riscv environment.  The makefile
-prefers in-tree Buddy/LLVM tools and accepts `PYTHON`, `BUDDY_OPT`,
-`BUDDY_TRANSLATE`, `LLC`, `RISCV_CC` and linker overrides, for example:
+Only ordinary Python and NumPy are needed for the backend helpers and
+simulator. Select tools explicitly or through PATH:
 
-```bash
-make boscame llvm simcheck PYTHON=/path/to/boscame/python
+```sh
+make BUDDY_MLIR_BINARY_DIR=/path/to/buddy-build/bin \
+  LLVM_BIN=/path/to/llvm-build/bin PYTHON=python3 all check simcheck
 ```
+
+To consume a fresh export without copying it into this directory:
+
+```sh
+make FRONTEND_IR=/path/to/handoff/kernel.frontend.mlir all check simcheck
+```
+
+The input must match this example's fixed entry symbol, dimensions, launch grid,
+aligned/disjoint buffer promises and launcher ABI. Generate a new handoff in the
+frontend repository with `make ttir` or `build.py --export-contract`; this
+makefile starts at Contract verification and has no Python-to-TTIR target.
 
 ## Tile contract
 
@@ -105,9 +118,6 @@ for hashes, assumptions and the reproducible linked-ELF audit.
 The conversion commands used by `make boscame llvm` are:
 
 ```bash
-buddy-opt build/matmul_i8_196x768x768/kernel.ttir \
-  --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_matmul_i8_196x768x768:7,6,1" \
-  -o build/matmul_i8_196x768x768/kernel.frontend.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.frontend.mlir \
   --kernel-contract-verify -o build/matmul_i8_196x768x768/kernel.bufferized.mlir
 buddy-opt build/matmul_i8_196x768x768/kernel.bufferized.mlir \
@@ -234,7 +244,7 @@ shared with the other FPGA examples and is not part of the validation claim.
 
 | File | Role |
 | --- | --- |
-| `kernels.py` | Triton computation with the reference masks and K loop; fixed shape/tile constants |
+| `kernel.frontend.mlir` | Standard Contract input, exported in triton-riscv |
 | `build.py` | Triton frontend export, launch-grid derivation, typed ABI adapter and C shape header, LLVM ABI check |
 | `makefile` | TTIR -> BOSCAME -> LLVM -> AME assembly -> ELF/image pipeline and variants |
 | `link.ld` | NH/E6 entries, DDR operand windows and stack cache policy |

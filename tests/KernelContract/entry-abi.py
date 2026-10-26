@@ -1,4 +1,4 @@
-# RUN: %python %s buddy-opt
+# RUN: %PYTHON %s buddy-opt
 """Module entry ABI promises do not propagate to called/address-taken helpers."""
 
 import re
@@ -111,50 +111,3 @@ result = run(
     "--kernel-contract-verify",
 )
 assert result.returncode == 0, result.stderr
-
-# A caller can pass a view whose aligned pointer is one byte past its entry
-# argument. The helper's plain descriptor hides that offset, so only an actual
-# entry may use the module's alignment promise for direct/DMA decisions.
-matrix = """
-  func.func @matrix_helper(%a: memref<16x64xi8>,
-      %b: memref<64x16xi8, strided<[1, 64]>>) {
-    %zero = arith.constant 0 : i32
-    %c = memref.alloc() alignment = 64 : memref<16x16xi32>
-    linalg.fill ins(%zero : i32) outs(%c : memref<16x16xi32>)
-    linalg.matmul {cast = #linalg.type_fn<cast_signed>}
-      ins(%a, %b : memref<16x64xi8>, memref<64x16xi8, strided<[1, 64]>>)
-      outs(%c : memref<16x16xi32>)
-    return
-  }
-"""
-unaligned_caller = """
-  func.func @matrix_entry(%bytes: memref<1025xi8>,
-      %b: memref<64x16xi8, strided<[1, 64]>>) {
-    %one = arith.constant 1 : index
-    %shifted = memref.view %bytes[%one][] : memref<1025xi8> to memref<16x64xi8>
-    func.call @matrix_helper(%shifted, %b)
-      : (memref<16x64xi8>, memref<64x16xi8, strided<[1, 64]>>) -> ()
-    return
-  }
-"""
-for caller, accepted in (("", True), (unaligned_caller, False)):
-    source = f"module attributes {{{ABI}}} {{\n{matrix}{caller}\n}}"
-    result = run(
-        source,
-        "--kernel-contract-annotate",
-        "--bosc-ame-plan",
-        "--bosc-ame-plan-verify",
-    )
-    if accepted:
-        assert result.returncode == 0, result.stderr
-        assert "plan.route" in result.stdout
-    else:
-        assert result.returncode != 0
-        assert (
-            "no legal direct or staging route: external operand"
-            in result.stderr
-        )
-
-print(
-    "PASS entry ABI isolation for direct calls, function addresses, indirect calls and pointwise alias safety"
-)

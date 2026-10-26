@@ -13,7 +13,7 @@ the last M program is the masked boundary tile (196 is not a multiple of 32).
     python3 simcheck.py [--module PATH] [--programs N]
 
 The oracle and launch read the shape and grid from ``build.py``; this keeps the
-simulator aligned with ``kernels.py``.  Requires numpy.
+simulator aligned with the Contract ABI.  Requires numpy.
 """
 
 import argparse

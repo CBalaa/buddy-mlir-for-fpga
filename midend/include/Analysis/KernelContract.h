@@ -27,9 +27,9 @@ namespace buddy::contract {
 /// unaligned views, and require separate call-site proofs.
 bool hasEntryArgumentABI(mlir::func::FuncOp function);
 
-/// Rebuild scopes, tasks, content versions and loop summaries from buffer-form
-/// standard IR. Retain neutral access, ABI, provenance and origin facts. No
-/// target dialect, bank, memory-space or route decision is introduced.
+/// Rebuild the buffer Contract. Planned rebuilds skip normalization and
+/// recognize planner staging through the same source policy as verification.
+/// Logical memory space remains zero in either mode.
 mlir::LogicalResult
 annotateKernelContract(mlir::ModuleOp module,
                        llvm::StringRef producer = "buddy-neutral",

@@ -1,9 +1,6 @@
 # makefile -- the matmul_i8_128x1024x128 experimental BOSCAME pipeline.
 #
-#     kernels.py (Triton)                      [make ttir]
-#       -> kernel.ttir
-#     kernel.ttir --triton-to-linalg-experimental=contract=true
-#       -> kernel.frontend.mlir (neutral buffer contract)
+#     kernel.frontend.mlir (external, standard MLIR Contract input)
 #       -> kernel.bufferized.mlir --bosc-ame-plan
 #       -> kernel.planned.mlir --bosc-ame-emit             [make boscame]
 #       -> kernel.boscame.mlir
@@ -41,9 +38,11 @@ TOOLS := $(REPO)/examples/FPGA-BOSCAME/tools
 REPO_ROOT := $(REPO)
 include $(REPO)/runtime/boscame/toolchain.mk
 
-BUDDY_BIN ?= $(firstword $(foreach dir,$(REPO)/build/bin,$(if $(wildcard $(dir)/buddy-opt),$(dir))))
+BUDDY_BIN ?= $(BUDDY_MLIR_BINARY_DIR)
 BUDDY_OPT ?= $(if $(BUDDY_BIN),$(BUDDY_BIN)/buddy-opt,buddy-opt)
 BUDDY_TRANSLATE ?= $(if $(BUDDY_BIN),$(BUDDY_BIN)/buddy-translate,buddy-translate)
+# Python simulator helpers use the same explicitly selected backend tools.
+export BUDDY_OPT BUDDY_TRANSLATE
 LLC ?= $(call fpga_llvm_tool,llc)
 OBJCOPY ?= $(call fpga_llvm_tool,llvm-objcopy)
 OBJDUMP ?= $(call fpga_llvm_tool,llvm-objdump)
@@ -87,7 +86,6 @@ V_DIR := $(OUT)$(if $(VARIANT),/$(VARIANT))
 V_NAME := $(NAME)$(if $(VARIANT),.$(VARIANT),)
 V_CFLAGS := $(if $(filter debug,$(VAR)),-DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=16) \
   $(if $(filter boardcheck,$(VAR)),-DMATMUL_I8_BOARD_CHECK=1 -DMATMUL_I8_TRACE=1 -DMATMUL_I8_CHECK_ROWS=128)
-V_AME := --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_matmul_i8_128x1024x128:2,16,1"
 # ABI bridge: three typed unranked descriptors + six grid scalars.
 ADAPTER := experimental-boscame
 ADAPTER_C := $(SCRATCH)/adapter.c
@@ -108,7 +106,7 @@ C_FLAGS := $(RISCV_FLAGS) -fno-vectorize -fno-slp-vectorize '-DBOSC_AME_DMA_ASSE
 LLC_FLAGS := -O2 -filetype=asm -mtriple=riscv64 -target-abi=lp64d \
   -mattr=+m,+a,+f,+d,+c,+v,+xboscame -code-model=medium
 
-.PHONY: all config ttir boscame llvm asm bin debug boardcheck check audit simcheck clean FORCE
+.PHONY: all config boscame llvm asm bin debug boardcheck check audit simcheck clean FORCE
 all: bin
 
 config: $(CONFIG)
@@ -116,21 +114,15 @@ config: $(CONFIG)
 $(sort $(OUT) $(V_DIR) $(OBJ) $(SCRATCH)):
 	mkdir -p $@
 
-# --- 1. Python -> TTIR --------------------------------------------------
-# build.py owns the Triton frontend, the fixed problem size and the toolchain
-# configuration; the makefile owns the stages and their order.
-$(OUT)/kernel.ttir: $(ROOT)/kernels.py $(ROOT)/build.py $(BUILD_MAKEFILE) | $(OUT) $(SCRATCH)
-	$(PYTHON) -B $(ROOT)/build.py --ttir-only
+# --- 1. Import the external Contract -----------------------------------
+# Override FRONTEND_IR to consume a newly exported handoff from triton-riscv.
+FRONTEND_IR ?= $(ROOT)/kernel.frontend.mlir
+.PHONY: input-force
+input-force:
+$(V_DIR)/kernel.frontend.mlir: $(FRONTEND_IR) $(BUILD_MAKEFILE) input-force | $(V_DIR)
+	@cmp -s $< $@ || cp $< $@
 
-ttir: $(OUT)/kernel.ttir
-
-# --- 2. TTIR -> BOSCAME -------------------------------------------------
-# The frontend emits buffer-form Linalg with neutral contract facts. Separate
-# plan and emit stages choose DDR/SPM routes and expand the target operations.
-# contract.abi records the caller's aligned, nonalias entry arguments.
-$(V_DIR)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(V_DIR)
-	$(BUDDY_OPT) $< $(V_AME) -o $@
-
+# --- 2. Verify, plan and emit ------------------------------------------
 $(V_DIR)/kernel.bufferized.mlir: $(V_DIR)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
 	$(BUDDY_OPT) $< --kernel-contract-verify -o $@
 
@@ -269,7 +261,7 @@ boardcheck:
 # Runs the pass output in tools/boscame_buffer_sim.py (functional DMA/SPM/AME
 # model) for every program of the grid and compares all outputs with a NumPy
 # INT32 oracle.
-simcheck:
+simcheck: boscame
 	$(PYTHON) -B $(ROOT)/simcheck.py --module $(V_DIR)/kernel.boscame.mlir
 
 # --- 10. image checks ---------------------------------------------------

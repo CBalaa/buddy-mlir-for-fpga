@@ -1,9 +1,9 @@
-// RUN: buddy-opt %S/../../../plan/examples/matmul128.planned.mlir --bosc-ame-plan-verify --bosc-ame-emit | FileCheck %s --check-prefix=MATMUL --implicit-check-not=linalg.matmul --implicit-check-not=bosc_ame.spm.view --implicit-check-not=bosc_ame.dma.start --implicit-check-not=plan.route
-// RUN: buddy-opt %S/../../../plan/examples/kernel.planned.mlir --bosc-ame-emit | FileCheck %s --check-prefix=MIXED --implicit-check-not=linalg.matmul --implicit-check-not=plan.route
-// RUN: buddy-opt %S/../../../plan/examples/layernorm.planned.mlir --bosc-ame-emit | FileCheck %s --check-prefix=NORM --implicit-check-not=linalg. --implicit-check-not=plan.vector
-// RUN: buddy-opt %S/../../../plan/examples/matmul128.planned.mlir --bosc-ame-emit --lower-bosc-ame -o /dev/null
-// RUN: buddy-opt %S/../../../plan/examples/kernel.planned.mlir --bosc-ame-emit --lower-bosc-ame -o /dev/null
-// RUN: buddy-opt %S/../../../plan/examples/layernorm.planned.mlir --bosc-ame-emit --lower-bosc-ame -o /dev/null
+// RUN: buddy-opt %S/Inputs/contracts/matmul128.planned.mlir --bosc-ame-plan-verify --bosc-ame-emit | FileCheck %s --check-prefix=MATMUL --implicit-check-not=linalg.matmul --implicit-check-not=bosc_ame.spm.view --implicit-check-not=bosc_ame.dma.start --implicit-check-not=plan.route
+// RUN: buddy-opt %S/Inputs/contracts/kernel.planned.mlir --bosc-ame-emit | FileCheck %s --check-prefix=MIXED --implicit-check-not=linalg.matmul --implicit-check-not=plan.route
+// RUN: buddy-opt %S/Inputs/contracts/layernorm.planned.mlir --bosc-ame-emit | FileCheck %s --check-prefix=NORM --implicit-check-not=linalg. --implicit-check-not=plan.vector
+// RUN: buddy-opt %S/Inputs/contracts/matmul128.planned.mlir --bosc-ame-emit --lower-bosc-ame -o /dev/null
+// RUN: buddy-opt %S/Inputs/contracts/kernel.planned.mlir --bosc-ame-emit --lower-bosc-ame -o /dev/null
+// RUN: buddy-opt %S/Inputs/contracts/layernorm.planned.mlir --bosc-ame-emit --lower-bosc-ame -o /dev/null
 
 // MATMUL-LABEL: func.func @matmul128
 // MATMUL: bosc_ame.tile.load_acc

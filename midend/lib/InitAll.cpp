@@ -15,28 +15,19 @@
 //===----------------------------------------------------------------------===//
 
 #include "buddy-mlir-c/InitAll.h"
+#include "Analysis/KernelContract.h"
 
 #include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Dialect.h"
 
-#include "Conversion/StructuredToMemref/Passes.h"
-#include "Conversion/TritonArithToLinalg/Passes.h"
-#include "Conversion/TritonPtrToMemref/Passes.h"
-#include "Conversion/TritonToLinalgExperimental/Passes.h"
-#include "Conversion/TritonToStructured/Passes.h"
-#include "Conversion/TritonToUnstructured/Passes.h"
-#include "Conversion/UnstructuredToMemref/Passes.h"
 #include "Dialect/AME/AMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/Bud/BudDialect.h"
 #include "Dialect/DAP/DAPDialect.h"
 #include "Dialect/DIP/DIPDialect.h"
-#include "Dialect/TPtr/IR/TPtrDialect.h"
 #include "Dialect/Tile/TileDialect.h"
 #include "Dialect/Trace/TraceDialect.h"
-#include "Dialect/Triton/IR/Dialect.h"
-#include "Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 // Buckyball dialect is now external
 #ifdef BUDDY_EXTERNAL_DIALECTS
 #include "Dialect/Buckyball/BuckyballDialect.h"
@@ -111,11 +102,6 @@ void mlir::buddy::registerAllDialects(mlir::DialectRegistry &registry) {
   registry.insert<::buddy::rhal::RHALDialect>();
   registry.insert<::buddy::rvv::RVVDialect>();
   registry.insert<::buddy::vector_exp::VectorExpDialect>();
-  // TTIR (`tt`) plus the helper dialects of the TTIR -> Linalg conversion
-  // (experimental pipeline), migrated from triton-riscv.
-  registry.insert<::mlir::triton::TritonDialect>();
-  registry.insert<::mlir::tts::TritonStructuredDialect>();
-  registry.insert<::mlir::tptr::TPtrDialect>();
 }
 
 void mlir::buddy::registerAllPasses() {
@@ -160,13 +146,5 @@ void mlir::buddy::registerAllPasses() {
   mlir::buddy::registerEliminateMemRefCopyPass();
   mlir::buddy::registerEliminateLargeZeroConstantsPass();
   mlir::buddy::registerConvertTraceToLLVMPass();
-  // The experimental TTIR -> Linalg pipeline
-  // (`--triton-to-linalg-experimental`) with the passes it drives.
-  mlir::triton::registerTritonToLinalgExperimentalPasses();
-  mlir::triton::registerTritonToStructuredPasses();
-  mlir::triton::registerTritonToUnstructuredPasses();
-  mlir::triton::registerTritonArithToLinalgPasses();
-  mlir::triton::registerStructuredToMemrefPasses();
-  mlir::triton::registerUnstructuredToMemrefPasses();
-  mlir::triton::registerTritonPtrToMemrefPasses();
+  ::buddy::contract::registerKernelContractPasses();
 }

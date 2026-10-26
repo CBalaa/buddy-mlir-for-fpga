@@ -1,9 +1,6 @@
 # makefile -- the layernorm_197x768 experimental BOSCAME pipeline.
 #
-#     kernel.py (Triton)                      [make ttir]
-#       -> kernel.ttir
-#     kernel.ttir --triton-to-linalg-experimental=contract=true
-#       -> kernel.frontend.mlir (neutral buffer contract)
+#     kernel.frontend.mlir (external, standard MLIR Contract input)
 #       -> kernel.bufferized.mlir --bosc-ame-plan
 #       -> kernel.planned.mlir --bosc-ame-emit             [make boscame]
 #       -> kernel.boscame.mlir
@@ -34,9 +31,11 @@ REPO := $(abspath $(ROOT)/../../..)
 REPO_ROOT := $(REPO)
 include $(REPO)/runtime/boscame/toolchain.mk
 
-BUDDY_BIN ?= $(firstword $(foreach dir,$(REPO)/build/bin,$(if $(wildcard $(dir)/buddy-opt),$(dir))))
+BUDDY_BIN ?= $(BUDDY_MLIR_BINARY_DIR)
 BUDDY_OPT ?= $(if $(BUDDY_BIN),$(BUDDY_BIN)/buddy-opt,buddy-opt)
 BUDDY_TRANSLATE ?= $(if $(BUDDY_BIN),$(BUDDY_BIN)/buddy-translate,buddy-translate)
+# Python simulator helpers use the same explicitly selected backend tools.
+export BUDDY_OPT BUDDY_TRANSLATE
 LLC ?= $(call fpga_llvm_tool,llc)
 OBJCOPY ?= $(call fpga_llvm_tool,llvm-objcopy)
 OBJDUMP ?= $(call fpga_llvm_tool,llvm-objdump)
@@ -48,7 +47,6 @@ PYTHON ?= python3
 TOOLS := $(REPO)/examples/FPGA-BOSCAME/tools
 NAME := layernorm_197x768
 OUT := $(ROOT)/build/$(NAME)
-BOSCAME_PASS ?= --triton-to-linalg-experimental="contract=true caller-contract=args_aligned64_nonalias launch-grid=triton_layernorm_197x768:197,1,1"
 RUNTIME := $(REPO)/runtime/boscame/runtime
 UART := $(REPO)/runtime/boscame/uart
 PLATFORM := $(REPO)/runtime/boscame/nh_e6
@@ -62,28 +60,21 @@ RISCV_FLAGS := -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -mcmodel=medany \
 C_FLAGS := $(RISCV_FLAGS) -fno-vectorize -fno-slp-vectorize -ffp-contract=off \
   '-DBOSC_AME_DMA_ASSERT(x)='
 
-.PHONY: all ttir frontend bufferized boscame llvm adapter asm bin check simcheck clean
+.PHONY: all bufferized boscame llvm adapter asm bin check simcheck clean
 all: bin
 
 $(sort $(OUT) $(OBJ)):
 	mkdir -p $@
 
-# --- 1. Python -> TTIR --------------------------------------------------
-# build.py owns the Triton frontend, the fixed problem size and the launcher
-# adapter; the makefile owns the stages and their order.
-$(OUT)/kernel.ttir: $(ROOT)/kernel.py $(ROOT)/build.py $(BUILD_MAKEFILE) | $(OUT)
-	$(PYTHON) -B $(ROOT)/build.py --ttir-only
-ttir: $(OUT)/kernel.ttir
+# --- 1. Import the external Contract -----------------------------------
+# Override FRONTEND_IR to consume a newly exported handoff from triton-riscv.
+FRONTEND_IR ?= $(ROOT)/kernel.frontend.mlir
+.PHONY: input-force
+input-force:
+$(OUT)/kernel.frontend.mlir: $(FRONTEND_IR) $(BUILD_MAKEFILE) input-force | $(OUT)
+	@cmp -s $< $@ || cp $< $@
 
-# --- 2. TTIR -> BOSCAME -------------------------------------------------
-# The pass analyzes the buffer-form Linalg and its memory facts, plans root
-# buffer placement and DMA transfers, then emits the BOSCAME dialect.  Six
-# private float32 roots are planned in fixed SPM windows; register broadcast
-# forwarding removes one root. The three loads and one store use external DMA.
-$(OUT)/kernel.frontend.mlir: $(OUT)/kernel.ttir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT)) | $(OUT)
-	$(BUDDY_OPT) $< $(BOSCAME_PASS) -o $@
-frontend: $(OUT)/kernel.frontend.mlir
-
+# --- 2. Verify, plan and emit ------------------------------------------
 $(OUT)/kernel.bufferized.mlir: $(OUT)/kernel.frontend.mlir $(BUILD_MAKEFILE) $(wildcard $(BUDDY_OPT))
 	$(BUDDY_OPT) $< --kernel-contract-verify -o $@
 bufferized: $(OUT)/kernel.bufferized.mlir

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Functional simulator for the output of `--triton-to-boscame`.
+"""Functional simulator for emitted BOSCAME modules.
 
 The pass emits a small, regular subset of MLIR: `memref`, `arith`, `scf`,
 `linalg` and the `bosc_ame` tile/DMA/SPM operations.  This module interprets
@@ -1130,7 +1130,7 @@ def _wrap_i32(value):
 
 
 def simulate(module_path, function_name, buffers, scalars=None):
-    """Run one function of a `--triton-to-boscame` module.
+    """Run one function of an emitted BOSCAME module.
 
     `buffers` maps the DDR argument names (`%arg0`, ...) to `bytearray`s;
     `scalars` binds the program-information arguments (num_programs and
