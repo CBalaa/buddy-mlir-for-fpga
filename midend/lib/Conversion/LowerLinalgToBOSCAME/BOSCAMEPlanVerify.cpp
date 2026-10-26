@@ -358,6 +358,14 @@ private:
                     "a scalar typed constant value");
           }
       }
+      if (name == "plan.vector" && p.get("math")) {
+        auto recipes = p.getAs<ArrayAttr>("math");
+        require(op, bool(recipes), "pointwise math must be a recipe array");
+        if (recipes)
+          for (Attribute entry : recipes)
+            fields(op, dyn_cast<DictionaryAttr>(entry), {"operation"},
+                   {"function", "recipe", "evaluation"});
+      }
       if (name == "plan.transfer")
         fields(op, dict(p, "chunks"),
                {"count", "bytes", "ddr_stride", "spm_stride", "source_stride",
@@ -814,17 +822,25 @@ private:
     }
     if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
       auto p = dict(op, "plan.vector");
+      auto mathOperations = p ? p.getAs<ArrayAttr>("math") : ArrayAttr();
       auto operands = p ? p.getAs<ArrayAttr>("operands") : ArrayAttr();
       int64_t elements = integer(p, "elements");
       int64_t lanes = integer(p, "lanes");
       require(op,
-              p && string(p, "engine") == "rvv" &&
-                  integer(p, "vector_bytes") == 64 &&
+              p &&
+                  string(p, "engine") ==
+                      (mathOperations && !mathOperations.empty() ? "scalar"
+                                                                 : "rvv") &&
+                  integer(p, "vector_bytes") ==
+                      (mathOperations && !mathOperations.empty() ? 4 : 64) &&
                   lanes == pointwiseLanes(generic) && lanes > 0 &&
                   elements > 0 && elements % lanes == 0 &&
                   string(p, "tail") == "none" &&
-                  string(p, "fp_policy") == "preserve" && operands &&
-                  operands.size() == op->getNumOperands(),
+                  string(p, "fp_policy") ==
+                      (mathOperations && !mathOperations.empty()
+                           ? "explicit-approximation"
+                           : "preserve") &&
+                  operands && operands.size() == op->getNumOperands(),
               "missing or unsupported pointwise vector plan");
       if (operands)
         for (auto [i, selection] : llvm::enumerate(operands)) {
@@ -866,7 +882,35 @@ private:
       auto scalarOperands =
           p ? p.getAs<ArrayAttr>("scalar_operands") : ArrayAttr();
       unsigned scalarIndex = 0;
+      unsigned mathIndex = 0;
       for (auto [operationIndex, arithmetic] : llvm::enumerate(body)) {
+        if (!pointwiseMathRecipe(arithmetic).empty()) {
+          auto recipe =
+              mathOperations && mathIndex < mathOperations.size()
+                  ? dyn_cast<DictionaryAttr>(mathOperations[mathIndex])
+                  : DictionaryAttr();
+          auto abs =
+              recipe ? recipe.getAs<FloatAttr>("max_abs_error") : FloatAttr();
+          auto rel =
+              recipe ? recipe.getAs<FloatAttr>("max_rel_error") : FloatAttr();
+          require(
+              op,
+              supportedPointwiseMath(arithmetic) && recipe &&
+                  recipe.size() == 6 &&
+                  integer(recipe, "operation") == int64_t(operationIndex) &&
+                  string(recipe, "function") ==
+                      arithmetic.getName().stripDialect() &&
+                  string(recipe, "recipe") == pointwiseMathRecipe(arithmetic) &&
+                  string(recipe, "evaluation") ==
+                      "scalar-separate-mul-add-rne" &&
+                  abs && abs.getType().isF64() &&
+                  abs.getValueAsDouble() == pointwiseMathAbsError(arithmetic) &&
+                  rel && rel.getType().isF64() &&
+                  rel.getValueAsDouble() == pointwiseMathRelError(arithmetic),
+              "math recipe must match the operation, accuracy contract "
+              "and verified FP32 evaluation");
+          ++mathIndex;
+        }
         require(op,
                 isa<linalg::YieldOp>(arithmetic) ||
                     supportedPointwiseOperation(arithmetic),
@@ -901,6 +945,10 @@ private:
       }
       require(op, scalarIndex == (scalarOperands ? scalarOperands.size() : 0),
               "pointwise scalar broadcast plan has extraneous operands");
+      require(op,
+              (!p || !p.get("math") || mathOperations) &&
+                  mathIndex == (mathOperations ? mathOperations.size() : 0),
+              "pointwise math plan has missing or extraneous recipes");
       return;
     }
     if (auto reduce = dyn_cast<linalg::ReduceOp>(op)) {

@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Analysis/KernelContract.h"
+#include "Analysis/MathAccuracy.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -29,6 +30,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/MathExtras.h"
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 
@@ -361,10 +363,38 @@ static LogicalResult checkRepresentation(ModuleOp module, bool planned) {
       op->emitOpError() << "kernel contract " << rule << ": " << message;
       return WalkResult::interrupt();
     };
+    if (Attribute declared = op->getAttr("contract.math")) {
+      auto math = dyn_cast<DictionaryAttr>(declared);
+      if (!isa<func::FuncOp>(op) || !math || math.empty())
+        return fail("V26", "contract.math requires a nonempty function "
+                           "accuracy dictionary");
+      for (NamedAttribute entry : math) {
+        auto accuracy = dyn_cast<DictionaryAttr>(entry.getValue());
+        auto abs =
+            accuracy ? accuracy.getAs<FloatAttr>("max_abs_error") : FloatAttr();
+        auto rel =
+            accuracy ? accuracy.getAs<FloatAttr>("max_rel_error") : FloatAttr();
+        if ((entry.getName() != "erf" && entry.getName() != "exp") ||
+            !accuracy || accuracy.size() != 4 ||
+            string(accuracy, "domain") != "all-f32" ||
+            string(accuracy, "special_values") != "ieee" || !abs || !rel ||
+            !abs.getType().isF64() || !rel.getType().isF64() ||
+            !std::isfinite(abs.getValueAsDouble()) ||
+            !std::isfinite(rel.getValueAsDouble()) ||
+            abs.getValueAsDouble() < 0 || rel.getValueAsDouble() < 0)
+          return fail("V26", "math accuracy requires erf/exp with domain="
+                             "all-f32, special_values=ieee and finite "
+                             "nonnegative f64 absolute/relative budgets");
+      }
+    }
     AttrTypeWalker walker;
     walker.addWalk([&](DictionaryAttr dictionary) -> WalkResult {
       for (NamedAttribute attr : dictionary) {
         StringRef key = attr.getName().strref();
+        if (key == "contract.math" &&
+            (!isa<func::FuncOp>(op) || dictionary != op->getAttrDictionary()))
+          return fail("V26", "math accuracy must be attached directly to a "
+                             "function");
         if (key.starts_with("bosc_ame.") ||
             (!planned && key.starts_with("plan.")))
           return fail(

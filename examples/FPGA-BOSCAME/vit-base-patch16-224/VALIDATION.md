@@ -8,20 +8,26 @@ in this change. No FPGA run or hardware performance measurement is made.
 
 ## Current 40-case build
 
-The complete inventory contains 40 independent entries. The historical
-`build/build-report.json` records **37 PASS through restricted NR assembly and
-RISC-V object generation**. The subsequent single-case
-[PV K-tail checkpoint](../../../docs/validation/pv-k-tail/) builds the 38th
-entry and passes three complete-grid strict-simulator rounds. This does not
-claim a fresh build of all 40 entries. Two compilation limitations remain:
+The fresh `build/build-report.json` records **40/40 PASS through restricted NR
+assembly and RISC-V object generation**. All 418 `kernel.*` artifact SHA256
+values from the previously supported 38 cases match the pre-change snapshot;
+there are no artifact differences for those cases. The two nonlinear cases'
+emitted modules and objects retain the hashes used by their numerical checks.
+The [nonlinear checkpoint](../../../docs/validation/nonlinear-operators/)
+records the full build and unchanged-artifact comparison.
 
-| Case | Current blocker | Compilation behavior still required |
-| --- | --- | --- |
-| gelu_197x3072 | Planner, unsupported `math.erf` lane expression | Define a target implementation of erf, including its numerical contract; an approximation requires accuracy evidence. |
-| softmax_12x197x197 | Planner, unsupported `math.exp` lane expression | Lower exp while preserving the max shift, masked lanes, reduction and normalization order. |
+The historical complete-inventory checkpoint built 37 of these 40 entries.
+The subsequent single-case
+[PV K-tail checkpoint](../../../docs/validation/pv-k-tail/) builds the 38th
+entry and passes three complete-grid strict-simulator rounds. The subsequent
+[nonlinear checkpoint](../../../docs/validation/nonlinear-operators/) builds
+GELU and Softmax through restricted assembly and object generation and executes
+both complete grids three times. These two entries remove the remaining
+inventory compilation blockers; older checkpoint counts below remain scoped
+to their recorded builds.
 
 All six quantizers, all four dequantizers, all ten accumulating/overwrite i8
-matmuls, all five FP32 linears, LayerNorm, QK, PV, bias/add and the im2col entry
+matmuls, all five FP32 linears, LayerNorm, QK, PV, GELU, Softmax, bias/add and the im2col entry
 now compile. The historical 18-blocker table below no longer describes the
 current compiler.
 
@@ -31,6 +37,61 @@ their reports identify a validation gap rather than a compilation failure.
 Small ordered FP32 regressions cover column-major and general-stride storage.
 The emitted W8A8 Linear-chain results and full-model accuracy status are
 recorded in the W8A8 section below.
+
+## GELU and Softmax checkpoint
+
+The original erf-form GELU and stable Softmax algorithms are retained. The
+example exporter adds a neutral, per-function `contract.math` authorization:
+erf absolute error `2e-6`; exp error `8*2^-149 + 2e-6*|exp(x)|`, over all f32
+inputs with IEEE value behavior. Other math operations gain no implicit
+authorization. Backend plans select versioned piecewise-erf and ln(2)-reduced
+exp polynomial recipes; the restricted target uses scalar f32 evaluation and
+single-lane vector loads/stores. It adds no host math call or new FMA. Max
+reduction uses the explicit `-Inf` initializer and padding, ignores a single
+NaN when another argument is numeric, and retains the ordered sum/division.
+
+This is an authorized numerical approximation. Both the original ordered-f32
+oracles and independent binary64 mathematical references keep the existing
+`rtol=atol=2e-5`. The latter use erfc for GELU's negative tail and math.fsum for
+Softmax's mathematical denominator. The measured errors below are finite
+output errors against these independent mathematical references:
+
+| Case | Programs/round | Outputs/round | Three-round programs/outputs | Normal max abs error | Stress max abs error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| gelu_197x3072 | 4728 | 605184 | 14184 / 1815552 | 4.25908e-7 | 4.43347e-7 |
+| softmax_12x197x197 | 2364 | 465708 | 7092 / 1397124 | 1.60729e-7 | 2.76858e-8 |
+
+Every round covers the complete grid exactly once. Each of 48 contiguous
+program shards retains one strict Machine and poisoned SPM through normal
+forward, stress reverse and repeated stress forward execution. No global
+inter-shard order is asserted. DDR/SPM/REG checks, guards, readonly X, exact
+per-program read/write coverage and unchanged unselected output bytes remain
+enabled. The two stress rounds have identical output hashes. Per round, GELU
+reads and writes 2420736 B each; Softmax reads and writes 1862832 B each.
+
+Stress inputs include erf joins and neighboring f32 values, the GELU negative
+tail, NaN, signed zero, infinities, subnormals and maximal finite values.
+Softmax covers full 197-lane rows with 59 masked lanes, all-equal rows, offsets,
+large dynamic range, exp range-reduction/underflow boundaries and exceptional
+rows. GELU(-Inf) follows the original expression and produces NaN. A Softmax
+row containing NaN or +Inf, or consisting entirely of -Inf, produces all NaNs;
+finite maxima with -Inf elements produce zero probabilities at those elements.
+
+An additional independent 80-decimal-digit mpmath check samples 6482 GELU and
+9456 Softmax outputs per round from the actual stored output archives. Maximum
+binary64-reference differences from these samples are 1.77636e-15 and
+5.55112e-17 respectively. These are sampled observations. Reproducible analytic
+primitive and composition bounds are recorded separately in the
+[coefficient/error certificate](../../../docs/validation/nonlinear-math/).
+No correctly-rounded, one-ULP, full-model accuracy or hardware-performance
+claim follows from either check. SFU exp2 is evaluated in that record and is
+not selected by this implementation.
+
+The [execution checkpoint](../../../docs/validation/nonlinear-operators/)
+retains full per-shard execution metadata and actual-output archive hashes.
+`nonlinear-outputs.npz` remains in each build directory. Collection requires
+the current source/module hashes and the actual archive, rechecks values
+against both oracles, and rejects stale, incomplete or reordered evidence.
 
 ## PV K-tail checkpoint
 

@@ -1522,10 +1522,30 @@ LogicalResult Planner::decisions(func::FuncOp function) {
                WalkResult::interrupt();
       SmallVector<Attribute> operands;
       SmallVector<Attribute> scalarOperands;
+      SmallVector<Attribute> mathOperations;
       Block &body = generic.getRegion().front();
       for (auto [operationIndex, payload] : llvm::enumerate(body)) {
         // A generic may yield an external constant directly. Its use needs
         // the same explicit broadcast as a scalar arithmetic operand.
+        if (!pointwiseMathRecipe(payload).empty() &&
+            !supportedPointwiseMath(payload))
+          return payload.emitError(
+                     "BOSCAME math approximation requires an explicit "
+                     "contract.math accuracy budget covering the recipe, "
+                     "f32 operands and no fastmath flags"),
+                 WalkResult::interrupt();
+        if (!pointwiseMathRecipe(payload).empty())
+          mathOperations.push_back(
+              a.d({a.i("operation", operationIndex),
+                   a.s("function", payload.getName().stripDialect()),
+                   a.s("recipe", pointwiseMathRecipe(payload)),
+                   a.s("evaluation", "scalar-separate-mul-add-rne"),
+                   a.b.getNamedAttr(
+                       "max_abs_error",
+                       a.b.getF64FloatAttr(pointwiseMathAbsError(payload))),
+                   a.b.getNamedAttr(
+                       "max_rel_error",
+                       a.b.getF64FloatAttr(pointwiseMathRelError(payload)))}));
         if (!isa<linalg::YieldOp>(payload) &&
             !supportedPointwiseOperation(payload))
           return op->emitError("unsupported lane-wise scalar expression"),
@@ -1579,11 +1599,19 @@ LogicalResult Planner::decisions(func::FuncOp function) {
                 : "pointwise-memory-operand"));
       }
       op->setAttr("plan.vector",
-                  a.d({a.s("engine", "rvv"), a.i("vector_bytes", 64),
+                  a.d({a.s("engine", mathOperations.empty() ? "rvv" : "scalar"),
+                       a.i("vector_bytes", mathOperations.empty() ? 64 : 4),
                        a.i("elements", elements), a.i("lanes", lanes),
                        a.s("tail", "none"),
                        a.b.getNamedAttr("operands", a.b.getArrayAttr(operands)),
-                       a.s("fp_policy", "preserve")}));
+                       a.s("fp_policy", mathOperations.empty()
+                                            ? "preserve"
+                                            : "explicit-approximation")}));
+      if (!mathOperations.empty()) {
+        NamedAttrList fields(op->getAttrOfType<DictionaryAttr>("plan.vector"));
+        fields.set("math", a.b.getArrayAttr(mathOperations));
+        op->setAttr("plan.vector", fields.getDictionary(module.getContext()));
+      }
       if (!scalarOperands.empty()) {
         NamedAttrList fields(op->getAttrOfType<DictionaryAttr>("plan.vector"));
         fields.set("scalar_operands", a.b.getArrayAttr(scalarOperands));

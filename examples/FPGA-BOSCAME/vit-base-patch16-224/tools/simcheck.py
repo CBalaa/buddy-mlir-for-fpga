@@ -14,6 +14,13 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+from nonlinear_simcheck import (
+    audit_nonlinear_program,
+    check_nonlinear_sharded,
+    collect_nonlinear_case,
+    nonlinear_program_mask,
+    selected_nonlinear_comparison,
+)
 from oracles import DTYPES, compare, make_inputs, output_names, reference
 
 from build import (
@@ -36,6 +43,12 @@ class SimulationBlocked(RuntimeError):
 
 
 def scenarios_for(case):
+    if case["family"] in ("gelu", "softmax"):
+        return [
+            ("normal", False, "forward"),
+            ("boundaries-special-reverse", True, "reverse"),
+            ("boundaries-special-forward", True, "forward"),
+        ]
     if case["family"] in ("matmul_i8", "matmul_i8_overwrite"):
         return [
             ("normal", False, "forward"),
@@ -322,7 +335,10 @@ def simulate_case(
     grid = case["grid"]
     programs = list(itertools.product(*(range(extent) for extent in grid)))
     if selected_programs is not None:
-        pv_program_mask(case, selected_programs)
+        if case["family"] in ("gelu", "softmax"):
+            nonlinear_program_mask(case, selected_programs)
+        else:
+            pv_program_mask(case, selected_programs)
         programs = list(selected_programs)
     if order == "reverse":
         programs.reverse()
@@ -336,6 +352,7 @@ def simulate_case(
         "b_dma_packets": 0,
         "ddr_bytes": dict.fromkeys(("%arg0", "%arg1", "%arg2"), 0),
     }
+    nonlinear_bytes = {"%arg0": 0, "%arg1": 0}
     for launched, point in enumerate(programs, 1):
         scalars = {
             f"%arg{count + i}": value for i, value in enumerate([*grid, *point])
@@ -369,6 +386,12 @@ def simulate_case(
             for key in ("a_matrix_geometry", "ddr_bytes"):
                 for label, value in audit[key].items():
                     pv_audit[key][label] = pv_audit[key].get(label, 0) + value
+        elif case["family"] in ("gelu", "softmax"):
+            audit = audit_nonlinear_program(
+                case, point, machine.accesses[program_start[0] :]
+            )
+            for name, value in audit.items():
+                nonlinear_bytes[name] += value
         if progress and (
             launched == 1
             or launched == len(programs)
@@ -412,12 +435,19 @@ def simulate_case(
     ):
         raise AssertionError("overwrite matmul read old external C")
     comparison_actual, comparison_expected = actual, expected
+    nonlinear_metrics = None
     if case["family"] == "attention_pv":
         mask = check_pv_selected_output(
             case, programs, actual["C"], expected["C"], initial["C"]
         )
         comparison_actual = {"C": actual["C"][mask]}
         comparison_expected = {"C": expected["C"][mask]}
+    elif case["family"] in ("gelu", "softmax"):
+        comparison_actual, comparison_expected, nonlinear_metrics = (
+            selected_nonlinear_comparison(
+                case, programs, actual, expected, initial
+            )
+        )
     max_abs = compare(case, comparison_actual, comparison_expected)
     return actual, {
         "programs": len(programs),
@@ -443,6 +473,14 @@ def simulate_case(
                 },
             }
             if case["family"] == "attention_pv"
+            else {}
+        ),
+        **(
+            {
+                "nonlinear_error": nonlinear_metrics,
+                "nonlinear_ddr_bytes": nonlinear_bytes,
+            }
+            if nonlinear_metrics is not None
             else {}
         ),
         **(
@@ -745,6 +783,8 @@ def validate_pv_shard_evidence(case, saved, module_hash):
 
 
 def check_case(case, output_root):
+    if case["family"] in ("gelu", "softmax"):
+        return check_nonlinear_sharded(case, output_root, 1)
     record = {
         "name": case["name"],
         "status": "BLOCKED",
@@ -800,6 +840,8 @@ def check_case(case, output_root):
 
 def collect_case(case, output_root):
     """Reuse only complete simulation evidence for the current emitted module."""
+    if case["family"] in ("gelu", "softmax"):
+        return collect_nonlinear_case(case, output_root)
     path = Path(output_root) / case["name"] / "simcheck-result.json"
     record = {
         "name": case["name"],
@@ -903,6 +945,12 @@ def main():
         default=1,
         help="explicitly interpret PV full-grid (head,N-tile) shards in separate processes; each retains dirty SPM across its three rounds",
     )
+    parser.add_argument(
+        "--nonlinear-workers",
+        type=int,
+        default=1,
+        help="interpret GELU/Softmax program shards with one dirty-SPM Machine per shard across three rounds",
+    )
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.all and args.cases:
@@ -921,8 +969,19 @@ def main():
         and any(case["family"] != "attention_pv" for case in cases)
     ):
         parser.error("--pv-workers requires positive workers and PV-only cases")
+    if args.nonlinear_workers < 1 or (
+        args.nonlinear_workers > 1
+        and any(case["family"] not in ("gelu", "softmax") for case in cases)
+    ):
+        parser.error(
+            "--nonlinear-workers requires positive workers and GELU/Softmax-only cases"
+        )
     if args.collect:
         run = collect_case
+    elif all(case["family"] in ("gelu", "softmax") for case in cases):
+
+        def run(case, output):
+            return check_nonlinear_sharded(case, output, args.nonlinear_workers)
     elif args.pv_workers > 1:
 
         def run(case, output):

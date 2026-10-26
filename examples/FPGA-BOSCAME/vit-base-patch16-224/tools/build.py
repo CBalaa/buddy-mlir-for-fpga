@@ -219,6 +219,32 @@ def export_case(case, output):
     if not re.search(pattern, ttir):
         raise RuntimeError(f"missing real Triton entry {fn.__name__}")
     ttir = re.sub(pattern, "@" + case["symbol"], ttir)
+    if accuracy := case.get("math_accuracy"):
+        # The example explicitly authorizes a mathematical error budget.
+        # No target recipe, instruction or dialect enters the frontend.
+        entries = []
+        for function, fields in sorted(accuracy.items()):
+            entries.append(
+                function
+                + ' = {domain = "all-f32", special_values = "ieee", '
+                + f"max_abs_error = {fields['max_abs_error']:.17e} : f64, "
+                + f"max_rel_error = {fields['max_rel_error']:.17e} : f64}}"
+            )
+        marker = "attributes {"
+        ttir, count = re.subn(
+            rf"(@{re.escape(case['symbol'])}[^\n]*?){re.escape(marker)}",
+            lambda match: (
+                match[1]
+                + marker
+                + "contract.math = {"
+                + ", ".join(entries)
+                + "}, "
+            ),
+            ttir,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError("missing Triton function accuracy carrier")
     (output / "kernel.ttir").write_text(ttir)
     (output / "adapter.c").write_text(adapter_source(case))
     manifest = dict(case)

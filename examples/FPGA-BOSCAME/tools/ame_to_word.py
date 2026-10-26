@@ -359,7 +359,10 @@ def convert_line(line, gpr_mode="fixed", preserve_matrix_registers=False):
         )
     if (
         mnemonic.startswith(("mset", "ml", "ms", "mq", "mf", "mw"))
-        or ".mm" in mnemonic
+        # RVV mask logic uses the same suffix (for example vmor.mm). Leave
+        # those instructions to the strict RVV filter rather than treating
+        # them as unencoded AME matrix operations.
+        or (".mm" in mnemonic and not mnemonic.startswith("v"))
         or re.search(r"\b(?:tr|acc)\d+\b", code)
     ):
         raise ValueError(f"unsupported NR AME instruction: {code}")

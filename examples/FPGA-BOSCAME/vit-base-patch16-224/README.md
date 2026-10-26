@@ -6,12 +6,15 @@ This ports `google/vit-base-patch16-224` from the upstream
 Triton specializations and the 12-block model capture/replacement sources,
 with five additional overwrite matmuls and a weight-quantization check.
 
-**38 of 40 entries have compiled through restricted target assembly. The emitted
-W8A8 classifier Linear chain passes four numerical stress rounds.** The
-complete-inventory checkpoint compiled 37 entries; the subsequent PV K-tail
-checkpoint builds PV and passes three complete-grid rounds (1872 programs,
-453888 bit-exact f32 outputs). The remaining compiler limitations are GELU's
-erf and Softmax's exp. W8A8 dense linears are the default model path;
+**A fresh complete-inventory build passes all 40 entries through restricted
+target assembly and object generation.** All 418 kernel artifacts from the
+previously supported 38 cases retain their SHA256 values. GELU and Softmax pass three
+complete-grid strict-simulator rounds: 21276 programs and 3212676 output
+comparisons. Their explicit approximation contracts retain the existing
+`rtol=atol=2e-5`; the source algorithms remain unchanged. The emitted W8A8
+classifier Linear chain passes four numerical stress rounds, and PV passes
+three complete grids (1872 programs, 453888 bit-exact f32 outputs).
+W8A8 dense linears are the default model path;
 complete-model execution and accuracy remain unverified. See [VALIDATION.md](VALIDATION.md)
 for the exact cases, diagnostics and numerical evidence. Nothing has been
 executed on a board.
@@ -71,6 +74,12 @@ make -C "$VIT" simcheck PYTHON=python3 COLLECT=1
 # Actual emitted classifier quantize/dot/dequantize/bias/residual chain:
 make -C "$VIT" w8a8-chaincheck PYTHON=python3
 
+# Complete GELU/Softmax grids; one dirty-SPM Machine per shard across 3 rounds:
+python3 "$VIT/tools/simcheck.py" --case gelu_197x3072 \
+  --case softmax_12x197x197 --nonlinear-workers 48
+# Independent 80-digit samples of the actual output archive (requires mpmath):
+python3 "$VIT/tools/check_nonlinear_numerics.py"
+
 # ABI-only smoke checks of the independent C launchers:
 make -C "$VIT" launchcheck PYTHON=python3
 
@@ -78,9 +87,9 @@ make -C "$VIT" launchcheck PYTHON=python3
 make -C "$VIT" model-simcheck PYTHON=python3 MODE=w8a8
 ```
 
-Suite build/simulation commands currently return nonzero with a `PARTIAL`
-report because blocked cases are not counted as successes. They still attempt
-every selected case. Per-case wrappers also accept the common driver's
+Suite commands attempt every selected case and return nonzero when a case is
+blocked or fails; compilation and complete execution are recorded separately.
+Per-case wrappers also accept the common driver's
 `--stage ttir|boscame|llvm|asm`, `--output` and `--report` arguments.
 Single-case summaries are written inside `build/kernels/<case>/`; an explicit
 multi-case subset uses `build/kernels/*-subset-report.json`. These commands
@@ -138,7 +147,9 @@ fallback, including the 1000-column cases. Each DMA still requires two
 the valid elements. Unused parent pitch does not constrain a single-row
 copy. The simulator retains its access and DMA checks.
 
-The remaining compiler design decisions concern mathematical recipes for erf
-and exp. See the PV K-tail and W8A8 updates separately from the historical audit
-in the validation record. See the complete blocked-case list and the
-current first diagnostic in [VALIDATION.md](VALIDATION.md).
+GELU's erf and Softmax's exp now use explicitly authorized FP32 polynomial
+recipes; max reduction preserves its initializer, mask and NaN value semantics.
+See the [nonlinear execution checkpoint](../../../docs/validation/nonlinear-operators/)
+and [coefficient/error evidence](../../../docs/validation/nonlinear-math/).
+The PV, nonlinear and W8A8 updates are recorded separately from historical
+blockers in [VALIDATION.md](VALIDATION.md).

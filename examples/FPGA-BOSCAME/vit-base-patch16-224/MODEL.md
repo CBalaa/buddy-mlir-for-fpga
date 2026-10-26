@@ -86,8 +86,12 @@ this Linear chain; it does not establish complete-model execution or accuracy.
 
 The complete-inventory checkpoint built 37 of 40 entries through restricted
 target assembly; the subsequent PV K-tail checkpoint confirms the 38th entry
-and three complete-grid numerical rounds. GELU's erf and Softmax's exp remain
-compilation limitations. The FP32 reference entries and patch im2col compile,
+and three complete-grid numerical rounds. The later nonlinear checkpoint
+builds GELU and Softmax and passes both complete grids in three strict-simulator
+rounds under explicit approximation contracts and the existing `2e-5` output
+tolerances. A fresh complete-inventory assembly/object build passes all 40
+entries, with all 418 kernel artifacts from the prior 38 cases unchanged.
+This does not establish complete-model execution or accuracy. The FP32 reference entries and patch im2col compile,
 but their large full-grid/reference-composition execution has not been verified.
 
 The explicit FP32 accuracy reference in `tools/compare_accuracy.py reference`

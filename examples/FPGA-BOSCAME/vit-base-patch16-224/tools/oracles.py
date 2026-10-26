@@ -5,6 +5,102 @@ import math
 import numpy as np
 
 DTYPES = {"f32": np.dtype("<f4"), "i32": np.dtype("<i4"), "i8": np.dtype("i1")}
+NONLINEAR_TOLERANCE = 2e-5
+
+
+def gelu_boundary_inputs():
+    """Finite boundaries and IEEE values, independent of target coefficients."""
+    invsqrt2 = np.float32(0.7071067811865475)
+    joins = np.arange(0.5, 4.5, 0.5, dtype=np.float32) / invsqrt2
+    points = np.concatenate(
+        (
+            np.linspace(-12, 12, 2049, dtype=np.float32),
+            joins,
+            -joins,
+            np.array(
+                [
+                    -np.inf,
+                    np.inf,
+                    np.nan,
+                    -0.0,
+                    0.0,
+                    -np.finfo(np.float32).max,
+                    np.finfo(np.float32).max,
+                    -np.finfo(np.float32).tiny,
+                    np.finfo(np.float32).tiny,
+                    -np.nextafter(np.float32(0), np.float32(1)),
+                    np.nextafter(np.float32(0), np.float32(1)),
+                ],
+                dtype=np.float32,
+            ),
+        )
+    )
+    with np.errstate(over="ignore", invalid="ignore"):
+        return np.concatenate(
+            (
+                points,
+                np.nextafter(points, -np.inf),
+                np.nextafter(points, np.inf),
+            )
+        )
+
+
+def _nonlinear_stress(case, arrays):
+    if case["family"] == "gelu":
+        arrays["X"][...] = np.resize(gelu_boundary_inputs(), arrays["X"].shape)
+    elif case["family"] == "softmax":
+        length = case["constexprs"]["LENGTH"]
+        rows = arrays["X"].reshape(-1, length)
+        limits = np.finfo(np.float32)
+        boundary = np.array(
+            [
+                -103.97208404541016,
+                -103.2789306640625,
+                -87.3365478515625,
+                -64 * math.log(2),
+                -math.log(2),
+                -0.5 * math.log(2),
+                0,
+            ],
+            dtype=np.float32,
+        )
+        for index, row in enumerate(rows):
+            kind = index % 16
+            if kind < 2:
+                row.fill(-0.0 if kind else 0.0)
+            elif kind == 2:
+                row[:] = np.linspace(-200, 0, length, dtype=np.float32)
+            elif kind in (3, 4):
+                row[:] = np.linspace(-100, 0, length, dtype=np.float32)
+                row += np.float32(1000 if kind == 3 else -1000)
+            elif kind == 5:
+                row.fill(-120)
+                row[-1] = 0
+            elif kind == 6:
+                row[:] = np.resize(np.array([-np.inf, 0], np.float32), length)
+            elif kind in (7, 8):
+                row.fill(0)
+                row[index % length] = np.nan if kind == 7 else np.inf
+            elif kind in (9, 10):
+                row.fill(np.inf if kind == 9 else -np.inf)
+            elif kind == 11:
+                row[:] = np.resize(
+                    np.array([-limits.max, limits.max], np.float32), length
+                )
+            elif kind == 12:
+                row[:] = np.resize(
+                    np.array([-limits.tiny, 0, limits.tiny], np.float32), length
+                )
+            elif kind in (13, 14):
+                row[:] = np.resize(
+                    np.nextafter(boundary, -np.inf if kind == 13 else np.inf),
+                    length,
+                )
+                row[-1] = 0
+            else:
+                row[:] = np.resize(
+                    np.array([-0.0, 0.0, -np.inf], np.float32), length
+                )
 
 
 def output_names(case):
@@ -98,7 +194,92 @@ def make_inputs(case, shapes, stress=False):
         )
         b[...] = scales
         arrays["C"].fill(np.nan)
+    if stress:
+        _nonlinear_stress(case, arrays)
     return arrays
+
+
+def nonlinear_reference64(case, arrays):
+    """Independent double-precision mathematical reference, not target recipes.
+
+    GELU uses erfc to retain its small negative tail. Nonfinite behavior follows
+    the original erf expression, including GELU(-Inf)=NaN. Softmax uses a stable
+    shift and math.fsum, without the emitted FP32 reduction's rounding.
+    """
+    x = arrays["X"]
+    if case["family"] == "gelu":
+
+        def gelu(value):
+            value = float(value)
+            if value == -math.inf:
+                return math.nan
+            return 0.5 * value * math.erfc(-value / math.sqrt(2))
+
+        return {
+            "Out": np.fromiter(
+                (gelu(v) for v in x.flat), np.float64, x.size
+            ).reshape(x.shape)
+        }
+    if case["family"] != "softmax":
+        raise ValueError("double nonlinear reference requires GELU or Softmax")
+    length = case["constexprs"]["LENGTH"]
+    result = np.empty(x.shape, np.float64)
+    for row, out in zip(x.reshape(-1, length), result.reshape(-1, length)):
+        values = [float(v) for v in row]
+        maximum = max(values)
+        if (
+            any(math.isnan(v) or v == math.inf for v in values)
+            or maximum == -math.inf
+        ):
+            out.fill(np.nan)
+            continue
+        exponential = [math.exp(v - maximum) for v in values]
+        total = math.fsum(exponential)
+        out[:] = [v / total for v in exponential]
+    return {"Out": result}
+
+
+def nonlinear_reference_mp(case, arrays, dps=80):
+    """Arbitrary-precision sampling oracle; requires mpmath only when invoked."""
+    import mpmath as mp
+
+    x = arrays["X"]
+    result = np.empty(x.shape, np.float64)
+    with mp.workdps(dps):
+        if case["family"] == "gelu":
+            for index, raw in enumerate(x.flat):
+                value = float(raw)
+                if not math.isfinite(value):
+                    answer = math.inf if value == math.inf else math.nan
+                elif value == 0:
+                    answer = value
+                elif value < -40:
+                    # erfc(t) < exp(-t*t)/(t*sqrt(pi)); this entire tail
+                    # rounds to zero even in the returned binary64 format.
+                    answer = -0.0
+                else:
+                    number = mp.mpf(value)
+                    answer = float(number * mp.erfc(-number / mp.sqrt(2)) / 2)
+                result.flat[index] = answer
+        elif case["family"] == "softmax":
+            length = case["constexprs"]["LENGTH"]
+            for row, out in zip(
+                x.reshape(-1, length), result.reshape(-1, length)
+            ):
+                values = [float(v) for v in row]
+                maximum = max(values)
+                if (
+                    any(math.isnan(v) or v == math.inf for v in values)
+                    or maximum == -math.inf
+                ):
+                    out.fill(np.nan)
+                    continue
+                terms = [mp.exp(mp.mpf(v) - maximum) for v in values]
+                total = mp.fsum(terms)
+                out[:] = [float(v / total) for v in terms]
+        else:
+            raise ValueError("high-precision oracle requires GELU or Softmax")
+    return {"Out": result}
 
 
 def _matmul_sequential(a, b):
@@ -268,12 +449,26 @@ def compare(case, actual, expected):
         got = actual[name]
         if got.shape != want.shape or got.dtype != want.dtype:
             raise AssertionError(f"{name}: output shape/dtype differs")
-        delta = np.abs(got.astype(np.float64) - want.astype(np.float64))
+        finite = np.isfinite(got) & np.isfinite(want)
+        delta = np.abs(
+            got[finite].astype(np.float64) - want[finite].astype(np.float64)
+        )
         max_abs = max(max_abs, float(np.max(delta, initial=0)))
         if tolerant:
             np.testing.assert_allclose(
-                got, want, rtol=2e-5, atol=2e-5, err_msg=name
+                got,
+                want,
+                rtol=NONLINEAR_TOLERANCE,
+                atol=NONLINEAR_TOLERANCE,
+                err_msg=name,
             )
+            if case["family"] in ("gelu", "softmax"):
+                zeros = (want == 0) & (got == 0)
+                np.testing.assert_array_equal(
+                    np.signbit(got[zeros]),
+                    np.signbit(want[zeros]),
+                    err_msg=name + ": signed zero differs",
+                )
         else:
             np.testing.assert_array_equal(
                 got.view(np.uint8),
@@ -281,3 +476,29 @@ def compare(case, actual, expected):
                 err_msg=f"{name}: bitwise comparison",
             )
     return max_abs
+
+
+def nonlinear_error_metrics(actual, expected):
+    """Apply the existing 2e-5 tolerance also to an independent real reference."""
+    got, want = np.asarray(actual, np.float64), np.asarray(expected, np.float64)
+    np.testing.assert_allclose(
+        got,
+        want,
+        rtol=NONLINEAR_TOLERANCE,
+        atol=NONLINEAR_TOLERANCE,
+        err_msg="independent mathematical reference",
+    )
+    finite = np.isfinite(got) & np.isfinite(want)
+    absolute = np.abs(got[finite] - want[finite])
+    budget = NONLINEAR_TOLERANCE * (1 + np.abs(want[finite]))
+    return {
+        "reference": "independent binary64 math.erfc/exp and math.fsum; sampled against 80-digit mpmath separately",
+        "rtol": NONLINEAR_TOLERANCE,
+        "atol": NONLINEAR_TOLERANCE,
+        "max_abs": float(np.max(absolute, initial=0)),
+        "max_tolerance_fraction": float(np.max(absolute / budget, initial=0)),
+        "finite_outputs": int(np.count_nonzero(finite)),
+        "nan_outputs": int(np.count_nonzero(np.isnan(got))),
+        "positive_infinity_outputs": int(np.count_nonzero(np.isposinf(got))),
+        "negative_infinity_outputs": int(np.count_nonzero(np.isneginf(got))),
+    }

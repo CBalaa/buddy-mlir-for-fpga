@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEMathApprox.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEOrderedMatmul.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
 #include "Dialect/BOSCAME/BOSCAMEAttrs.h"
@@ -372,6 +373,7 @@ Operation *emitGeneric(linalg::GenericOp generic) {
   Location loc = generic.getLoc();
   auto p = plan(generic, "plan.vector");
   int64_t lanes = number(p, "lanes");
+  bool scalarMath = text(p, "engine") == "scalar";
   auto loop = scf::ForOp::create(b, loc, index(b, loc, 0),
                                  index(b, loc, number(p, "elements")),
                                  index(b, loc, lanes));
@@ -385,6 +387,10 @@ Operation *emitGeneric(linalg::GenericOp generic) {
     Value operand = generic->getOperand(i);
     auto type = dyn_cast<MemRefType>(operand.getType());
     if (!type) {
+      if (scalarMath) {
+        mapping.map(argument, operand);
+        continue;
+      }
       Value broadcast = vector::BroadcastOp::create(
           b, loc, VectorType::get({lanes}, operand.getType()), operand);
       mapping.map(argument, broadcast);
@@ -394,15 +400,20 @@ Operation *emitGeneric(linalg::GenericOp generic) {
         b, loc, VectorType::get({lanes}, type.getElementType()), operand,
         ValueRange{loop.getInductionVar()});
     direct(loaded, cast<DictionaryAttr>(selections[i]), b);
-    mapping.map(argument, loaded.getResult());
+    Value value = loaded.getResult();
+    if (scalarMath)
+      value = vector::ExtractOp::create(b, loc, value, int64_t{0});
+    mapping.map(argument, value);
   }
   if (auto scalars = p.getAs<ArrayAttr>("scalar_operands"))
     for (Attribute entry : scalars) {
       auto selection = cast<DictionaryAttr>(entry);
       auto value = cast<TypedAttr>(selection.get("value"));
       Value scalar = arith::ConstantOp::create(b, loc, value.getType(), value);
-      Value broadcast = vector::BroadcastOp::create(
-          b, loc, VectorType::get({lanes}, value.getType()), scalar);
+      Value broadcast = scalar;
+      if (!scalarMath)
+        broadcast = vector::BroadcastOp::create(
+            b, loc, VectorType::get({lanes}, value.getType()), scalar);
       auto operationIndex = selection.getAs<IntegerAttr>("operation");
       Operation &arithmetic = *std::next(
           body.begin(), operationIndex ? operationIndex.getInt() : 0);
@@ -410,15 +421,30 @@ Operation *emitGeneric(linalg::GenericOp generic) {
                   broadcast);
     }
   for (Operation &arithmetic : body.without_terminator()) {
-    auto type = VectorType::get({lanes}, arithmetic.getResult(0).getType());
+    Type type = arithmetic.getResult(0).getType();
+    if (!scalarMath)
+      type = VectorType::get({lanes}, type);
+    if (isSupportedMathApprox(arithmetic)) {
+      mapping.map(arithmetic.getResult(0),
+                  emitMathApprox(b, arithmetic,
+                                 mapping.lookup(arithmetic.getOperand(0))));
+      continue;
+    }
     if (isa<math::AbsFOp>(arithmetic)) {
       // abs is an exact sign-bit operation, including NaN payloads and -0.
       // Avoid math-to-libm scalarization and vector spills across fabsf calls.
-      auto bitsType = VectorType::get({lanes}, b.getI32Type());
+      Type bitsType = scalarMath
+                          ? Type(b.getI32Type())
+                          : Type(VectorType::get({lanes}, b.getI32Type()));
       auto bits = arith::BitcastOp::create(
           b, loc, bitsType, mapping.lookup(arithmetic.getOperand(0)));
-      auto mask = arith::ConstantOp::create(
-          b, loc, DenseElementsAttr::get(bitsType, int32_t{0x7fffffff}));
+      Value mask =
+          scalarMath
+              ? Value(arith::ConstantIntOp::create(b, loc, 0x7fffffff, 32))
+              : Value(arith::ConstantOp::create(
+                    b, loc,
+                    DenseElementsAttr::get(cast<VectorType>(bitsType),
+                                           int32_t{0x7fffffff})));
       auto positive = arith::AndIOp::create(b, loc, bits, mask);
       mapping.map(arithmetic.getResult(0),
                   arith::BitcastOp::create(b, loc, type, positive));
@@ -427,7 +453,9 @@ Operation *emitGeneric(linalg::GenericOp generic) {
     if (auto constant = dyn_cast<arith::ConstantOp>(arithmetic)) {
       Value scalar = arith::ConstantOp::create(b, loc, constant.getValue());
       mapping.map(constant.getResult(),
-                  vector::BroadcastOp::create(b, loc, type, scalar));
+                  scalarMath ? scalar
+                             : Value(vector::BroadcastOp::create(b, loc, type,
+                                                                 scalar)));
       continue;
     }
     OperationState state(loc, arithmetic.getName());
@@ -439,6 +467,9 @@ Operation *emitGeneric(linalg::GenericOp generic) {
   }
   Value result = mapping.lookup(
       cast<linalg::YieldOp>(body.getTerminator()).getValues()[0]);
+  if (scalarMath)
+    result = vector::BroadcastOp::create(
+        b, loc, VectorType::get({1}, result.getType()), result);
   auto stored = vector::StoreOp::create(b, loc, result, generic.getOutputs()[0],
                                         ValueRange{loop.getInductionVar()});
   direct(stored,

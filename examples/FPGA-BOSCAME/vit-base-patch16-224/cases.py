@@ -46,6 +46,22 @@ def _case(
             if kind == "matmul_i8_overwrite"
             else {}
         ),
+        **(
+            {
+                "math_accuracy": {
+                    "erf" if kind == "gelu" else "exp": {
+                        "domain": "all-f32",
+                        "special_values": "ieee",
+                        "max_abs_error": 2e-6
+                        if kind == "gelu"
+                        else 8 * 2.0**-149,
+                        "max_rel_error": 0.0 if kind == "gelu" else 2e-6,
+                    }
+                }
+            }
+            if kind in ("gelu", "softmax")
+            else {}
+        ),
     }
 
 

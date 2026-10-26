@@ -67,10 +67,32 @@ def wrap(value, bits):
 
 def rounded(value, element):
     if element == "f32":
-        return struct.unpack("<f", struct.pack("<f", value))[0]
+        try:
+            return struct.unpack("<f", struct.pack("<f", value))[0]
+        except OverflowError:
+            # RNE floating arithmetic overflows to infinity. Python's binary
+            # packing raises instead, including for finite f64 intermediates.
+            return math.copysign(math.inf, value)
     if element.startswith("i") and element != "index" and element != "i1":
         return wrap(value, int(element[1:]))
     return value
+
+
+def minmax_number(a, b, *, maximum):
+    """RVV min/max number semantics, including mixed and same-sign zeros.
+
+    arith.maxnumf permits either sign for a mixed-zero tie. The target chooses
+    +0 for max and -0 for min, while retaining a common zero sign. A single
+    NaN is ignored; two NaNs produce a NaN without a payload guarantee.
+    """
+    if math.isnan(a):
+        return b
+    if math.isnan(b):
+        return a
+    if a == b == 0:
+        signs = (math.copysign(1, a), math.copysign(1, b))
+        return math.copysign(0.0, max(signs) if maximum else min(signs))
+    return max(a, b) if maximum else min(a, b)
 
 
 def element_type(type_text):
@@ -502,7 +524,18 @@ class Machine:
                 elif code in ("muli", "mulf"):
                     value = values[0] * values[1]
                 elif code == "divf":
-                    value = values[0] / values[1]
+                    a, b = values
+                    if b == 0:
+                        value = (
+                            math.nan
+                            if a == 0 or math.isnan(a)
+                            else math.copysign(
+                                math.inf,
+                                math.copysign(1, a) * math.copysign(1, b),
+                            )
+                        )
+                    else:
+                        value = a / b
                 elif code in ("divui", "divsi"):
                     value = abs(values[0]) // abs(values[1])
                     if (values[0] < 0) != (values[1] < 0):
@@ -558,23 +591,22 @@ class Machine:
                         else not unordered and comparison
                     )
                 elif code in ("maxnumf", "minnumf"):
-                    a, b = values
-                    if math.isnan(a):
-                        value = b
-                    elif math.isnan(b):
-                        value = a
-                    elif a == b == 0:
-                        signs = (math.copysign(1, a), math.copysign(1, b))
-                        sign = max(signs) if code == "maxnumf" else min(signs)
-                        value = math.copysign(0.0, sign)
-                    else:
-                        value = max(a, b) if code == "maxnumf" else min(a, b)
+                    value = minmax_number(*values, maximum=code == "maxnumf")
                 elif code == "select":
                     value = values[1] if values[0] else values[2]
                 elif code == "andi":
                     value = values[0] & values[1]
                 elif code == "ori":
                     value = values[0] | values[1]
+                elif code == "shli":
+                    bits = (
+                        64
+                        if source_element == "index"
+                        else int(source_element[1:])
+                    )
+                    if not 0 <= values[1] < bits:
+                        raise SimError("undefined out-of-range shli shift")
+                    value = values[0] << values[1]
                 elif code in (
                     "index_cast",
                     "index_castui",
@@ -679,10 +711,10 @@ class Machine:
             for lane in values:
                 if reduction[1] == "add":
                     value = rounded(value + lane, element)
-                elif math.isnan(value):
-                    value = lane
-                elif not math.isnan(lane):
-                    value = rounded(max(value, lane), element)
+                else:
+                    value = rounded(
+                        minmax_number(value, lane, maximum=True), element
+                    )
             self.result(op, [value])
         elif name == "vector.extract":
             values = get(operands[0])
