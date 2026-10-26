@@ -28,6 +28,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include <array>
@@ -1618,21 +1619,35 @@ LogicalResult Planner::decisions(func::FuncOp function) {
         op->setAttr("plan.vector", fields.getDictionary(module.getContext()));
       }
     } else if (auto reduce = dyn_cast<linalg::ReduceOp>(op)) {
+      Block &body = reduce.getRegion().front();
+      Operation &combiner = body.front();
+      bool supported =
+          llvm::TypeSwitch<Operation *, bool>(&combiner)
+              .Case<arith::AddFOp, arith::MaximumFOp, arith::MaxNumFOp>(
+                  [](auto op) {
+                    return op.getFastmath() == arith::FastMathFlags::none;
+                  })
+              .Default(false);
+      if (!supported)
+        return op->emitError("v1 reduction plan requires ordered addf, "
+                             "maximumf, or maxnumf"),
+               WalkResult::interrupt();
+      bool isSum = isa<arith::AddFOp>(combiner);
+      bool isMaximum = isa<arith::MaximumFOp>(combiner);
       Value input = reduce.getInputs()[0];
       auto type = dyn_cast<MemRefType>(input.getType());
       if (!type || type.getRank() != 1 || !type.hasStaticShape() ||
           !type.getElementType().isF32() || type.getDimSize(0) % 16)
         return op->emitError("v1 reduction plan requires full rank-one f32 "
-                             "ordered-add chunks"),
+                             "chunks"),
                WalkResult::interrupt();
       op->setAttr(
           "plan.reduce",
-          a.d({a.s("engine", "rvv"), a.i("vector_bytes", 64),
+          a.d({a.s("engine", "rvv"), a.i("vector_bytes", isMaximum ? 4 : 64),
                a.i("elements", type.getDimSize(0)), a.i("axis", 0),
-               a.s("strategy",
-                   isa<arith::MaxNumFOp>(reduce.getRegion().front().front())
-                       ? "ordered-vector-maxnum"
-                       : "ordered-vector-add"),
+               a.s("strategy", isSum       ? "ordered-vector-add"
+                               : isMaximum ? "ordered-scalar-max"
+                                           : "ordered-vector-maxnum"),
                a.b.getNamedAttr("input",
                                 binding(input, 0, "ordered-reduction-input")),
                a.b.getNamedAttr("output", binding(reduce.getInits()[0], 1,

@@ -492,11 +492,25 @@ Operation *emitReduce(linalg::ReduceOp reduce) {
       vector::LoadOp::create(b, loc, VectorType::get({lanes}, b.getF32Type()),
                              source, ValueRange{loop.getInductionVar()});
   direct(loaded, nested(p, "input"), b);
-  auto kind = text(p, "strategy") == "ordered-vector-maxnum"
-                  ? vector::CombiningKind::MAXNUMF
-                  : vector::CombiningKind::ADD;
-  Value next = vector::ReductionOp::create(b, loc, kind, loaded,
-                                           loop.getRegionIterArgs()[0]);
+  Value next;
+  if (text(p, "strategy") != "ordered-scalar-max") {
+    auto kind = text(p, "strategy") == "ordered-vector-maxnum"
+                    ? vector::CombiningKind::MAXNUMF
+                    : vector::CombiningKind::ADD;
+    next = vector::ReductionOp::create(b, loc, kind, loaded,
+                                       loop.getRegionIterArgs()[0]);
+  } else {
+    // Preserve maximumf NaN and signed-zero semantics, as well as the
+    // original operand order. The vector port supplies one SPM element at a
+    // time; the scalar combiner does not introduce a library call.
+    Value element =
+        vector::ExtractOp::create(b, loc, loaded, ArrayRef<int64_t>{0});
+    Block &body = reduce.getRegion().front();
+    IRMapping mapping;
+    mapping.map(body.getArgument(0), element);
+    mapping.map(body.getArgument(1), loop.getRegionIterArgs()[0]);
+    next = b.clone(body.front(), mapping)->getResult(0);
+  }
   scf::YieldOp::create(b, loc, next);
   b.setInsertionPointAfter(loop);
   return memref::StoreOp::create(b, loc, loop.getResult(0), output,

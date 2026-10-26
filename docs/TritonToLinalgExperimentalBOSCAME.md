@@ -113,6 +113,19 @@ calls occur inside the reduction loop. Scalar rsqrt remains between the
 vector loops. This sum prioritizes source rounding semantics; its small vector
 reads can cost more than a hardware reduction.
 
+Rank-one f32 reductions with a single `arith.maximumf` combiner are also
+supported on SPM, without fast-math flags. The planner
+records `ordered-scalar-max` with a four-byte vector read per iteration; the
+verifier checks that this strategy matches the reduction body. Lowering keeps
+the original scalar operation, operand order and initial accumulator, including
+the NaN and signed-zero behavior of `maximumf`. It reads
+SPM through `vector<1xf32>` and extracts lane zero, without a math-library call.
+The current plan still requires a contiguous, static input whose length is a
+multiple of 16 and an ordinary rank-zero accumulator. This is a correctness
+path; max reduction throughput has not been measured on FPGA. The existing
+`arith.maxnumf` path uses `ordered-vector-maxnum` and 64-byte vector reductions;
+`maximumf` must not use that strategy because its NaN semantics differ.
+
 Integer dots first become standard tensor `linalg.matmul` operations carrying
 the unit attribute `bosc_ame.lower_to_ame`. After bufferization, the driver
 verifies the markers survived and calls a C++ helper on the buffer form.

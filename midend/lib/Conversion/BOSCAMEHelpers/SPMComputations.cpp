@@ -721,7 +721,7 @@ LogicalResult checkReduce(linalg::ReduceOp op) {
   if (!op.hasPureBufferSemantics() || op.getInputs().size() != 1 ||
       op.getInits().size() != 1 || op.getDimensions().size() != 1 ||
       op.getDimensions()[0] != 0)
-    return op.emitError("SPM reduction requires a rank-1 to rank-0 sum");
+    return op.emitError("SPM reduction requires a rank-1 to rank-0 reduction");
   auto input = dyn_cast<MemRefType>(op.getInputs()[0].getType());
   auto output = dyn_cast<MemRefType>(op.getInits()[0].getType());
   if (!input || input.getRank() != 1 || !input.getElementType().isF32() ||
@@ -733,17 +733,25 @@ LogicalResult checkReduce(linalg::ReduceOp op) {
     return failure();
   Block &body = op.getRegion().front();
   if (body.getOperations().size() != 2)
-    return op.emitError("SPM reduction supports only a single ordered addf");
-  auto add = dyn_cast<arith::AddFOp>(body.front());
+    return op.emitError(
+        "SPM reduction supports only a single ordered combiner");
+  Operation &combiner = body.front();
+  bool supported =
+      llvm::TypeSwitch<Operation *, bool>(&combiner)
+          .Case<arith::AddFOp, arith::MaximumFOp, arith::MaxNumFOp>(
+              [](auto op) {
+                return op.getFastmath() == arith::FastMathFlags::none;
+              })
+          .Default(false);
   auto yield = dyn_cast<linalg::YieldOp>(body.getTerminator());
-  if (!add || !yield || yield.getValues().size() != 1 ||
-      yield.getValues()[0] != add.getResult() ||
-      !((add.getLhs() == body.getArgument(0) &&
-         add.getRhs() == body.getArgument(1)) ||
-        (add.getRhs() == body.getArgument(0) &&
-         add.getLhs() == body.getArgument(1))) ||
-      add.getFastmath() != arith::FastMathFlags::none)
-    return op.emitError("SPM reduction requires addf without fast-math flags");
+  if (!supported || !yield || yield.getValues().size() != 1 ||
+      yield.getValues()[0] != combiner.getResult(0) ||
+      !((combiner.getOperand(0) == body.getArgument(0) &&
+         combiner.getOperand(1) == body.getArgument(1)) ||
+        (combiner.getOperand(1) == body.getArgument(0) &&
+         combiner.getOperand(0) == body.getArgument(1))))
+    return op.emitError("SPM reduction requires addf, maximumf or maxnumf "
+                        "without fast-math flags");
   return success();
 }
 
@@ -752,7 +760,9 @@ Operation *lowerReduce(linalg::ReduceOp op) {
   Location loc = op.getLoc();
   Value input = op.getInputs()[0], output = op.getInits()[0];
   auto type = cast<MemRefType>(input.getType());
-  int64_t lanes = lanesFor(input);
+  Block &body = op.getRegion().front();
+  const bool isScalarMax = isa<arith::MaximumFOp>(body.front());
+  int64_t lanes = isScalarMax ? 1 : lanesFor(input);
   Value initial = memref::LoadOp::create(builder, loc, output, ValueRange{});
   auto loop =
       scf::ForOp::create(builder, loc, index(builder, loc, 0),
@@ -764,12 +774,27 @@ Operation *lowerReduce(linalg::ReduceOp op) {
     Value loaded = vector::LoadOp::create(
         builder, loc, VectorType::get({lanes}, type.getElementType()), input,
         ValueRange{loop.getInductionVar()});
-    // Keep ordered ADD in the IR and use the target's vector reduction.
-    // FPGA rounding may differ from per-lane scalar f32 addition; numerical
-    // validation therefore uses a tolerance rather than bit identity.
-    Value accumulator =
-        vector::ReductionOp::create(builder, loc, vector::CombiningKind::ADD,
-                                    loaded, loop.getRegionIterArgs()[0]);
+    Value accumulator;
+    if (!isScalarMax) {
+      // Keep ordered ADD in the IR and use the target's vector reduction.
+      // FPGA rounding may differ from per-lane scalar f32 addition; numerical
+      // validation therefore uses a tolerance rather than bit identity.
+      auto kind = isa<arith::MaxNumFOp>(body.front())
+                      ? vector::CombiningKind::MAXNUMF
+                      : vector::CombiningKind::ADD;
+      accumulator = vector::ReductionOp::create(builder, loc, kind, loaded,
+                                                loop.getRegionIterArgs()[0]);
+    } else {
+      // Preserve the NaN and signed-zero semantics of maximumf. Read through
+      // the SPM vector port and apply the original scalar
+      // combiner in source order, without vector slides or runtime calls.
+      Value element =
+          vector::ExtractOp::create(builder, loc, loaded, ArrayRef<int64_t>{0});
+      IRMapping mapping;
+      mapping.map(body.getArgument(0), element);
+      mapping.map(body.getArgument(1), loop.getRegionIterArgs()[0]);
+      accumulator = builder.clone(body.front(), mapping)->getResult(0);
+    }
     scf::YieldOp::create(builder, loc, accumulator);
   }
   return memref::StoreOp::create(builder, loc, loop.getResult(0), output,
