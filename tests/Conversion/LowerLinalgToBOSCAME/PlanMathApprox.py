@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Authorize f32 math explicitly, verify recipes, then execute emitted IR."""
 
 import math
@@ -130,7 +131,7 @@ def main():
     passes = (
         "--kernel-contract-annotate",
         "--kernel-contract-verify",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-plan-verify",
     )
     for function in ("erf", "exp"):

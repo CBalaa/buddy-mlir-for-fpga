@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check SPM-only arithmetic, ordered reduction, and strict vector boundaries."""
 
 import re
@@ -12,6 +13,7 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "examples/FPGA-BOSCAME/tools"))
 from boscame_buffer_sim import Machine  # noqa: E402
 from boscame_check import buddy_opt_path  # noqa: E402
+from restrict_fpga_assembly import transform  # noqa: E402
 
 
 def physical_pipeline():
@@ -22,7 +24,7 @@ def physical_pipeline():
         "--one-shot-bufferize=bufferize-function-boundaries=true buffer-alignment=64",
         "--canonicalize",
         "--cse",
-        "--linalg-to-boscame=enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias",
+        "--linalg-to-boscame=plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias",
         "--promote-buffers-to-stack",
         "--canonicalize",
         "--cse",
@@ -203,6 +205,18 @@ def main():
         0
     ]
     assert "vle32.v" in ordered_asm, ordered_asm
+    # LLVM retains the ordered reduction in its raw output. The shared FPGA
+    # filter then applies the default scalar fallback to this real CFG. Keep
+    # this function isolated: cancellation's fixture uses unrelated whole-
+    # register moves that deliberately remain outside the NR allowlist.
+    fpga_ordered = transform(".text\nordered_sum:\n" + ordered_asm)
+    assert "vfredosum.vs" not in fpga_ordered, fpga_ordered
+    assert len(re.findall(r"\bfadd\.s\b", fpga_ordered)) == 1, fpga_ordered
+    assert "vse32.v" in fpga_ordered and "flw" in fpga_ordered
+    assert "vfredosum.vs" in transform(
+        ".text\nordered_sum:\n" + ordered_asm,
+        scalarize_f32_ordered_reductions=False,
+    )
     # This incomplete-graph fixture has descriptors on the scalar allocation,
     # so conservative promotion retains its stack storage. Track stack-derived
     # registers to reject scalarized SPM reads while allowing that fallback.

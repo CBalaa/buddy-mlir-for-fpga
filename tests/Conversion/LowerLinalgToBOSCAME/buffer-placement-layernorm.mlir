@@ -1,8 +1,9 @@
-// RUN: not buddy-opt %S/Inputs/layernorm-197x768-bufferized.mlir --linalg-to-boscame -o /dev/null 2>&1 | FileCheck %s --check-prefix=LEGACY
-// RUN: buddy-opt %S/Inputs/contracts/layernorm.contract.mlir --bosc-ame-plan='plan-report=true' --bosc-ame-emit -o %t 2>%t.plan
+// RUN: not buddy-opt %S/Inputs/layernorm-197x768-bufferized.mlir --linalg-to-boscame=plan-version=1 -o /dev/null 2>&1 | FileCheck %s --check-prefix=LEGACY
+// RUN: buddy-opt %S/Inputs/contracts/layernorm.contract.mlir --bosc-ame-plan='plan-version=1 plan-report=true' --bosc-ame-emit -o %t 2>%t.plan
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
 // RUN: FileCheck %s --check-prefix=IR < %t
 // RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // The retained historical frontend artifact needs regeneration: its global
 // geometry/target configuration is not a neutral contract. The neutral design

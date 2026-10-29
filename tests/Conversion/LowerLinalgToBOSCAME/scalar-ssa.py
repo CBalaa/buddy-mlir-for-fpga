@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t buddy-opt
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Promote private scalar scratch without dropping visible or aliased writes."""
 
 import re
@@ -116,7 +117,9 @@ def function_source(name):
 def main():
     directory, binary = Path(sys.argv[1]), sys.argv[2]
     directory.mkdir(parents=True, exist_ok=True)
-    options = ["--lower-linalg-to-boscame=dma-abi=args_aligned64_nonalias"]
+    options = [
+        "--lower-linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias"
+    ]
     # Preserve every former external-scalar source as an explicit v1 boundary
     # case. The neutral planner has no independent external scalar store or
     # private-to-private scalar copy recipe.

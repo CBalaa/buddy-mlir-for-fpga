@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check actual optimized AME assembly, including frontend-padded K tiles."""
 
 import re
@@ -98,7 +99,7 @@ def main():
         [
             str(opt),
             str(tail),
-            "--linalg-to-boscame=dma-abi=args_aligned64_nonalias",
+            "--linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias",
         ],
         capture_output=True,
         text=True,
@@ -118,7 +119,7 @@ def main():
             [
                 opt,
                 module,
-                "--linalg-to-boscame=enable-spm-dma=true enable-ame=true "
+                "--linalg-to-boscame=plan-version=1 enable-spm-dma=true enable-ame=true "
                 "dma-abi=args_aligned64_nonalias target=nr-fpga",
                 "--lower-bosc-ame",
                 "-o",

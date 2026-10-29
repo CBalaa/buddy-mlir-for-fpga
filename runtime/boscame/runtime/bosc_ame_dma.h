@@ -207,6 +207,46 @@ uint64_t bosc_ame_dma_start(uint32_t channel, uint64_t src, uint64_t dst,
  */
 void bosc_ame_dma_wait(uint32_t channel, uint64_t src_token);
 
+/* Explicit NH/E6-only runtime selection. Generic and host builds retain the
+ * atomic allocator. A value of 1 requires the delivered single E6 hart0 flow,
+ * real disjoint NH/E6 linker stacks, and no resumable interrupt/NMI/monitor
+ * allocator entry. Its bounded metadata operations save/clear/restore MIE;
+ * generated kernel execution and logical nested-frame lifetimes stay unmasked.
+ */
+#ifndef BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6
+#define BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6 0
+#endif
+#if BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6 != 0 &&                                  \
+    BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6 != 1
+#error "BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6 must be 0 or 1"
+#endif
+
+/* Managed private DDR frame ABI. The linker reserves a nonoverlapping arena
+ * with __bosc_ame_private_ddr_start/end inside __nh_e6_ddr_window_start/end.
+ * Payload and both 64-byte guards are invocation-local; nested calls are LIFO.
+ * Other harts/concurrent allocator entry, exhaustion, malformed releases and
+ * overwritten guards trap through the failure hook. Payload is uninitialized.
+ * Calls must occur before/after all AME register lifetimes, respectively.
+ * CPU accesses use bosc_ame_ddr_read_begin/write_begin exactly as external DDR.
+ */
+#define BOSC_AME_PRIVATE_DDR_MAX_PAYLOAD UINT64_C(262016)
+enum {
+  BOSC_AME_PRIVATE_DDR_FAIL_WINDOW = 1,
+  BOSC_AME_PRIVATE_DDR_FAIL_CAPACITY = 2,
+  BOSC_AME_PRIVATE_DDR_FAIL_OWNER = 3,
+  BOSC_AME_PRIVATE_DDR_FAIL_LIFETIME = 4,
+  BOSC_AME_PRIVATE_DDR_FAIL_GUARD = 5,
+  BOSC_AME_PRIVATE_DDR_FAIL_CONCURRENT = 6
+};
+typedef void (*bosc_ame_private_ddr_fail_fn)(uint32_t reason, uint64_t address,
+                                             uint64_t bytes);
+extern bosc_ame_private_ddr_fail_fn bosc_ame_private_ddr_fail_hook;
+extern uint64_t bosc_ame_private_ddr_peak_bytes;
+extern uint64_t bosc_ame_private_ddr_acquires;
+extern uint64_t bosc_ame_private_ddr_releases;
+uint64_t bosc_ame_private_ddr_acquire(uint64_t bytes);
+void bosc_ame_private_ddr_release(uint64_t address, uint64_t bytes);
+
 #ifdef __cplusplus
 }
 #endif

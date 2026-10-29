@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t buddy-opt
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Fixed SCF windows, in-place sums, independent pitches and boundary task IDs."""
 
 import re
@@ -13,7 +14,7 @@ sys.path.insert(0, str(TOOLS))
 from boscame_buffer_sim import Machine  # noqa: E402
 
 PASS = (
-    "--linalg-to-boscame=buffer-placement=true enable-spm-dma=true "
+    "--linalg-to-boscame=plan-version=1 buffer-placement=true enable-spm-dma=true "
     "dma-abi=args_aligned64_nonalias plan-report=true"
 )
 

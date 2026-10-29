@@ -2,6 +2,10 @@ add_mlir_library(LowerLinalgToBOSCAMEPass
   LowerLinalgToBOSCAME.cpp
   BOSCAMEBufferNormalization.cpp
   BOSCAMEOrderedMatmul.cpp
+  BOSCAMEDDRPlan.cpp
+  BOSCAMEFloatSchedule.cpp
+  BOSCAMEStreamPlan.cpp
+  BOSCAMERegisterSchedule.cpp
   BOSCAMEPlan.cpp
   BOSCAMEPlanEmit.cpp
   BOSCAMEPlanVerify.cpp

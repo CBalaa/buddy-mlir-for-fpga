@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check that fixed SPM addresses cannot escape their logical private roots."""
 
 import subprocess
@@ -96,7 +97,12 @@ module {
         ("yielded_root", yielded),
         ("unmodeled_completion", unmodeled),
     ):
-        rejected(name, text, "--kernel-contract-annotate", "--bosc-ame-plan")
+        rejected(
+            name,
+            text,
+            "--kernel-contract-annotate",
+            "--bosc-ame-plan=plan-version=1",
+        )
 
     # The proof also covers existing physical windows normalized by adapters.
     fixed = (
@@ -119,13 +125,19 @@ module {
             ": memref<64xi32, strided<[1]>, #bosc_ame.spm<0>> -> index",
         )
     )
-    for entry in ("--linalg-to-boscame", "--lower-linalg-to-boscame"):
+    for entry in (
+        "--linalg-to-boscame=plan-version=1",
+        "--lower-linalg-to-boscame=plan-version=1",
+    ):
         rejected("fixed_" + entry[2:], fixed, entry)
 
     # No new graph event is needed for a pure address extraction. Verify and
     # emit must reject it even when the supplied plan has otherwise valid IDs.
     baseline = invoke(
-        "baseline", SOURCE, "--kernel-contract-annotate", "--bosc-ame-plan"
+        "baseline",
+        SOURCE,
+        "--kernel-contract-annotate",
+        "--bosc-ame-plan=plan-version=1",
     )
     assert baseline.returncode == 0, baseline.stderr
     planned = (
@@ -154,7 +166,7 @@ module {
         "local_completed_alias",
         local,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-emit",
     )
     assert result.returncode == 0, result.stderr
@@ -189,7 +201,7 @@ module {
             name,
             text,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan",
+            "--bosc-ame-plan=plan-version=1",
             "--bosc-ame-emit",
             "--lower-bosc-ame",
         )

@@ -1,8 +1,9 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/reader.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=READER
-// RUN: not buddy-opt %t/produced.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=PRODUCED
-// RUN: not buddy-opt %t/entry.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ENTRY
-// RUN: not buddy-opt %t/fresh.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=FRESH
+// RUN: not buddy-opt %t/reader.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=READER
+// RUN: not buddy-opt %t/produced.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=PRODUCED
+// RUN: not buddy-opt %t/entry.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ENTRY
+// RUN: not buddy-opt %t/fresh.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=FRESH
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // Retain all original helper/caller alias relationships. The reader has a
 // potentially overlapping helper operands without an exact-address proof;

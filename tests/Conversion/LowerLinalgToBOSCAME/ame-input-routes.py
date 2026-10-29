@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check AME A/B route choices against exact static read traffic."""
 
 import subprocess
@@ -41,7 +42,7 @@ def lower(opt, input_path, report=True, spm_enabled=True):
         [
             str(opt),
             str(input_path),
-            f"--linalg-to-boscame={options}",
+            f"--linalg-to-boscame=plan-version=1 {options}",
             "-o",
             "-",
         ],

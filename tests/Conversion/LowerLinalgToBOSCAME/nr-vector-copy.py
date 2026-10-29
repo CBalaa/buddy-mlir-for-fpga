@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check compiled NR DMA copies and exact guarded copy/vector-fill results."""
 
 import re
@@ -193,7 +194,7 @@ def main():
             [
                 str(opt),
                 "-",
-                "--linalg-to-boscame=enable-spm-dma=true dma-abi=args_aligned64_nonalias",
+                "--linalg-to-boscame=plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias",
             ],
             input="module {func.func " + function + "}",
             text=True,

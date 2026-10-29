@@ -41,10 +41,12 @@ struct FixedSPMBuffer {
 };
 
 /// Physical placement debugging does not affect semantic fusion. Disabling
-/// automatic placement permits fixed input windows and proven direct routes,
-/// and diagnoses any remaining private root that needs a new SPM window.
+/// automatic placement disables optional SPM reuse optimization; required
+/// materializations still use DDR, and explicit fixed windows remain valid.
 struct PlanOptions {
   bool automaticPlacement = true;
+  /// V1 is a frozen compatibility/reference planner; production defaults to V2.
+  int64_t version = 2;
 };
 
 /// Select and record target routes on a target-independent buffer contract.

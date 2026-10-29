@@ -7,11 +7,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "Analysis/KernelContract.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEAccumulatorPlacement.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEDDRPlan.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEFloatSchedule.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEHotAccumulator.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPointwise.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMERegisterSchedule.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEStreamPlan.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMETargetInfo.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEZeroInit.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/Endpoint.h"
 #include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -207,9 +214,13 @@ public:
     auto version = module->getAttrOfType<IntegerAttr>("plan.version");
     auto profile = module->getAttrOfType<StringAttr>("plan.target_profile");
     require(module,
-            version && version.getInt() == 1 && profile &&
-                profile.getValue() == "nr-fpga",
-            "requires plan.version=1 and plan.target_profile=nr-fpga");
+            version && (version.getInt() == 1 || version.getInt() == 2) &&
+                profile && profile.getValue() == "nr-fpga",
+            "requires plan.version=1 or 2 and plan.target_profile=nr-fpga");
+    if (isV2() &&
+        (failed(verifyRegisterSchedules(module)) ||
+         failed(verifyStreams(module)) || failed(verifyFloatSchedules(module))))
+      return failure();
     for (auto function : module.getOps<func::FuncOp>())
       if (!function.isExternal())
         verifyFunction(function);
@@ -217,6 +228,10 @@ public:
   }
 
 private:
+  bool isV2() const {
+    auto version = module->getAttrOfType<IntegerAttr>("plan.version");
+    return version && version.getInt() == 2;
+  }
   void require(Operation *op, bool condition, const Twine &message) {
     if (!condition) {
       op->emitError() << "invalid BOSCAME plan: " << message;
@@ -282,10 +297,20 @@ private:
       bool carrier =
           ((name == "plan.version" || name == "plan.target_profile") &&
            isa<ModuleOp>(op)) ||
+          (name == "plan.automatic_spm" && isV2() && isa<ModuleOp>(op)) ||
           ((name == "plan.budget" || name == "plan.task_map" ||
             name == "plan.source_task_count") &&
            isa<func::FuncOp>(op)) ||
+          (isV2() &&
+           (name == "plan.stream" || name == "plan.stream_virtual" ||
+            name == "plan.register_schedule" ||
+            name == "plan.register_member" || name == "plan.register_virtual" ||
+            name == "plan.float_schedule" || name == "plan.float_member" ||
+            name == "plan.float_virtual")) ||
+          (name == "plan.cpu" && isV2()) ||
           (name == "plan.buffer" &&
+           isa<memref::AllocOp, memref::AllocaOp>(op)) ||
+          (name == "plan.fixed_input" && isV2() &&
            isa<memref::AllocOp, memref::AllocaOp>(op)) ||
           (name == "plan.transfer" && isa<memref::CopyOp>(op)) ||
           (name == "plan.route" && isa<linalg::MatmulOp>(op)) ||
@@ -297,6 +322,12 @@ private:
           (name == "plan.loop" && isa<scf::ForOp>(op)) ||
           (name == "plan.scope" && isa<scf::IfOp>(op));
       require(op, carrier, "unknown plan or unsupported carrier: " + name);
+      if (isV2() &&
+          (name == "plan.stream" || name == "plan.stream_virtual" ||
+           name == "plan.register_schedule" || name == "plan.register_member" ||
+           name == "plan.register_virtual" || name == "plan.float_schedule" ||
+           name == "plan.float_member" || name == "plan.float_virtual"))
+        continue; // Dedicated verifier reconstructs the complete recipe.
       if (name == "plan.version") {
         auto version = dyn_cast<IntegerAttr>(attr.getValue());
         require(op, version && version.getType().isInteger(32),
@@ -306,6 +337,11 @@ private:
       if (name == "plan.target_profile") {
         require(op, isa<StringAttr>(attr.getValue()),
                 "plan.target_profile must have string type");
+        continue;
+      }
+      if (name == "plan.automatic_spm") {
+        require(op, isa<BoolAttr>(attr.getValue()),
+                "plan.automatic_spm must have bool type");
         continue;
       }
       if (name == "plan.source_task_count") {
@@ -324,15 +360,64 @@ private:
                    {"action"});
         continue;
       }
+      if (name == "plan.fixed_input") {
+        auto fixed = dyn_cast<DictionaryAttr>(attr.getValue());
+        fields(op, fixed, {"bank", "offset", "capacity"});
+        require(op,
+                fixed && fixed.size() == 3 &&
+                    fixed.getAs<IntegerAttr>("bank") &&
+                    fixed.getAs<IntegerAttr>("offset") &&
+                    fixed.getAs<IntegerAttr>("capacity"),
+                "fixed input requires exactly bank, offset and capacity");
+        if (fixed) {
+          int64_t bank = integer(fixed, "bank");
+          int64_t offset = integer(fixed, "offset");
+          int64_t capacity = integer(fixed, "capacity");
+          require(op,
+                  bank >= 0 && bank < 2 && offset >= 0 && offset % 64 == 0 &&
+                      capacity > 0 && capacity <= 131072 &&
+                      offset <= 131072 - capacity,
+                  "fixed input exceeds the aligned nr-fpga SPM window");
+        }
+        continue;
+      }
       auto p = dyn_cast<DictionaryAttr>(attr.getValue());
       fields(op, p,
-             {"bank", "offset", "capacity", "channel", "vector_bytes", "rows",
-              "row_bytes", "elements", "axis", "trips", "spm_banks",
-              "bank_capacity", "completion", "total_bytes", "temp_bytes",
-              "consumer", "lanes"},
-             {"level", "role", "engine", "from", "to", "guard", "wait", "kind",
-              "tail", "fp_policy", "strategy", "reason", "order",
-              "matrix_rejection", "recipe", "temporary_window", "ordering"},
+             {"bank",
+              "offset",
+              "capacity",
+              "channel",
+              "vector_bytes",
+              "rows",
+              "row_bytes",
+              "elements",
+              "axis",
+              "trips",
+              "spm_banks",
+              "bank_capacity",
+              "completion",
+              "total_bytes",
+              "temp_bytes",
+              "consumer",
+              "lanes",
+              "alignment",
+              "loop_bytes",
+              "boundary_bytes",
+              "pitch",
+              "ddr_cycles_x2",
+              "spm_cycles_x2",
+              "margin_cycles_x2",
+              "saving_cycles_x2"},
+             {"level",    "role",
+              "engine",   "from",
+              "to",       "guard",
+              "wait",     "kind",
+              "tail",     "fp_policy",
+              "strategy", "reason",
+              "order",    "matrix_rejection",
+              "recipe",   "temporary_window",
+              "ordering", "profile",
+              "evidence", "mode"},
              {"spm_window_reuse", "share_spm_windows"});
       if (!p)
         continue;
@@ -510,8 +595,11 @@ private:
     Value storage = root(value);
     if (privateRoot(storage)) {
       auto p = placement(value);
-      return string(p, "level") == "spm" &&
-             integer(p, "offset") % alignmentBytes == 0;
+      return (string(p, "level") == "spm" &&
+              integer(p, "offset") % alignmentBytes == 0) ||
+             (isV2() && string(p, "level") == "ddr" &&
+              integer(p, "alignment") >= alignmentBytes &&
+              integer(p, "alignment") % alignmentBytes == 0);
     }
     auto abi = dict(module, "contract.abi");
     int64_t alignment = integer(abi, "args_aligned_bytes");
@@ -528,7 +616,8 @@ private:
   void bounds(Operation *op, Value value) {
     auto p = placement(value);
     auto range = byteBounds(value);
-    if (string(p, "level") == "spm") {
+    if (string(p, "level") == "spm" ||
+        (isV2() && string(p, "level") == "ddr")) {
       require(
           op,
           range && range->first >= 0 && range->second <= integer(p, "capacity"),
@@ -562,8 +651,17 @@ private:
                   string(selection, "reason") == "explicit-scalar-input",
               "scalar route requires an explicit scalar operand");
     } else if (level == "ddr") {
-      require(op, argumentRoot(root(value)),
-              "direct DDR operand must refer to an external argument");
+      auto kind = classifyEndpoint(value);
+      require(op,
+              kind == EndpointKind::ExternalDDR ||
+                  (isV2() && string(p, "level") == "ddr" &&
+                   kind == EndpointKind::PrivateAllocation),
+              "DDR operand requires an external entry argument or a verified "
+              "private frame candidate");
+      if (kind == EndpointKind::PrivateAllocation)
+        require(op, succeeded(verifyPrivateEndpoint(op, value)),
+                "private AME DDR endpoint lacks a bounded invocation-local "
+                "frame proof");
       require(op, aligned(value),
               "direct DDR address is not proven 64-byte aligned");
       bounds(op, value);
@@ -583,9 +681,194 @@ private:
       require(op, false, "unsupported operand route");
     }
   }
+  void
+  verifyMeasuredAccumulatorRecipe(Value storage,
+                                  const MeasuredAccumulatorProfile &profile) {
+    auto function = storage.getDefiningOp()->getParentOfType<func::FuncOp>();
+    Builder builder(module.getContext());
+    auto i = [&](StringRef key, int64_t value) {
+      return builder.getNamedAttr(key, builder.getI64IntegerAttr(value));
+    };
+    auto s = [&](StringRef key, StringRef value) {
+      return builder.getNamedAttr(key, builder.getStringAttr(value));
+    };
+    auto d = [&](ArrayRef<NamedAttribute> fields) {
+      return builder.getDictionaryAttr(fields);
+    };
+    auto binding = [&](int64_t operand, int64_t size, bool spm,
+                       StringRef reason) {
+      NamedAttrList fields({i("operand", operand), i("bytes", size),
+                            s("level", spm ? "spm" : "ddr"),
+                            s("reason", reason)});
+      if (spm) {
+        fields.append(i("bank", 0));
+        fields.append(i("offset", 0));
+      }
+      return fields.getDictionary(module.getContext());
+    };
+    DenseMap<Operation *, std::pair<StringRef, DictionaryAttr>> recipes;
+    auto expect = [&](Operation *op, StringRef name, DictionaryAttr expected) {
+      recipes[op] = {name, expected};
+      require(op, dict(op, name) == expected,
+              "measured hot accumulator requires the exact calibrated "
+              "execution recipe: " +
+                  name);
+    };
+    linalg::MatmulOp matmul;
+    linalg::FillOp fill;
+    for (Operation *user : storage.getUsers()) {
+      if (auto candidate = dyn_cast<linalg::MatmulOp>(user))
+        matmul = candidate;
+      if (auto candidate = dyn_cast<linalg::FillOp>(user))
+        fill = candidate;
+    }
+    require(storage.getDefiningOp(), bool(matmul) && bool(fill),
+            "measured hot accumulator lost its source producer or fill");
+    if (!matmul || !fill)
+      return;
+    bool normal = profile.mode == MeasuredAccumulatorMode::NormalPostAdd;
+    NamedAttrList route(
+        {s("engine", "ame"),
+         builder.getNamedAttr("tile", d({i("m", 32), i("n", 64), i("k", 64)})),
+         builder.getNamedAttr("subtiles", d({i("n", 1), i("k", 2)})),
+         builder.getNamedAttr(
+             "a", binding(0, 4096, false, "legal-minimum-external-traffic")),
+         builder.getNamedAttr(
+             "b", binding(1, 8192, false, "legal-minimum-external-traffic")),
+         builder.getNamedAttr("accumulator",
+                              binding(2, 8192, true, "private-accumulator")),
+         builder.getNamedAttr(
+             "output", binding(2, 8192, true, "same-accumulator-window"))});
+    if (normal) {
+      expect(fill, "plan.fill",
+             d({s("level", "spm"), s("engine", "rvv"), i("vector_bytes", 64),
+                i("rows", 32), i("row_bytes", 256), s("kind", "overwrite")}));
+    } else {
+      int64_t fillID = integer(dict(fill, "contract.task"), "id");
+      int64_t matmulID = integer(dict(matmul, "contract.task"), "id");
+      require(fill, fillID >= 0 && matmulID >= 0,
+              "measured deferred zero requires its source task identities");
+      expect(fill, "plan.fill",
+             d({s("level", "spm"), s("engine", "ame"),
+                s("kind", "deferred-zero"), i("consumer", matmulID)}));
+      route.append(builder.getNamedAttr(
+          "initialization",
+          d({s("kind", "first-iteration-zero"), i("task", fillID)})));
+    }
+    expect(matmul, "plan.route", route.getDictionary(module.getContext()));
+    auto loop = cast<scf::ForOp>(matmul->getParentOp());
+    expect(loop, "plan.loop",
+           d({i("trips", profile.trips),
+              builder.getNamedAttr("spm_window_reuse",
+                                   builder.getBoolAttr(true))}));
+    for (Operation &op : function.getBody().front()) {
+      if (auto copy = dyn_cast<memref::CopyOp>(op)) {
+        if (copy.getSource() != storage) {
+          auto recipe = getDDRRecipe(copy);
+          require(
+              copy, normal && succeeded(recipe),
+              "measured old-C snapshot requires the scalar DDR copy recipe");
+          if (succeeded(recipe))
+            expect(copy, "plan.cpu", *recipe);
+          continue;
+        }
+        auto destination =
+            cast<memref::ReinterpretCastOp>(copy.getTarget().getDefiningOp());
+        int64_t ddrStride = destination.getSource() == function.getArgument(2)
+                                ? profile.pitch * 4
+                                : 256;
+        expect(copy, "plan.transfer",
+               d({s("role", "output"), s("engine", "dma"), i("channel", 0),
+                  s("from", "spm"), s("to", "ddr"),
+                  builder.getNamedAttr(
+                      "chunks",
+                      d({i("count", 32), i("bytes", 256),
+                         i("ddr_stride", ddrStride), i("spm_stride", 256)})),
+                  s("wait", "after-each-chunk"),
+                  s("reason", "bounded-external-boundary")}));
+      } else if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
+        SmallVector<Attribute> operands;
+        operands.push_back(binding(0, 8192, true, "pointwise-memory-operand"));
+        operands.push_back(binding(1, 8192, false, "pointwise-memory-operand"));
+        operands.push_back(binding(2, 8192, true, "pointwise-memory-operand"));
+        require(generic, normal,
+                "overwrite measured recipe cannot contain a post-add");
+        expect(
+            generic, "plan.vector",
+            d({s("engine", "rvv"), i("vector_bytes", 64), i("elements", 2048),
+               i("lanes", 16), s("tail", "none"),
+               builder.getNamedAttr("operands", builder.getArrayAttr(operands)),
+               s("fp_policy", "preserve")}));
+      }
+    }
+    // Equivalent but differently tiled or competing recipes are outside the
+    // measured complete-adapter table, even when the generic verifier could
+    // establish their standalone legality.
+    function.walk([&](Operation *op) {
+      if (op == function)
+        return;
+      auto expected = recipes.find(op);
+      for (NamedAttribute attr : op->getAttrs()) {
+        StringRef name = attr.getName().strref();
+        if (!name.starts_with("plan."))
+          continue;
+        bool allowed =
+            isa<memref::AllocOp, memref::AllocaOp>(op)
+                ? name == "plan.buffer"
+                : expected != recipes.end() && name == expected->second.first;
+        require(op, allowed,
+                "measured hot accumulator cannot contain an additional "
+                "or alternative execution recipe: " +
+                    name);
+      }
+    });
+  }
   void verifyFunction(func::FuncOp function) {
     placements.clear();
     SmallVector<Operation *> allocations;
+    DenseMap<Operation *, DictionaryAttr> fixedPlacements;
+    int64_t reservedHighWater[2] = {0, 0};
+    bool automaticSPM = true;
+    if (auto automatic = module->getAttrOfType<BoolAttr>("plan.automatic_spm"))
+      automaticSPM = automatic.getValue();
+    if (isV2()) {
+      Builder builder(module.getContext());
+      // Target constraints are reserved before any automatic candidate,
+      // regardless of their source order or the lifetime of a hot P tile.
+      function.walk([&](Operation *op) {
+        if (!isa<memref::AllocOp, memref::AllocaOp>(op))
+          return;
+        auto fixed = dict(op, "plan.fixed_input");
+        auto p = dict(op, "plan.buffer");
+        if (!fixed) {
+          require(op, string(p, "role") != "fixed-input",
+                  "fixed-input placement requires its target input record");
+          return;
+        }
+        int64_t bank = integer(fixed, "bank");
+        int64_t offset = integer(fixed, "offset");
+        int64_t capacity = integer(fixed, "capacity");
+        auto expected = builder.getDictionaryAttr(
+            {builder.getNamedAttr("level", builder.getStringAttr("spm")),
+             builder.getNamedAttr("bank", builder.getI64IntegerAttr(bank)),
+             builder.getNamedAttr("offset", builder.getI64IntegerAttr(offset)),
+             builder.getNamedAttr("capacity",
+                                  builder.getI64IntegerAttr(capacity)),
+             builder.getNamedAttr("role",
+                                  builder.getStringAttr("fixed-input"))});
+        fixedPlacements[op] = expected;
+        require(
+            op, p == expected,
+            "fixed target input requires its exact canonical SPM placement");
+        int64_t end;
+        bool valid = bank >= 0 && bank < 2 && offset >= 0 && offset % 64 == 0 &&
+                     capacity > 0 && capacity <= 131072 &&
+                     !llvm::AddOverflow(offset, capacity, end) && end <= 131072;
+        require(op, valid, "fixed target input has invalid SPM bounds");
+        if (valid)
+          reservedHighWater[bank] = std::max(reservedHighWater[bank], end);
+      });
+    }
     function.walk([&](Operation *op) {
       if (!isa<memref::AllocOp, memref::AllocaOp>(op))
         return;
@@ -614,7 +897,96 @@ private:
       require(op, legal && capacity >= needed,
               "planned buffer capacity is smaller than its storage layout");
       StringRef level = string(p, "level");
-      if (level == "host") {
+      bool virtualRoot =
+          isV2() && (isStreamVirtual(op) || isRegisterScheduleVirtual(op) ||
+                     isFloatScheduleVirtual(op));
+      if (isV2()) {
+        bool hotClaim = string(p, "role") == "hot-accumulator";
+        for (StringRef key :
+             {"loop_bytes", "boundary_bytes", "profile", "evidence", "mode",
+              "pitch", "ddr_cycles_x2", "spm_cycles_x2", "margin_cycles_x2",
+              "saving_cycles_x2"})
+          hotClaim |= bool(p.get(key));
+        if (!fixedPlacements.count(op) && !virtualRoot) {
+          // A fixed old-C snapshot on bank1 changes the measured epilogue
+          // even when bank0/offset0 is free. The first table represents no
+          // additional fixed workspace in either bank.
+          auto expected = getHotAccumulatorPlacement(
+              op->getResult(0), automaticSPM,
+              reservedHighWater[0] == 0 && fixedPlacements.empty());
+          if (expected) {
+            require(op, p == expected,
+                    "hot accumulator placement must equal its canonical "
+                    "source proof, measured profile and supported window");
+            if (string(expected, "level") == "spm") {
+              auto profile = analyzeMeasuredAccumulator(op->getResult(0));
+              require(op, bool(profile),
+                      "positive measured placement requires its exact source "
+                      "profile");
+              if (profile)
+                verifyMeasuredAccumulatorRecipe(op->getResult(0), *profile);
+            }
+          } else {
+            require(op, !hotClaim,
+                    "hot accumulator claim has no closed source reuse proof");
+            // Unselected workspaces are part of the measured surrounding
+            // recipe too. In particular normal old-C snapshots must not be
+            // relabelled into unmeasured SPM work by editing their plan.
+            auto size = getStaticStorageBytes(op->getResult(0));
+            require(op, bool(size),
+                    "ordinary V2 workspace requires bounded static storage");
+            if (size) {
+              Builder builder(module.getContext());
+              auto workspace = builder.getDictionaryAttr(
+                  {builder.getNamedAttr("level", builder.getStringAttr("ddr")),
+                   builder.getNamedAttr("capacity",
+                                        builder.getI64IntegerAttr(*size)),
+                   builder.getNamedAttr("alignment",
+                                        builder.getI64IntegerAttr(64)),
+                   builder.getNamedAttr("role",
+                                        builder.getStringAttr("workspace")),
+                   builder.getNamedAttr(
+                       "reason",
+                       builder.getStringAttr("reuse-benefit-unproven"))});
+              require(op, p == workspace,
+                      "ordinary V2 workspace must retain its canonical DDR "
+                      "placement until a measured recipe selects it");
+            }
+          }
+        } else {
+          require(op, !hotClaim,
+                  "fixed or virtual storage cannot claim automatic hot "
+                  "accumulator placement");
+        }
+      }
+      if (virtualRoot)
+        require(op, level == "virtual",
+                "execution recipe cannot consume a materialized or fixed "
+                "storage root as a virtual value");
+      if (isV2() && level == "virtual") {
+        require(op,
+                isStreamVirtual(op) || isRegisterScheduleVirtual(op) ||
+                    isFloatScheduleVirtual(op),
+                "virtual root must belong to a verified execution recipe");
+      } else if (isV2() && level == "ddr") {
+        require(op,
+                legal && integer(p, "alignment") == 64 &&
+                    op->getAttrOfType<IntegerAttr>("alignment") &&
+                    op->getAttrOfType<IntegerAttr>("alignment").getInt() >= 64,
+                "private DDR storage requires a bounded aligned frame slot");
+        // Hoisting/reusing a frame slot is safe only for synchronous local
+        // accesses. Captured addresses would retain an iteration's identity.
+        require(op,
+                localCompletedSPMUses(op->getResult(0), &function.getBody()),
+                "private DDR frame slot requires non-escaping completed uses");
+        // A single entry frame slot cannot replace one allocation per
+        // concurrent iteration. Unknown region scopes provide no such proof.
+        if (Operation *ancestor = unsupportedSPMAncestor(op))
+          require(op, false,
+                  "private DDR frame slot requires serial execution inside "
+                  "func.func; unsupported ancestor " +
+                      ancestor->getName().getStringRef());
+      } else if (level == "host") {
         require(op, type.getRank() == 0 && legal,
                 "host placement only supports static rank-zero storage");
         for (Operation *parent = op->getParentOp();
@@ -651,6 +1023,63 @@ private:
                 "memory accesses");
       }
     });
+    if (isV2())
+      function.walk([&](Operation *op) {
+        bool privateDDR = llvm::is_contained(allocations, op) &&
+                          string(dict(op, "plan.buffer"), "level") == "ddr";
+        for (Value operand : op->getOperands())
+          if (isa<BaseMemRefType>(operand.getType()) &&
+              string(placements.lookup(root(operand)), "level") == "ddr")
+            privateDDR = true;
+        if (privateDDR)
+          if (Operation *ancestor = unsupportedSPMAncestor(op))
+            require(op, false,
+                    "private DDR frame slot requires serial completed "
+                    "accesses; unsupported ancestor " +
+                        ancestor->getName().getStringRef());
+      });
+    // Only AME-accessed DDR roots consume the managed operand-window frame.
+    // Recompute the same unique aligned slots as emission, independent of
+    // metadata. Ordinary CPU-only workspaces retain their existing storage.
+    if (isV2()) {
+      DenseSet<Value> frameRoots;
+      int64_t frameBytes = 0;
+      auto account = [&](Operation *op, Value operand) {
+        if (classifyEndpoint(operand) != EndpointKind::PrivateAllocation)
+          return;
+        Value storage = getEndpointRoot(operand);
+        if (!frameRoots.insert(storage).second)
+          return;
+        auto size = getStaticStorageBytes(storage);
+        int64_t slot = size && *size <= kPrivateDDRFrameMaxBytes
+                           ? llvm::alignTo(*size, int64_t(64))
+                           : kPrivateDDRFrameMaxBytes + 1;
+        require(op,
+                size && slot <= kPrivateDDRFrameMaxBytes &&
+                    !llvm::AddOverflow(frameBytes, slot, frameBytes) &&
+                    frameBytes <= kPrivateDDRFrameMaxBytes,
+                "aggregate private AME DDR frame exceeds guarded "
+                "operand-window capacity");
+      };
+      function.walk([&](Operation *op) {
+        if (auto matmul = dyn_cast<linalg::MatmulOp>(op)) {
+          auto route = dict(matmul, "plan.route");
+          if (!route)
+            return;
+          for (auto [name, operand] :
+               llvm::zip(ArrayRef<StringRef>{"a", "b", "accumulator"},
+                         matmul->getOperands()))
+            if (string(dict(route, name), "level") == "ddr")
+              account(op, operand);
+        } else if (auto copy = dyn_cast<memref::CopyOp>(op)) {
+          auto transfer = dict(copy, "plan.transfer");
+          if (string(transfer, "from") == "ddr")
+            account(op, copy.getSource());
+          if (string(transfer, "to") == "ddr")
+            account(op, copy.getTarget());
+        }
+      });
+    }
     // Private logical roots are disjoint before placement, but a callee may
     // use the same physical SPM addresses. V1 has no call-frame/workspace
     // contract, including for opaque callees, so do not turn that absence of
@@ -751,8 +1180,22 @@ private:
     function.walk([&](Operation *op) { verifyOperation(op); });
   }
   void verifyOperation(Operation *op) {
+    if (isV2() && (isStreamMember(op) || isRegisterScheduleMember(op) ||
+                   isFloatScheduleMember(op)))
+      return;
     if (isa<memref::AllocOp, memref::AllocaOp>(op))
       return;
+    if (op->hasAttr("plan.cpu")) {
+      require(op, isV2() && succeeded(verifyDDRRecipe(op)),
+              "invalid v2 DDR computation");
+      require(op, !isa<linalg::FillOp>(op) || !op->hasAttr("plan.fill"),
+              "a real CPU fill and a deferred/vector fill are competing "
+              "execution recipes");
+      for (Value operand : op->getOperands())
+        if (isa<BaseMemRefType>(operand.getType()))
+          bounds(op, operand);
+      return;
+    }
     if (auto copy = dyn_cast<memref::CopyOp>(op)) {
       verifyTransfer(copy);
       return;
@@ -1267,11 +1710,16 @@ private:
     auto targetType = dyn_cast<MemRefType>(copy.getTarget().getType());
     int64_t element = sourceType ? bytes(sourceType.getElementType()) : 0;
     int64_t alignment = matrix ? 4 : segmented ? element : 64;
+    auto ddrPlacement = placement(ddr);
+    bool privateDDR = isV2() && privateRoot(root(ddr)) &&
+                      string(ddrPlacement, "level") == "ddr";
+    if (privateDDR && failed(verifyPrivateEndpoint(op, ddr)))
+      invalid = true;
     require(op,
             alignment > 0 && string(window, "level") == "spm" &&
                 integer(window, "bank") == integer(p, "channel") &&
-                argumentRoot(root(ddr)) && aligned(ddr, alignment) &&
-                aligned(spm, alignment),
+                (argumentRoot(root(ddr)) || privateDDR) &&
+                aligned(ddr, alignment) && aligned(spm, alignment),
             "DMA endpoints, channel/bank, or alignment disagree with the plan");
     bounds(op, spm);
     bounds(op, ddr);
@@ -1418,6 +1866,9 @@ private:
     if (auto init = dict(p, "initialization")) {
       auto proof = getZeroAccumulatorInit(matmul);
       auto fillPlan = proof ? dict(proof->fill, "plan.fill") : DictionaryAttr();
+      require(op, bool(proof),
+              "zero accumulator source proof requires an exact private zero "
+              "fill, complete coverage, and first-iteration lifetime");
       require(op,
               proof && dict(op, "contract.task") &&
                   dict(proof->fill, "contract.task") &&
@@ -1431,8 +1882,9 @@ private:
                   string(fillPlan, "kind") == "deferred-zero" &&
                   integer(fillPlan, "consumer") ==
                       integer(dict(op, "contract.task"), "id"),
-              "zero accumulator initialization lacks an exact private zero "
-              "fill, complete coverage, or first-iteration lifetime proof");
+              "zero accumulator initialization and deferred fill recipes "
+              "must name the same producer and consumer; a real fill cannot "
+              "also be deferred");
     }
     require(op, matmul.getCast() == linalg::TypeFn::cast_signed,
             "AME requires signed i8 multiplication");
@@ -1468,10 +1920,11 @@ private:
       bool legal =
           staticType(value, strides) && hasAmeTileLayout(type, layouts[i]);
       if (legal) {
-        int64_t pitch = 0;
-        legal &= !llvm::MulOverflow(strides[i == 1 ? 1 : 0],
-                                    bytes(type.getElementType()), pitch) &&
-                 pitch % 64 == 0;
+        auto layout =
+            computeTileStorageLayout(type, i == 0   ? TileRole::A
+                                           : i == 1 ? TileRole::B
+                                                    : TileRole::Accumulator);
+        legal &= layout && layout->rowStrideBytes % 64 == 0;
         if (i == 0 && ks > 1)
           legal &= k * bytes(type.getElementType()) % 64 == 0;
         if (i == 1 && ks > 1)
@@ -1541,7 +1994,9 @@ private:
         bounds(op, value);
       } else if (level == "ddr") {
         require(
-            op, argumentRoot(root(value)),
+            op,
+            argumentRoot(root(value)) ||
+                (isV2() && string(p, "level") == "ddr"),
             "ordered matmul DDR operand must refer to an external argument");
         bounds(op, value);
       } else if (level == "host") {

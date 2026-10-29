@@ -1,4 +1,5 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --implicit-check-not=bosc_ame.spm.view --implicit-check-not=bosc_ame.dma.start
+// RUN: buddy-opt %s --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --implicit-check-not=bosc_ame.spm.view --implicit-check-not=bosc_ame.dma.start
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // Preserve the original thirteen-input arithmetic chain. Its supported scalar
 // DAG uses external RVV operands directly and needs no private bank capacity.

@@ -1,14 +1,15 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/no-unit-stride.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=STRIDE
-// RUN: not buddy-opt %t/negative-stride.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=STRIDE-SIGN
-// RUN: not buddy-opt %t/unknown-offset.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
-// RUN: not buddy-opt %t/dynamic-shape.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SHAPE
-// RUN: not buddy-opt %t/misaligned.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
-// RUN: not buddy-opt %t/misaligned-row.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
-// RUN: not buddy-opt %t/overlapping-rows.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=OVERLAP
-// RUN: not buddy-opt %t/capacity.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=CAPACITY
-// RUN: buddy-opt %t/simultaneous-capacity.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=DIRECT --implicit-check-not=bosc_ame.dma.start --implicit-check-not=bosc_ame.spm.view
-// RUN: not buddy-opt %t/element-type.mlir --lower-linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ELEMENT
+// RUN: not buddy-opt %t/no-unit-stride.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=STRIDE
+// RUN: not buddy-opt %t/negative-stride.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=STRIDE-SIGN
+// RUN: not buddy-opt %t/unknown-offset.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
+// RUN: not buddy-opt %t/dynamic-shape.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=SHAPE
+// RUN: not buddy-opt %t/misaligned.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
+// RUN: not buddy-opt %t/misaligned-row.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ALIGN
+// RUN: not buddy-opt %t/overlapping-rows.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=OVERLAP
+// RUN: not buddy-opt %t/capacity.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=CAPACITY
+// RUN: buddy-opt %t/simultaneous-capacity.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' | FileCheck %s --check-prefix=DIRECT --implicit-check-not=bosc_ame.dma.start --implicit-check-not=bosc_ame.spm.view
+// RUN: not buddy-opt %t/element-type.mlir --lower-linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ELEMENT
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // The negative cases fail before any AME tile is emitted.
 // Every rejected command must return nonzero; a diagnostic printed alongside

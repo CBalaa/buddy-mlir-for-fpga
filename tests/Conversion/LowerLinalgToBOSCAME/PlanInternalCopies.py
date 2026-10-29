@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Exercise genuine private-to-private copies through transient raw ACC32.
 
 The source is read again after copying, both roots remain separate SPM
@@ -141,7 +142,7 @@ def main():
         planned = invoke(
             text,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan",
+            "--bosc-ame-plan=plan-version=1",
             "--bosc-ame-plan-verify",
         )
         assert planned.returncode == 0, (name, planned.stderr)
@@ -329,7 +330,7 @@ def main():
         reject(
             casted,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan",
+            "--bosc-ame-plan=plan-version=1",
             diagnostic="requires static descriptor offsets",
         )
     for target in ("%sv",):
@@ -339,14 +340,14 @@ def main():
         reject(
             aliased,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan",
+            "--bosc-ame-plan=plan-version=1",
             diagnostic="distinct nonaliasing roots",
         )
     unsupported = text.replace("f32", "f16").replace("0 : f16", "0.0 : f16")
     reject(
         unsupported,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         diagnostic="no legal internal copy recipe",
     )
     rank_one = text.replace("memref.copy %sv, %dv", "memref.copy %src, %dst")
@@ -358,14 +359,14 @@ def main():
     reject(
         rank_one,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         diagnostic="no legal internal copy recipe",
     )
     too_large, _, _ = source(rows=65, cols=1024, pitch=1024)
     reject(
         too_large,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         diagnostic="SPM workspace capacity exceeded",
     )
     call = text.replace(
@@ -379,7 +380,7 @@ def main():
     reject(
         call,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-plan-verify",
     )
 

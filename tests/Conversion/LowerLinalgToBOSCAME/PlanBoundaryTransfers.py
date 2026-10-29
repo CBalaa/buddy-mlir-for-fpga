@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Verify planned DMA/RVV boundaries without extending external buffers.
 
 The production planner chooses the segments. The emitter must consume that
@@ -319,7 +320,7 @@ def main():
         planned = invoke(
             source,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan=plan-report=true",
+            "--bosc-ame-plan=plan-version=1 plan-report=true",
             "--bosc-ame-plan-verify",
         )
         assert planned.returncode == 0, (name, planned.stderr)
@@ -456,7 +457,7 @@ def main():
     halfword = invoke(
         halfword_roundtrip(31),
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
     )
     assert halfword.returncode != 0
     assert "no exact 16-bit RVV boundary-copy recipe" in halfword.stderr

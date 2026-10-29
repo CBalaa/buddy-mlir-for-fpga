@@ -144,6 +144,21 @@ def SpmViewOp : BOSCAME_Op<"spm.view", [Pure]> {
   let hasVerifier = 1;
 }
 
+// Managed invocation-local storage in the platform DDR operand window.
+def DDRFrameOp : BOSCAME_Op<"ddr.frame", [MemoryEffects<[MemAlloc]>]> {
+  let summary = "Acquire a bounded invocation-private DDR frame";
+  let results = (outs AnyMemRef:$frame);
+  let assemblyFormat = "attr-dict `:` type($frame)";
+  let hasVerifier = 1;
+}
+
+def DDRReleaseOp : BOSCAME_Op<"ddr.release", [MemoryEffects<[MemFree]>]> {
+  let summary = "Release a private DDR frame after its final use";
+  let arguments = (ins AnyMemRef:$frame);
+  let assemblyFormat = "$frame attr-dict `:` type($frame)";
+  let hasVerifier = 1;
+}
+
 def DmaStartOp : BOSCAME_Op<"dma.start",
     [DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let summary = "Start an asynchronous contiguous DMA transfer";

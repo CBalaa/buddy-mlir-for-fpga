@@ -1,10 +1,11 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/gemm.mlir --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o %t.default 2>%t.default.stderr
+// RUN: buddy-opt %t/gemm.mlir --linalg-to-boscame='plan-version=1 dma-abi=args_aligned64_nonalias' -o %t.default 2>%t.default.stderr
 // RUN: test ! -s %t.default.stderr
-// RUN: buddy-opt %t/gemm.mlir --linalg-to-boscame='dma-abi=args_aligned64_nonalias plan-report=true' -o %t.reported 2>%t.plan
+// RUN: buddy-opt %t/gemm.mlir --linalg-to-boscame='plan-version=1 dma-abi=args_aligned64_nonalias plan-report=true' -o %t.reported 2>%t.plan
 // RUN: cmp %t.default %t.reported
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
-// RUN: not buddy-opt %t/copy.mlir --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=COPY
+// RUN: not buddy-opt %t/copy.mlir --linalg-to-boscame='plan-version=1 dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=COPY
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // The report reads concrete per-operand choices. One complete tile fits the
 // direct AME recipes and requires no staging. An independent DDR copy has no

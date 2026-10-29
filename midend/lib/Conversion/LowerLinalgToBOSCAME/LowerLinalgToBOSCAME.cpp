@@ -610,8 +610,14 @@ public:
                      llvm::cl::init(128)};
   Option<bool> bufferPlacement{
       *this, "buffer-placement",
-      llvm::cl::desc("Require automatic fixed SPM placement"),
+      llvm::cl::desc("Enable optional automatic SPM placement (V1: required "
+                     "fixed placement)"),
       llvm::cl::init(true)};
+  Option<int64_t> planVersion{
+      *this, "plan-version",
+      llvm::cl::desc(
+          "Plan version (1: frozen compatibility, 2: DDR/register default)"),
+      llvm::cl::init(2)};
   Option<bool> planReport{*this, "plan-report",
                           llvm::cl::desc("Print the concrete plan"),
                           llvm::cl::init(false)};
@@ -721,8 +727,8 @@ public:
         module->removeAttr(spmdma::kDmaAbiAttrName);
       }
       if (!module->hasAttr("plan.version") &&
-          failed(
-              planBOSCAME(module, fixed, PlanOptions{bool(bufferPlacement)})))
+          failed(planBOSCAME(module, fixed,
+                             PlanOptions{bool(bufferPlacement), planVersion})))
         return failure();
       if (failed(verifyBOSCAMEPlan(module)))
         return failure();

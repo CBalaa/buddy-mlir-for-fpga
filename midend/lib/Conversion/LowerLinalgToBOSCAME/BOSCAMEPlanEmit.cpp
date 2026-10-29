@@ -6,13 +6,18 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEDDRPlan.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEFloatSchedule.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEMathApprox.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEOrderedMatmul.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMERegisterSchedule.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEStreamPlan.h"
 #include "Dialect/BOSCAME/BOSCAMEAttrs.h"
 #include "Dialect/BOSCAME/BOSCAMEDialect.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/Endpoint.h"
 #include "Dialect/BOSCAME/SpmDma.h"
 #include "Dialect/BOSCAME/TileOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -129,9 +134,79 @@ void materializeBuffers(ModuleOp module) {
     if (isa<memref::AllocOp, memref::AllocaOp>(op))
       allocations.push_back(op);
   });
+  DenseMap<Operation *, Value> frames;
+  DenseMap<Operation *, int64_t> offsets;
+  auto version = module->getAttrOfType<IntegerAttr>("plan.version");
+  if (version && version.getInt() == 2) {
+    // CPU boundary recipes still access external DDR when every AME private
+    // buffer is in SPM. Their cache visibility must not depend on whether a
+    // managed DDR frame happens to be needed by this physical placement.
+    for (auto function : module.getOps<func::FuncOp>()) {
+      bool hasAME = false, hasCpuDDR = false;
+      function.walk([&](Operation *op) {
+        if (auto route = plan(op, "plan.route"))
+          hasAME |= text(route, "engine") == "ame";
+        if (auto cpu = plan(op, "plan.cpu"))
+          hasCpuDDR |= text(cpu, "engine") == "scalar-ddr";
+      });
+      if (hasAME && hasCpuDDR)
+        module->setAttr("bosc_ame.cpu_ddr_policy",
+                        UnitAttr::get(module.getContext()));
+    }
+    DenseSet<Value> frameRoots;
+    module.walk([&](linalg::MatmulOp matmul) {
+      if (auto route = plan(matmul, "plan.route")) {
+        const StringRef names[] = {"a", "b", "accumulator"};
+        for (auto [name, operand] : llvm::zip(names, matmul->getOperands())) {
+          auto selected = nested(route, name);
+          if (selected && text(selected, "level") == "ddr") {
+            Value root = getEndpointRoot(operand);
+            if (classifyEndpoint(root) == EndpointKind::PrivateAllocation)
+              frameRoots.insert(root);
+          }
+        }
+      }
+    });
+    module.walk([&](memref::CopyOp copy) {
+      if (auto route = plan(copy, "plan.transfer")) {
+        Value ddr;
+        if (text(route, "from") == "ddr")
+          ddr = copy.getSource();
+        else if (text(route, "to") == "ddr")
+          ddr = copy.getTarget();
+        if (ddr && classifyEndpoint(ddr) == EndpointKind::PrivateAllocation)
+          frameRoots.insert(getEndpointRoot(ddr));
+      }
+    });
+    DenseMap<Operation *, int64_t> sizes;
+    for (Operation *op : allocations) {
+      auto p = plan(op, "plan.buffer");
+      if (!p || text(p, "level") != "ddr" ||
+          !frameRoots.contains(op->getResult(0)))
+        continue;
+      auto function = op->getParentOfType<func::FuncOp>();
+      int64_t &size = sizes[function];
+      offsets[op] = size;
+      size +=
+          llvm::alignTo(*getStaticStorageBytes(op->getResult(0)), int64_t(64));
+    }
+    for (auto &[owner, size] : sizes) {
+      auto function = cast<func::FuncOp>(owner);
+      OpBuilder b(&function.getBody().front(),
+                  function.getBody().front().begin());
+      auto frameType = MemRefType::get({size}, b.getI8Type());
+      Value frame = DDRFrameOp::create(b, function.getLoc(), frameType);
+      module->setAttr("bosc_ame.cpu_ddr_policy", b.getUnitAttr());
+      frames[owner] = frame;
+      b.setInsertionPoint(function.getBody().front().getTerminator());
+      DDRReleaseOp::create(b, function.getLoc(), frame);
+    }
+  }
   for (Operation *op : allocations) {
     OpBuilder b(op);
     auto p = plan(op, "plan.buffer");
+    if (!p)
+      continue;
     auto type = cast<MemRefType>(op->getResult(0).getType());
     Value replacement;
     if (text(p, "level") == "spm") {
@@ -142,6 +217,24 @@ void materializeBuffers(ModuleOp module) {
       replacement =
           SpmViewOp::create(b, op->getLoc(), spmType, b.getI32IntegerAttr(bank),
                             b.getI64IntegerAttr(number(p, "offset")));
+    } else if (auto found = offsets.find(op); found != offsets.end()) {
+      Value frame = frames[op->getParentOfType<func::FuncOp>()];
+      auto storageType = type;
+      int64_t storageOffset;
+      SmallVector<int64_t> storageStrides;
+      (void)type.getStridesAndOffset(storageStrides, storageOffset);
+      if (!type.getLayout().isIdentity())
+        storageType =
+            MemRefType::get({*getStaticStorageBytes(op->getResult(0)) /
+                             elementBytes(type.getElementType())},
+                            type.getElementType());
+      replacement = memref::ViewOp::create(
+          b, op->getLoc(), storageType, frame,
+          index(b, op->getLoc(), found->second), ValueRange{});
+      if (storageType != type)
+        replacement = memref::ReinterpretCastOp::create(
+            b, op->getLoc(), type, replacement, storageOffset, type.getShape(),
+            storageStrides);
     } else if (isa<memref::AllocOp>(op)) {
       replacement = memref::AllocaOp::create(b, op->getLoc(), type);
       if (Attribute alignment = op->getAttr("alignment"))
@@ -172,6 +265,23 @@ void materializeBuffers(ModuleOp module) {
       dealloc->erase();
     op->getResult(0).replaceAllUsesWith(replacement);
     op->erase();
+  }
+  if (version && version.getInt() == 2) {
+    module.walk([&](func::FuncOp function) {
+      if (function.isExternal())
+        return;
+      SmallVector<memref::AllocaOp> scratch;
+      function.walk([&](memref::AllocaOp op) {
+        if (op->getNumOperands() == 0 && op.getType().hasStaticShape())
+          scratch.push_back(op);
+      });
+      for (auto op : llvm::reverse(scratch)) {
+        auto insertion = function.getBody().front().begin();
+        if (auto found = frames.find(function); found != frames.end())
+          insertion = std::next(found->second.getDefiningOp()->getIterator());
+        op->moveBefore(&function.getBody().front(), insertion);
+      }
+    });
   }
   // All views preserve their shape and exact layout, changing only the
   // address space inherited from the already selected root placement.
@@ -554,12 +664,26 @@ LogicalResult buddy::boscame::emitBOSCAMEPlan(ModuleOp module) {
     return failure();
   DenseMap<Operation *, DenseSet<int64_t>> expected;
   module.walk([&](Operation *op) {
+    if (isStreamMember(op) || isRegisterScheduleMember(op) ||
+        isFloatScheduleMember(op))
+      return;
     if (auto task = plan(op, "contract.task"))
       expected[op->getParentOfType<func::FuncOp>()].insert(number(task, "id"));
   });
   OpBuilder builder(module.getContext());
   module->setAttr("bosc_ame.target", builder.getStringAttr("nr-fpga"));
+  bool streamingPlan = false;
+  if (auto version = module->getAttrOfType<IntegerAttr>("plan.version"))
+    streamingPlan = version.getInt() == 2;
   for (auto function : module.getOps<func::FuncOp>()) {
+    if (streamingPlan) {
+      if (Attribute graph = function->getAttr("contract.compute_graph")) {
+        function->setAttr("bosc_ame.logical_compute_graph", graph);
+        function->removeAttr("contract.compute_graph");
+      }
+      function->setAttr("bosc_ame.task_graph_semantics",
+                        builder.getStringAttr("logical-provenance"));
+    }
     if (Attribute mapping = function->getAttr("plan.task_map"))
       function->setAttr("bosc_ame.task_map", mapping);
     if (Attribute count = function->getAttr("plan.source_task_count"))
@@ -576,17 +700,23 @@ LogicalResult buddy::boscame::emitBOSCAMEPlan(ModuleOp module) {
                                   ? spmdma::kDmaAbiAlignedNonAliasing
                                   : spmdma::kDmaAbiAligned));
   }
+  if (failed(emitRegisterSchedules(module)) ||
+      failed(emitFloatSchedules(module)) ||
+      failed(emitStreams(module, /*inputVerified=*/true)))
+    return failure();
   materializeBuffers(module);
   SmallVector<Operation *> computations;
   module.walk([&](Operation *op) {
     if (isa<memref::CopyOp, linalg::MatmulOp, linalg::FillOp, linalg::GenericOp,
             linalg::ReduceOp>(op) ||
-        op->hasAttr("plan.scalar"))
+        op->hasAttr("plan.scalar") || op->hasAttr("plan.cpu"))
       computations.push_back(op);
   });
   for (Operation *op : computations) {
     Operation *completion = nullptr;
-    if (auto copy = dyn_cast<memref::CopyOp>(op))
+    if (op->hasAttr("plan.cpu"))
+      completion = emitDDRRecipe(op);
+    else if (auto copy = dyn_cast<memref::CopyOp>(op))
       completion = emitTransfer(copy);
     else if (auto matmul = dyn_cast<linalg::MatmulOp>(op))
       completion = matmul->hasAttr("plan.compute") ? emitOrderedMatmul(matmul)

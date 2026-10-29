@@ -1,7 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='plan-report=true dma-abi=args_aligned64_nonalias' -o %t.reported 2>%t.report
-// RUN: buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o %t.plain
+// RUN: buddy-opt %s --linalg-to-boscame='plan-version=1 plan-report=true dma-abi=args_aligned64_nonalias' -o %t.reported 2>%t.report
+// RUN: buddy-opt %s --linalg-to-boscame='plan-version=1 dma-abi=args_aligned64_nonalias' -o %t.plain
 // RUN: cmp %t.reported %t.plain
 // RUN: FileCheck %s < %t.report
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 module {
   func.func @metadata_free(%source: memref<16xf32>, %destination: memref<16xf32>) {

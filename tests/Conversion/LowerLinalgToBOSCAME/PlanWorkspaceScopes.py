@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Fixed SPM windows require serial definitions and users, including aliases."""
 
 import re
@@ -72,15 +73,26 @@ def main():
         ("allocated", allocated),
         ("alias", alias),
     ):
-        for entry in ("--linalg-to-boscame", "--lower-linalg-to-boscame"):
+        for entry in (
+            "--linalg-to-boscame=plan-version=1",
+            "--lower-linalg-to-boscame=plan-version=1",
+        ):
             rejected(name + entry[2:], text, entry)
-        rejected(name, text, "--kernel-contract-annotate", "--bosc-ame-plan")
+        rejected(
+            name,
+            text,
+            "--kernel-contract-annotate",
+            "--bosc-ame-plan=plan-version=1",
+        )
 
     # Pure scalar loads/stores inside an unmodeled concurrent region do not
     # introduce declared tasks. A parsed incomplete plan must still prove
     # physical workspace ownership before verification or emission succeeds.
     baseline = invoke(
-        "baseline", SOURCE, "--kernel-contract-annotate", "--bosc-ame-plan"
+        "baseline",
+        SOURCE,
+        "--kernel-contract-annotate",
+        "--bosc-ame-plan=plan-version=1",
     )
     assert baseline.returncode == 0, baseline.stderr
     planned = baseline.stdout.replace(
@@ -111,7 +123,7 @@ def main():
         "serial",
         serial,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-emit",
     )
     assert result.returncode == 0, result.stderr

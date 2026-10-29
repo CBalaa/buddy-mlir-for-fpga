@@ -3,7 +3,7 @@
 // MLIR does not allocate AME registers.
 //
 // The tile operations name no register and the lowering emits the ordinary
-// `bosc_ame.intr.*` operations; which tile (`tr0`..`tr7`) and accumulator
+// ordered LLVM target intrinsics; which tile (`tr0`..`tr7`) and accumulator
 // (`acc0`..`acc7`) register holds a value is decided by LLVM's register
 // allocator.  This test pins the *instruction* sequence and the operands the
 // lowering does own: two A tiles that are live at the same time - the case a
@@ -11,13 +11,13 @@
 // and placing them is the backend's job.
 //
 // CHECK-LABEL: llvm.func @simultaneous_tiles
-// CHECK: bosc_ame.intr.mlae8.m
-// CHECK: bosc_ame.intr.mlae8.m
-// CHECK: bosc_ame.intr.mlbe8.m
-// CHECK: bosc_ame.intr.mlce32.m
-// CHECK: bosc_ame.intr.mqma.b.mm
-// CHECK: bosc_ame.intr.mqma.b.mm
-// CHECK: bosc_ame.intr.msce32.m
+// CHECK: llvm.riscv.bosc.ordered.load.a
+// CHECK: llvm.riscv.bosc.ordered.load.a
+// CHECK: llvm.riscv.bosc.ordered.load.b
+// CHECK: llvm.riscv.bosc.ordered.load.acc
+// CHECK: llvm.riscv.bosc.ordered.mma
+// CHECK: llvm.riscv.bosc.ordered.mma
+// CHECK: llvm.riscv.bosc.ordered.store.acc
 // CHECK-NOT: bosc_ame.intr.fpga
 
 module attributes {bosc_ame.target = "nr-fpga"} {

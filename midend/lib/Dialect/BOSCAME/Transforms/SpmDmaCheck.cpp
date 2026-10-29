@@ -340,6 +340,7 @@ static std::optional<PointerChain> tracePointerChain(Value value) {
   bool isRoot = isa<BlockArgument>(current) ||
                 isa_and_nonnull<memref::AllocOp>(rootOp) ||
                 isa_and_nonnull<memref::AllocaOp>(rootOp) ||
+                isa_and_nonnull<DDRFrameOp>(rootOp) ||
                 isa_and_nonnull<memref::GetGlobalOp>(rootOp);
   if (!isRoot)
     return std::nullopt;
@@ -422,7 +423,7 @@ static bool mayAlias(const Footprint &lhs, const Footprint &rhs,
   // Two distinct pointer arguments are disjoint only under the explicit
   // module ABI promise; without it the ranges cannot be compared at all.
   auto freshAllocation = [](Value root) {
-    return isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(
+    return isa_and_nonnull<memref::AllocOp, memref::AllocaOp, DDRFrameOp>(
         root.getDefiningOp());
   };
   if (freshAllocation(lhs.ddrRoot) || freshAllocation(rhs.ddrRoot))
@@ -793,7 +794,8 @@ private:
     // LLVM's generic intrinsic call does not implement that interface and can
     // itself lower to an out-of-line runtime call.
     if (hasLiveAccumulator(analysis) &&
-        isa<CallOpInterface, LLVM::CallIntrinsicOp>(&op))
+        isa<CallOpInterface, LLVM::CallIntrinsicOp, DDRFrameOp, DDRReleaseOp>(
+            &op))
       return op.emitOpError(
           "cannot call code while an AME accumulator is live; a callee may "
           "execute DMA or clobber matrix registers, so complete the "
@@ -1100,7 +1102,11 @@ LogicalResult buddy::boscame::verifySpmDmaContract(ModuleOp module) {
   module.walk([&](Operation *op) {
     if (failed(operationStatus))
       return;
-    if (auto view = dyn_cast<SpmViewOp>(op))
+    if (auto frame = dyn_cast<DDRFrameOp>(op))
+      operationStatus = frame.verify();
+    else if (auto release = dyn_cast<DDRReleaseOp>(op))
+      operationStatus = release.verify();
+    else if (auto view = dyn_cast<SpmViewOp>(op))
       operationStatus = view.verify();
     else if (auto start = dyn_cast<DmaStartOp>(op))
       operationStatus = start.verify();

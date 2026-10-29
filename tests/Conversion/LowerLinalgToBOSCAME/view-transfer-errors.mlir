@@ -1,4 +1,5 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
+// RUN: not buddy-opt %s --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // Preserve the unaligned byte-shifted view. V1 rejects its DDR-to-DDR copy
 // boundary before testing endpoint alignment. PlanRoutes.py separately checks

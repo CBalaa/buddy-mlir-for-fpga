@@ -68,7 +68,9 @@ def executable_sections(data):
     return result
 
 
-def audit(data, dump, require_fences=True):
+def audit(
+    data, dump, require_fences=True, allow_vector_ordered_reductions=False
+):
     decoded = {(r["section"], r["address"]): r for r in parse_disassembly(dump)}
     errors, sections = [], []
     vectors = Counter()
@@ -118,6 +120,16 @@ def audit(data, dump, require_fences=True):
                 if is_vector(word):
                     mnemonic = entry["mnemonic"] if entry else "<undecoded>"
                     vectors[mnemonic] += 1
+                    # Raw encoding also catches undecoded or stale objects.
+                    if (
+                        word & 0xFC00707F == 0x0C001057
+                        and not allow_vector_ordered_reductions
+                    ):
+                        errors.append(
+                            f"{where}: vector ordered reduction is disabled; "
+                            "rebuild through the scalar workaround or use the "
+                            "explicit diagnostic opt-out"
+                        )
                     if mnemonic not in RVV_ALLOWED:
                         errors.append(f"{where}: unsupported RVV: {detail}")
                     if is_vector_memory(word):
@@ -160,6 +172,11 @@ def audit(data, dump, require_fences=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--allow-vector-ordered-reductions",
+        action="store_true",
+        help="diagnostic opt-out: permit vfredosum.vs in the linked image",
+    )
     parser.add_argument("elf", type=Path)
     parser.add_argument(
         "--objdump",
@@ -195,6 +212,7 @@ def main():
             args.elf.read_bytes(),
             dump,
             require_fences=not args.allow_unfenced,
+            allow_vector_ordered_reductions=args.allow_vector_ordered_reductions,
         )
         if args.require_direct_store and not (
             report["ame_store_instructions"]

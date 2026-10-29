@@ -1,5 +1,14 @@
 # Triton LayerNorm on the NH/E6 FPGA
 
+默认启用 **f32 有序规约的标量绕过**：在 SSA 层用顺序标量累加，最终 ELF 不含 `vfredosum.vs`。
+使用 `make ALLOW_VECTOR_ORDERED_REDUCTIONS=1` 可显式恢复原向量指令；
+切回 `=0` 无需 clean。支持范围、栈开销及验证状态见[绕过说明](../tools/README.scalar-ordered-reductions.md)。
+2026-10-28 正式主镜像已上板两轮通过：302592 个输出逐位一致，errors/guards 均为0；
+cycle 为9851570 / 9847844。详见绕过说明中的任务证据。
+当前默认 planner 使用直接 DDR 路径；`make check` 校验该路径或旧版四条 DMA
+路径的完整外部访问范围，下面的旧性能/栈记录对应各自历史镜像。
+
+
 This directory consumes the checked-in `kernel.frontend.mlir` standard MLIR
 Contract. It builds and checks the complete backend image without a Triton
 Python installation. The original kernel and frontend exporter live in
@@ -144,61 +153,38 @@ square root and division separately rounded.
 
 ## Validation
 
-`make simcheck` executes all 197 programs in reversed order with persistent
-poisoned SPM in the functional DMA/SPM model. It compares every output with an
-independent sequential-f32 oracle at `atol=rtol=2e-5`, checks last-row and
-Weight/Bias tail sentinels, and requires exactly the four listed DMA ranges per
-program. `--write-output FILE` saves the complete 605184-byte output and
-`--compare-output FILE` requires a byte-for-byte match with a previous run.
+2026-10-28 的正式 SSA 标量镜像已通过 FPGA4：两组输入、394 个 row programs，
+302592 个输出全部逐位一致，errors=0、guard_errors=0；两轮 cycle 分别为
+9851570 / 9847844。任务 ID 为661e98c04c27457ba59273b9adb8ce83。
+镜像 SHA256 为58fd9d39faa5124c8b7348a79345144460899651ea7c8233ae4f953dd05de04c。
+完整任务、UART 和诊断历史见[验证报告](../../../reference/rvv_reduction_probe/scalar-workaround/README.md)。
 
-`make check` builds `bin`, verifies the typed LLVM entry ABI and absence of
-heap allocation, requires four `bosc_ame.dma.start` operations, and audits the
-complete ELF. The regenerated image contains 1957 instructions, 54 RVV
-instructions, 26 vector memory instructions and zero AME instructions. These
-are static image counts, not executed instruction or latency measurements.
-The board launcher supports two different inputs and 394 row programs, with
-302592 independent C-oracle comparisons and DDR/input guards.
+make check 验证 typed LLVM ABI、无 heap allocation、实际 IR 的全197行访问覆盖和
+完整 ELF。当前镜像1911条静态指令、29条 RVV、0条 AME、0条 vfredosum；
+规约 seed/result 没有 vfmv 中转。调用链栈审计为1056/65536字节。
 
-The regenerated build passes `make`, `make check` and `make simcheck` with
-`rtol=atol=2e-5`. All 197 reversed programs have maximum absolute error zero;
-the 605184 output bytes match the saved baseline exactly, SHA256
-`ed6261ce27a36b49df83291fe18af274a0892e8db49f4a509957405cbebf8cbe`.
-Across the grid, DMA reads 1815552 bytes and writes 605184 bytes. The new
-linked-ELF call-chain stack bound is **1168 B**, including aligned host scalar
-storage, DMA failure hooks and the trap path, within the unchanged 65536-byte
-stack. The reconstructed baseline's 992 B is a separate measurement. See the
-[validation record](../../../docs/BOSCAMEKernelContractValidation.md) for hashes
-and the audit's assumptions.
+make simcheck 按逆序执行所有197行，使用顺序 f32 oracle，atol=rtol=2e-5。
+当前 direct-DDR 路径访问覆盖为 X×3 / Weight×1 / Bias×1 / Out×1，guards 完好，
+最大绝对误差0；旧四 DMA 路径仍按自身契约校验。
+--write-output FILE 保存605184字节输出，--compare-output FILE 与已有输出逐字节比较。
+功能模拟和指令审计不代替上述硬件数值验收。
 
-ELF/RVV checks establish code generation; the functional simulator establishes
-BOSCAME IR execution semantics. Neither proves the absence of backend register
-spills. No controlled baseline latency comparison has been made.
+在主仓库根目录运行：
 
-Upload the image using the usual platform command, then run it from the test
-runner directory:
+~~~bash
+conda activate boscame
+export BUDDY_ROOT="$PWD/buddy-mlir"
+export BUDDY_MLIR_BINARY_DIR="$BUDDY_ROOT/build/bin"
+export LLVM_BIN="$BUDDY_ROOT/llvm/build/bin"
+make -C examples/BOSCAMEFPGA/layernorm_197x768 check simcheck
+python examples/BOSCAMEFPGA/run_bin.py examples/BOSCAMEFPGA/layernorm_197x768/build/layernorm_197x768/layernorm_197x768.bin
+~~~
 
-```bash
-./run.sh test=test/layernorm_197x768.bin
-```
-
-Keep the runner alive until the terminal application verdict, then read back
-DDR from `0x80000000` through the outputs and diagnostics; a 3 MiB dump covers
-this image. The loader mirror captured before execution is not output
-evidence. From this example directory, validate the final dump against the
-exact uploaded ELF:
-
-```bash
-python3 ../tools/check_experimental_board.py layernorm \
-  --elf build/layernorm_197x768/layernorm_197x768.elf \
-  --dump layernorm.final-ddr.bin --report layernorm.board.json
-```
-
-The checker recomputes the final round in f32 with the current select-zero
-semantics and `2e-5 * (1 + abs(expected))` tolerance, and checks both rounds'
-counters, inputs and DDR guards. Stored board reports in
-[docs/validation](../../../docs/validation/) predate the current resident-SPM
-placement and select-zero variance semantics; they describe their own earlier
-images. The current vector-reduction image has not been revalidated on a board.
+复用已有 SSH 隧道，通过现有调度队列执行并保留原客户端至结束。
+120秒为执行期限，排队另算；记录实际 task/node/FPGA 和镜像 SHA256。
+该镜像由板端 oracle 完整验证，未声明 DDR output；不将装载读回当作运行结果。
+旧独立 DDR dump 的 checker 仍可用于已有历史数据，不是本次验收的数据来源。
+服务未提供实测时钟，cycle 不根据 UART 的频率标签换算时间。
 
 ## Files
 

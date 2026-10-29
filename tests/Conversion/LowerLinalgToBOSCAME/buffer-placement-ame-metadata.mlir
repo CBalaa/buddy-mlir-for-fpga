@@ -1,7 +1,8 @@
-// RUN: buddy-opt %s --linalg-to-boscame='buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
+// RUN: buddy-opt %s --linalg-to-boscame='plan-version=1 buffer-placement=true enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t 2>%t.plan
 // RUN: FileCheck %s --check-prefix=PLAN < %t.plan
 // RUN: FileCheck %s --check-prefix=GRAPH < %t
 // RUN: buddy-opt %t --bosc-ame-spm-dma-check -o /dev/null
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // The adapter recomputes task IDs from actual operations. A resident fill and
 // direct DDR matmul each retain one task at their emitted completion point.

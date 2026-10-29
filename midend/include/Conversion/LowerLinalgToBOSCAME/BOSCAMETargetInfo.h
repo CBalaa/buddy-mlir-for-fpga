@@ -104,6 +104,11 @@ struct TargetInfo {
   AmeCapability ame;
   std::optional<int64_t> rvvVectorBytes;
   TransferCapability dma;
+  // Capacity supported by the current allocator/encoder, not a speculative
+  // hardware register count. Unknown RVV width remains independent.
+  int64_t allocatableTileRegisters = 8;
+  int64_t allocatableAccumulatorRegisters = 8;
+  int64_t scalarFloatRegisters = 32;
 };
 
 inline constexpr TargetInfo getNrFpgaTargetInfo() {

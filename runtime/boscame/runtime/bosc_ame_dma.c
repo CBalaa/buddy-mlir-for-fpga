@@ -281,3 +281,259 @@ void bosc_ame_dma_wait(uint32_t channel, uint64_t src_token) {
     __builtin_unreachable();
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Invocation-private AME DDR frames                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Ordinary E6 stack memory stays cached under both CSR policies. Native AME
+ * writes cannot use it as CPU-visible workspace. A private frame instead lives
+ * in a linker-reserved, nonoverlapping part of PMP operand region 5. The same
+ * read/write helpers used by external operands therefore give it identical
+ * CPU/device visibility. Missing linker symbols are a checked runtime error,
+ * never an implicit stack/global fallback.
+ */
+#ifndef BOSC_AME_PRIVATE_DDR_START
+extern char __bosc_ame_private_ddr_start[] __attribute__((weak));
+extern char __bosc_ame_private_ddr_end[] __attribute__((weak));
+extern char __nh_e6_ddr_window_start[] __attribute__((weak));
+extern char __nh_e6_ddr_window_end[] __attribute__((weak));
+#define BOSC_AME_PRIVATE_DDR_START ((uintptr_t)__bosc_ame_private_ddr_start)
+#define BOSC_AME_PRIVATE_DDR_END ((uintptr_t)__bosc_ame_private_ddr_end)
+#define BOSC_AME_PRIVATE_DDR_WINDOW_START ((uintptr_t)__nh_e6_ddr_window_start)
+#define BOSC_AME_PRIVATE_DDR_WINDOW_END ((uintptr_t)__nh_e6_ddr_window_end)
+#endif
+#ifndef BOSC_AME_PRIVATE_DDR_HART_ID
+#if defined(__riscv)
+static uintptr_t bosc_ame_private_ddr_hart_id(void) {
+  uintptr_t value;
+  __asm__ volatile("csrr %0, mhartid" : "=r"(value));
+  return value;
+}
+#define BOSC_AME_PRIVATE_DDR_HART_ID() bosc_ame_private_ddr_hart_id()
+#else
+#define BOSC_AME_PRIVATE_DDR_HART_ID() ((uintptr_t)0)
+#endif
+#endif
+
+#define BOSC_AME_PRIVATE_DDR_MAGIC UINT64_C(0xb05ca6e0dd4f4a6e)
+#define BOSC_AME_PRIVATE_DDR_GUARD UINT64_C(0xd3d3d3d3d3d3d3d3)
+#define BOSC_AME_PRIVATE_DDR_OVERHEAD 128u
+static uintptr_t bosc_ame_private_ddr_top;
+static uintptr_t bosc_ame_private_ddr_active;
+#if BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6
+static volatile uintptr_t bosc_ame_private_ddr_owner;
+#else
+static uintptr_t bosc_ame_private_ddr_owner;
+#endif
+#if BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6
+static volatile unsigned char bosc_ame_private_ddr_busy;
+static uintptr_t bosc_ame_private_ddr_saved_mie;
+#else
+static unsigned char bosc_ame_private_ddr_busy;
+#endif
+uint64_t bosc_ame_private_ddr_peak_bytes;
+uint64_t bosc_ame_private_ddr_acquires;
+uint64_t bosc_ame_private_ddr_releases;
+
+static void bosc_ame_private_ddr_default_fail(uint32_t reason, uint64_t address,
+                                              uint64_t bytes) {
+  (void)reason;
+  (void)address;
+  (void)bytes;
+  __builtin_trap();
+}
+bosc_ame_private_ddr_fail_fn bosc_ame_private_ddr_fail_hook =
+    bosc_ame_private_ddr_default_fail;
+
+static void bosc_ame_private_ddr_fail(uint32_t reason, uintptr_t address,
+                                      uint64_t bytes) {
+  bosc_ame_private_ddr_fail_hook(reason, address, bytes);
+  __builtin_unreachable();
+}
+#if BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6
+
+/* This opt-in is valid only for the NH/E6 single executor image. Reject an
+ * unsupported hart and NH/wrong-stack context before touching allocator state.
+ * Resumable interrupt, NMI or monitor handlers must not invoke the allocator.
+ * Only the installed E6 mtvec path is proven terminal; no NMI routing is
+ * assumed. Never hold MIE off across generated kernel work. */
+#ifndef BOSC_AME_PRIVATE_DDR_E6_CONTEXT
+#ifndef BOSC_AME_PRIVATE_DDR_E6_STACK_BOTTOM
+extern char __e6_stack_bottom[] __attribute__((weak));
+extern char __e6_stack_top[] __attribute__((weak));
+extern char __nh_stack_bottom[] __attribute__((weak));
+extern char __nh_stack_top[] __attribute__((weak));
+#define BOSC_AME_PRIVATE_DDR_E6_STACK_BOTTOM ((uintptr_t)__e6_stack_bottom)
+#define BOSC_AME_PRIVATE_DDR_E6_STACK_TOP ((uintptr_t)__e6_stack_top)
+#define BOSC_AME_PRIVATE_DDR_NH_STACK_BOTTOM ((uintptr_t)__nh_stack_bottom)
+#define BOSC_AME_PRIVATE_DDR_NH_STACK_TOP ((uintptr_t)__nh_stack_top)
+#endif
+#ifndef BOSC_AME_PRIVATE_DDR_STACK_POINTER
+static uintptr_t bosc_ame_private_ddr_stack_pointer(void) {
+  uintptr_t current_sp;
+  __asm__ volatile("mv %0, sp" : "=r"(current_sp));
+  return current_sp;
+}
+#define BOSC_AME_PRIVATE_DDR_STACK_POINTER()                                   \
+  bosc_ame_private_ddr_stack_pointer()
+#endif
+static int bosc_ame_private_ddr_e6_context(void) {
+  uintptr_t current_sp = BOSC_AME_PRIVATE_DDR_STACK_POINTER();
+  uintptr_t bottom = BOSC_AME_PRIVATE_DDR_E6_STACK_BOTTOM;
+  uintptr_t top = BOSC_AME_PRIVATE_DDR_E6_STACK_TOP;
+  uintptr_t nh_bottom = BOSC_AME_PRIVATE_DDR_NH_STACK_BOTTOM;
+  uintptr_t nh_top = BOSC_AME_PRIVATE_DDR_NH_STACK_TOP;
+  return bottom && !(bottom & 15u) && !(top & 15u) && top > bottom &&
+         top - bottom >= 4096u && nh_bottom && nh_top > nh_bottom &&
+         !(nh_bottom & 15u) && !(nh_top & 15u) &&
+         (top <= nh_bottom || bottom >= nh_top) && current_sp >= bottom &&
+         current_sp < top;
+}
+#define BOSC_AME_PRIVATE_DDR_E6_CONTEXT() bosc_ame_private_ddr_e6_context()
+#endif
+#ifndef BOSC_AME_PRIVATE_DDR_IRQ_SAVE
+static uintptr_t bosc_ame_private_ddr_irq_save(void) {
+  uintptr_t status;
+  __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(status) : : "memory");
+  return status & 8u;
+}
+#define BOSC_AME_PRIVATE_DDR_IRQ_SAVE() bosc_ame_private_ddr_irq_save()
+#endif
+#ifndef BOSC_AME_PRIVATE_DDR_IRQ_RESTORE
+#define BOSC_AME_PRIVATE_DDR_IRQ_RESTORE(saved)                                \
+  __asm__ volatile("csrs mstatus, %0" : : "r"((saved) & 8u) : "memory")
+#endif
+static uintptr_t bosc_ame_private_ddr_enter(uint64_t bytes) {
+  uintptr_t hart_id = BOSC_AME_PRIVATE_DDR_HART_ID();
+  if (hart_id != 0u || !BOSC_AME_PRIVATE_DDR_E6_CONTEXT())
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_OWNER, 0u, bytes);
+  uintptr_t saved = BOSC_AME_PRIVATE_DDR_IRQ_SAVE();
+  if (bosc_ame_private_ddr_busy)
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_CONCURRENT, 0u, bytes);
+  bosc_ame_private_ddr_busy = 1u;
+  bosc_ame_private_ddr_saved_mie = saved;
+  uintptr_t owner = hart_id + 1u;
+  uintptr_t expected = bosc_ame_private_ddr_owner;
+  if (expected && expected != owner)
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_OWNER, 0u, bytes);
+  if (!expected)
+    bosc_ame_private_ddr_owner = owner;
+  return owner;
+}
+static void bosc_ame_private_ddr_leave(void) {
+  uintptr_t saved = bosc_ame_private_ddr_saved_mie;
+  BOSC_AME_DMA_FENCE();
+  bosc_ame_private_ddr_busy = 0u;
+  BOSC_AME_PRIVATE_DDR_IRQ_RESTORE(saved);
+}
+#else
+static uintptr_t bosc_ame_private_ddr_enter(uint64_t bytes) {
+  uintptr_t owner = BOSC_AME_PRIVATE_DDR_HART_ID() + 1u;
+  if (!owner ||
+      __atomic_test_and_set(&bosc_ame_private_ddr_busy, __ATOMIC_ACQUIRE))
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_CONCURRENT, 0u, bytes);
+  uintptr_t expected = 0;
+  if (!__atomic_compare_exchange_n(&bosc_ame_private_ddr_owner, &expected,
+                                   owner, 0, __ATOMIC_ACQ_REL,
+                                   __ATOMIC_ACQUIRE) &&
+      expected != owner)
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_OWNER, 0u, bytes);
+  return owner;
+}
+static void bosc_ame_private_ddr_leave(void) {
+  __atomic_clear(&bosc_ame_private_ddr_busy, __ATOMIC_RELEASE);
+}
+#endif
+static int bosc_ame_private_ddr_window_valid(void) {
+  uintptr_t start = BOSC_AME_PRIVATE_DDR_START;
+  uintptr_t end = BOSC_AME_PRIVATE_DDR_END;
+  return start && !(start & 63u) && !(end & 63u) && end > start &&
+         start >= BOSC_AME_PRIVATE_DDR_WINDOW_START &&
+         end <= BOSC_AME_PRIVATE_DDR_WINDOW_END &&
+         BOSC_AME_PRIVATE_DDR_WINDOW_END > BOSC_AME_PRIVATE_DDR_WINDOW_START;
+}
+
+uint64_t bosc_ame_private_ddr_acquire(uint64_t bytes) {
+  uintptr_t owner = bosc_ame_private_ddr_enter(bytes);
+  if (!bosc_ame_private_ddr_window_valid())
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_WINDOW, 0u, bytes);
+  uintptr_t start = BOSC_AME_PRIVATE_DDR_START;
+  uintptr_t end = BOSC_AME_PRIVATE_DDR_END;
+  uintptr_t top = bosc_ame_private_ddr_top ? bosc_ame_private_ddr_top : start;
+  if (!bytes || (bytes & 63u) || bytes > BOSC_AME_PRIVATE_DDR_MAX_PAYLOAD ||
+      top < start || top > end || end - top < BOSC_AME_PRIVATE_DDR_OVERHEAD ||
+      bytes > end - top - BOSC_AME_PRIVATE_DDR_OVERHEAD)
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_CAPACITY, top, bytes);
+  BOSC_AME_DMA_SHARED_WRITES();
+  volatile uint64_t *header = (volatile uint64_t *)top;
+  header[0] = BOSC_AME_PRIVATE_DDR_MAGIC;
+  header[1] = top;
+  header[2] = bytes;
+  header[3] = owner;
+  header[4] = bosc_ame_private_ddr_active;
+  header[5] = BOSC_AME_PRIVATE_DDR_GUARD ^ header[1] ^ header[2] ^ header[3] ^
+              header[4];
+  for (unsigned i = 6; i != 8; ++i)
+    header[i] = BOSC_AME_PRIVATE_DDR_GUARD;
+  uintptr_t payload = top + 64u;
+  volatile uint64_t *tail = (volatile uint64_t *)(payload + bytes);
+  for (unsigned i = 0; i != 8; ++i)
+    tail[i] = BOSC_AME_PRIVATE_DDR_GUARD;
+  bosc_ame_private_ddr_active = payload;
+  bosc_ame_private_ddr_top = payload + bytes + 64u;
+  uint64_t live = bosc_ame_private_ddr_top - start;
+  if (live > bosc_ame_private_ddr_peak_bytes)
+    bosc_ame_private_ddr_peak_bytes = live;
+  ++bosc_ame_private_ddr_acquires;
+  BOSC_AME_DMA_FENCE();
+  bosc_ame_private_ddr_leave();
+  return payload;
+}
+
+void bosc_ame_private_ddr_release(uint64_t address, uint64_t bytes) {
+  uintptr_t owner = bosc_ame_private_ddr_enter(bytes);
+  uintptr_t start = BOSC_AME_PRIVATE_DDR_START;
+  uintptr_t end = BOSC_AME_PRIVATE_DDR_END;
+  if (!bosc_ame_private_ddr_window_valid() ||
+      address != bosc_ame_private_ddr_active || !bytes || (address & 63u) ||
+      (bytes & 63u) || address < start + 64u || address > end ||
+      end - address < 64u || bytes > end - address - 64u ||
+      address + bytes + 64u != bosc_ame_private_ddr_top)
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_LIFETIME, address,
+                              bytes);
+  /* AME writes have completed before release. Read guards through the same
+   * uncached region-5 policy used for CPU epilogues after native AME stores. */
+  BOSC_AME_DMA_SHARED_READS();
+  volatile uint64_t *header = (volatile uint64_t *)(uintptr_t)(address - 64u);
+  if (header[0] != BOSC_AME_PRIVATE_DDR_MAGIC || header[1] != address - 64u ||
+      header[2] != bytes || header[3] != owner ||
+      header[5] != (BOSC_AME_PRIVATE_DDR_GUARD ^ header[1] ^ header[2] ^
+                    header[3] ^ header[4]))
+    bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_GUARD, address, bytes);
+  for (unsigned i = 6; i != 8; ++i)
+    if (header[i] != BOSC_AME_PRIVATE_DDR_GUARD)
+      bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_GUARD, address,
+                                bytes);
+  volatile uint64_t *tail = (volatile uint64_t *)(uintptr_t)(address + bytes);
+  for (unsigned i = 0; i != 8; ++i)
+    if (tail[i] != BOSC_AME_PRIVATE_DDR_GUARD)
+      bosc_ame_private_ddr_fail(BOSC_AME_PRIVATE_DDR_FAIL_GUARD, address,
+                                bytes);
+  uintptr_t parent = header[4];
+  bosc_ame_private_ddr_top = address - 64u;
+  bosc_ame_private_ddr_active = parent;
+  ++bosc_ame_private_ddr_releases;
+  BOSC_AME_DMA_SHARED_WRITES();
+  header[0] = 0u;
+  if (!parent) {
+    bosc_ame_private_ddr_top = 0u;
+#if BOSC_AME_PRIVATE_DDR_NR_SINGLE_E6
+    bosc_ame_private_ddr_owner = 0u;
+#else
+    __atomic_store_n(&bosc_ame_private_ddr_owner, 0u, __ATOMIC_RELEASE);
+#endif
+  }
+  bosc_ame_private_ddr_leave();
+}

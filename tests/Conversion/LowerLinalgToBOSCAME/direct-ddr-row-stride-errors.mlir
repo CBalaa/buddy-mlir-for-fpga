@@ -1,8 +1,9 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/vector.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=VECTOR
-// RUN: buddy-opt %t/ame.mlir --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t/ame.emitted.mlir
+// RUN: not buddy-opt %t/vector.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga ' 2>&1 | FileCheck %s --check-prefix=VECTOR
+// RUN: buddy-opt %t/ame.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t/ame.emitted.mlir
 // RUN: FileCheck %s --check-prefix=AME < %t/ame.emitted.mlir
 // RUN: buddy-opt %t/ame.emitted.mlir --bosc-ame-spm-dma-check --lower-bosc-ame -o /dev/null
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // A direct vector store advances by the physical row stride.  65 f32 values
 // per row put the second row at byte offset 260, which is not a cache line.

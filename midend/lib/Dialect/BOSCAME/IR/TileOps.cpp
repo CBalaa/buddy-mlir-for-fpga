@@ -25,6 +25,7 @@
 #include "Dialect/BOSCAME/TileOps.h"
 #include "Dialect/BOSCAME/BOSCAMEOps.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/Endpoint.h"
 #include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -84,60 +85,23 @@ static StringRef getTileRoleRequirement(TileRole role) {
   llvm_unreachable("unknown tile role");
 }
 
-/// Return the storage root of a direct DDR endpoint.  Direct AME operations
-/// may address a function argument through descriptor-only memref views, but
-/// compiler-owned allocations and unknown producers are not external DDR.
-static Value getDirectDdrRoot(Value value) {
-  while (Operation *def = value.getDefiningOp()) {
-    if (auto cast = dyn_cast<memref::CastOp>(def))
-      value = cast.getSource();
-    else if (auto cast = dyn_cast<memref::ReinterpretCastOp>(def))
-      value = cast.getSource();
-    else if (auto subview = dyn_cast<memref::SubViewOp>(def))
-      value = subview.getSource();
-    else if (auto transpose = dyn_cast<memref::TransposeOp>(def))
-      value = transpose.getIn();
-    else if (auto cast = dyn_cast<memref::MemorySpaceCastOp>(def))
-      value = cast.getSource();
-    else if (auto view = dyn_cast<memref::ViewOp>(def))
-      value = view.getSource();
-    else if (auto collapse = dyn_cast<memref::CollapseShapeOp>(def))
-      value = collapse.getSrc();
-    else if (auto expand = dyn_cast<memref::ExpandShapeOp>(def))
-      value = expand.getSrc();
-    else if (auto metadata = dyn_cast<memref::ExtractStridedMetadataOp>(def))
-      value = metadata.getSource();
-    else if (auto cast = dyn_cast<UnrealizedConversionCastOp>(def)) {
-      if (cast.getNumOperands() != 1)
-        return Value();
-      value = cast.getOperand(0);
-    } else {
-      return Value();
-    }
-  }
-  return value;
-}
-
 static LogicalResult verifyDirectDdrProvenance(Operation *op, Value endpoint) {
-  auto root = dyn_cast_or_null<BlockArgument>(getDirectDdrRoot(endpoint));
-  auto rootType =
-      root ? dyn_cast<BaseMemRefType>(root.getType()) : BaseMemRefType();
-  if (!root || !root.getOwner()->isEntryBlock() ||
-      !isa<func::FuncOp>(root.getOwner()->getParentOp()) || !rootType ||
-      rootType.getMemorySpace())
-    return op->emitOpError()
-           << "direct DDR tile endpoint must trace to an external function "
-              "entry argument";
-
+  EndpointKind kind = classifyEndpoint(endpoint);
+  if (kind == EndpointKind::PrivateDDRFrame)
+    return verifyPrivateEndpoint(op, endpoint);
+  if (kind != EndpointKind::ExternalDDR)
+    return op->emitOpError(
+        "direct DDR tile endpoint must trace to an external function entry "
+        "argument or a managed private DDR frame");
   ModuleOp module = op->getParentOfType<ModuleOp>();
   auto abi = module ? module->getAttrOfType<StringAttr>(spmdma::kDmaAbiAttrName)
                     : StringAttr();
   if (!abi || (abi.getValue() != spmdma::kDmaAbiAlignedNonAliasing &&
                abi.getValue() != spmdma::kDmaAbiAligned))
     return op->emitOpError()
-           << "direct DDR tile endpoint requires module attribute `"
-           << spmdma::kDmaAbiAttrName << " = \""
-           << spmdma::kDmaAbiAlignedNonAliasing << "\"`";
+           << "direct DDR tile endpoint requires module attribute " << char(96)
+           << spmdma::kDmaAbiAttrName << " = " << char(34)
+           << spmdma::kDmaAbiAlignedNonAliasing << char(34) << char(96);
   return success();
 }
 
@@ -188,6 +152,12 @@ buddy::boscame::computeTileStorageLayout(MemRefType type, TileRole role) {
   if (llvm::MulOverflow(strides[rowIndex], layout.elementBytes,
                         layout.rowStrideBytes))
     return std::nullopt;
+  // An actual one-row view never issues the unused next-row address. Use a
+  // legal descriptor pitch without changing any accessed byte. Padded/multirow
+  // views retain their original pitch and strict alignment requirement.
+  if (layout.shape[rowIndex] == 1)
+    layout.rowStrideBytes = llvm::alignTo(
+        layout.shape[innerIndex] * layout.elementBytes, int64_t(64));
   return layout;
 }
 
@@ -424,7 +394,16 @@ LogicalResult MatrixCopyOp::verify() {
   }
 
   Value ddr = sourceSpm ? getTarget() : getSource();
-  auto root = dyn_cast_or_null<BlockArgument>(getDirectDdrRoot(ddr));
+  if (classifyEndpoint(ddr) == EndpointKind::PrivateDDRFrame) {
+    if (failed(verifyPrivateEndpoint(*this, ddr)))
+      return failure();
+    for (Value endpoint : {getSource(), getTarget()})
+      if (failed(spmdma::verifyEndpointPointerAlignment(*this, endpoint,
+                                                        "matrix copy", 4)))
+        return failure();
+    return success();
+  }
+  auto root = dyn_cast_or_null<BlockArgument>(getEndpointRoot(ddr));
   auto rootType =
       root ? dyn_cast<BaseMemRefType>(root.getType()) : BaseMemRefType();
   auto function = root ? dyn_cast<func::FuncOp>(root.getOwner()->getParentOp())

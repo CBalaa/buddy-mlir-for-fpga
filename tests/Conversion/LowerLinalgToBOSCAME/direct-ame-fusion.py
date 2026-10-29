@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t 2>&1 | FileCheck %s
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Only fuse a zero-initialized, adjacent, unmasked previous-C chain."""
 
 import re
@@ -124,7 +125,7 @@ def lower_source(work, name, source, plan_report=False):
         [
             buddy_opt_path(),
             str(path),
-            "--linalg-to-boscame=enable-spm-dma=true enable-ame=true "
+            "--linalg-to-boscame=plan-version=1 enable-spm-dma=true enable-ame=true "
             "dma-abi=args_aligned64_nonalias target=nr-fpga" + report,
         ],
         capture_output=True,

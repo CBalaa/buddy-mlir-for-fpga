@@ -33,8 +33,13 @@ constexpr StringLiteral kDdrReadBegin = "bosc_ame_ddr_read_begin";
 constexpr StringLiteral kDdrWriteBegin = "bosc_ame_ddr_write_begin";
 
 void emitDdrPolicy(OpBuilder &builder, Location loc, bool write) {
-  func::CallOp::create(builder, loc, write ? kDdrWriteBegin : kDdrReadBegin,
-                       TypeRange{}, ValueRange{});
+  auto call =
+      func::CallOp::create(builder, loc, write ? kDdrWriteBegin : kDdrReadBegin,
+                           TypeRange{}, ValueRange{});
+  // Preserve an ordinary call until the final matrix/DMA liveness check.
+  // Only compiler-created transitions may later become the delivered target
+  // policy intrinsic; a user call to the same symbol keeps its call semantics.
+  call->setAttr(kCpuDdrPolicy, builder.getUnitAttr());
 }
 
 LogicalResult declareDdrPolicies(ModuleOp module) {

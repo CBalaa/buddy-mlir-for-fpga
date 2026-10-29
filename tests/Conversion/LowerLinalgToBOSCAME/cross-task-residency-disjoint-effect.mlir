@@ -1,6 +1,7 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/entry.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ENTRY
-// RUN: not buddy-opt %t/helper.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=HELPER
+// RUN: not buddy-opt %t/entry.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=ENTRY
+// RUN: not buddy-opt %t/helper.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=HELPER
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // The original entry copy has no independent V1 DDR-to-DDR recipe. Called
 // helper formals have no entry disjointness guarantee; the contract rejects

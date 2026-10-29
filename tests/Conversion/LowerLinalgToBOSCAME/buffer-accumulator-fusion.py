@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Private i32 product fusion is independent of the storage route."""
 
 import re
@@ -157,7 +158,7 @@ def main():
             [
                 opt,
                 str(input_path),
-                "--linalg-to-boscame=enable-spm-dma=true enable-ame=true "
+                "--linalg-to-boscame=plan-version=1 enable-spm-dma=true enable-ame=true "
                 "dma-abi=args_aligned64_nonalias plan-report=true",
             ],
             capture_output=True,

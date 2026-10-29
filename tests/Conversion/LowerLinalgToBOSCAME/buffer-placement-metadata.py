@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s buddy-opt %S/Inputs/layernorm-197x768-bufferized.mlir
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Root placement preserves the graph after removing dead prefix-mask tasks."""
 
 import collections
@@ -134,7 +135,11 @@ def main():
     before, _, counts, _ = graph(historical)
     assert len(before) == 22 and counts == ["22 : i64"]
     rejected = subprocess.run(
-        [binary, sys.argv[2], "--linalg-to-boscame=buffer-placement=true"],
+        [
+            binary,
+            sys.argv[2],
+            "--linalg-to-boscame=plan-version=1 buffer-placement=true",
+        ],
         text=True,
         capture_output=True,
     )
@@ -150,7 +155,12 @@ def main():
         / "tests/Conversion/LowerLinalgToBOSCAME/Inputs/contracts/layernorm.contract.mlir"
     )
     planned = subprocess.run(
-        [binary, str(fixture), "--bosc-ame-plan", "--bosc-ame-plan-verify"],
+        [
+            binary,
+            str(fixture),
+            "--bosc-ame-plan=plan-version=1",
+            "--bosc-ame-plan-verify",
+        ],
         text=True,
         capture_output=True,
         check=True,

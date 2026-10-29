@@ -107,7 +107,9 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/Dialect/Vector/Transforms/LoweringPatterns.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -247,6 +249,33 @@ void declareDmaRuntimeHelpers(ModuleOp module) {
         LLVM::Linkage::External, /*dsoLocal=*/false, LLVM::CConv::C);
 }
 
+LogicalResult declareFrameRuntimeHelpers(ModuleOp module) {
+  bool needed = false;
+  module.walk(
+      [&](Operation *op) { needed |= isa<DDRFrameOp, DDRReleaseOp>(op); });
+  if (!needed)
+    return success();
+  OpBuilder b(module.getContext());
+  b.setInsertionPointToStart(module.getBody());
+  Type i64 = b.getI64Type();
+  Type voidType = LLVM::LLVMVoidType::get(b.getContext());
+  for (auto [name, type] :
+       {std::pair<StringRef, LLVM::LLVMFunctionType>{
+            "bosc_ame_private_ddr_acquire",
+            LLVM::LLVMFunctionType::get(i64, {i64})},
+        {"bosc_ame_private_ddr_release",
+         LLVM::LLVMFunctionType::get(voidType, {i64, i64})}}) {
+    if (Operation *existing = SymbolTable::lookupSymbolIn(module, name)) {
+      auto function = dyn_cast<LLVM::LLVMFuncOp>(existing);
+      if (!function || function.getFunctionType() != type)
+        return existing->emitError(
+            "incompatible private DDR runtime declaration");
+    } else
+      LLVM::LLVMFuncOp::create(b, module.getLoc(), name, type);
+  }
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Type converter
 //===----------------------------------------------------------------------===//
@@ -346,7 +375,8 @@ public:
 
     // The SPM view and the DMA requests have dedicated conversion patterns
     // with a higher benefit; never fabricate an intrinsic for them.
-    if (isa<SpmViewOp, DmaStartOp, DmaWaitOp, MatrixCopyOp>(op))
+    if (isa<SpmViewOp, DDRFrameOp, DDRReleaseOp, DmaStartOp, DmaWaitOp,
+            MatrixCopyOp>(op))
       return failure();
 
     // The tile operations are handled by `BOSCAMETileLowering.cpp`, which
@@ -465,6 +495,52 @@ public:
 /// `bosc_ame.dma.start` becomes a call to `bosc_ame_dma_start(channel, src,
 /// dst, len)`.  The runtime returns the effective source address, which *is*
 /// the request token, so the call result replaces the token value directly.
+class DDRFrameConversion : public ConvertToLLVMPattern {
+public:
+  DDRFrameConversion(const LLVMTypeConverter &converter, MLIRContext *context)
+      : ConvertToLLVMPattern(DDRFrameOp::getOperationName(), context, converter,
+                             PatternBenefit(3)) {}
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value>,
+                                ConversionPatternRewriter &b) const override {
+    auto type = cast<MemRefType>(op->getResult(0).getType());
+    Value bytes =
+        LLVM::ConstantOp::create(b, op->getLoc(), b.getI64Type(),
+                                 b.getI64IntegerAttr(type.getDimSize(0)));
+    auto call = LLVM::CallOp::create(
+        b, op->getLoc(), TypeRange{b.getI64Type()},
+        FlatSymbolRefAttr::get(b.getContext(), "bosc_ame_private_ddr_acquire"),
+        ValueRange{bytes});
+    Value pointer = LLVM::IntToPtrOp::create(
+        b, op->getLoc(), LLVM::LLVMPointerType::get(b.getContext()),
+        call.getResult());
+    Value descriptor = MemRefDescriptor::fromStaticShape(
+        b, op->getLoc(), *getTypeConverter(), type, pointer);
+    b.replaceOp(op, descriptor);
+    return success();
+  }
+};
+class DDRReleaseConversion : public ConvertToLLVMPattern {
+public:
+  DDRReleaseConversion(const LLVMTypeConverter &converter, MLIRContext *context)
+      : ConvertToLLVMPattern(DDRReleaseOp::getOperationName(), context,
+                             converter, PatternBenefit(3)) {}
+  LogicalResult matchAndRewrite(Operation *op, ArrayRef<Value> operands,
+                                ConversionPatternRewriter &b) const override {
+    auto type = cast<MemRefType>(op->getOperand(0).getType());
+    Value bytes =
+        LLVM::ConstantOp::create(b, op->getLoc(), b.getI64Type(),
+                                 b.getI64IntegerAttr(type.getDimSize(0)));
+    Value address = extractAddressFromDescriptor(b, op->getLoc(), operands[0],
+                                                 type, *getTypeConverter());
+    LLVM::CallOp::create(
+        b, op->getLoc(), TypeRange{},
+        FlatSymbolRefAttr::get(b.getContext(), "bosc_ame_private_ddr_release"),
+        ValueRange{address, bytes});
+    b.eraseOp(op);
+    return success();
+  }
+};
+
 class DmaStartOpConversion : public ConvertToLLVMPattern {
 public:
   DmaStartOpConversion(const LLVMTypeConverter &converter, MLIRContext *context)
@@ -545,6 +621,142 @@ public:
 // Preparation stages
 //===----------------------------------------------------------------------===//
 
+/// Private provenance for the snapshot operations introduced below. Dedicated
+/// conversion patterns consume it and make only these accesses volatile, so
+/// LLVM cannot forward a vector store into scalar extracts/reductions again.
+constexpr StringLiteral kScalarOrderedSnapshot =
+    "bosc_ame.scalar_ordered_snapshot";
+
+class ScalarOrderedSnapshotLoadLowering
+    : public ConvertOpToLLVMPattern<memref::LoadOp> {
+public:
+  explicit ScalarOrderedSnapshotLoadLowering(const LLVMTypeConverter &converter)
+      : ConvertOpToLLVMPattern<memref::LoadOp>(converter, PatternBenefit(20)) {}
+
+  LogicalResult
+  matchAndRewrite(memref::LoadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!op->hasAttr(kScalarOrderedSnapshot))
+      return failure();
+    Value address =
+        getStridedElementPtr(rewriter, op.getLoc(), op.getMemRefType(),
+                             adaptor.getMemref(), adaptor.getIndices());
+    rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, rewriter.getF32Type(),
+                                              address, /*alignment=*/4,
+                                              /*isVolatile=*/true);
+    return success();
+  }
+};
+
+class ScalarOrderedSnapshotStoreLowering
+    : public ConvertOpToLLVMPattern<vector::StoreOp> {
+public:
+  explicit ScalarOrderedSnapshotStoreLowering(
+      const LLVMTypeConverter &converter)
+      : ConvertOpToLLVMPattern<vector::StoreOp>(converter, PatternBenefit(20)) {
+  }
+
+  LogicalResult
+  matchAndRewrite(vector::StoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    if (!op->hasAttr(kScalarOrderedSnapshot))
+      return failure();
+    Value address =
+        getStridedElementPtr(rewriter, op.getLoc(), op.getMemRefType(),
+                             adaptor.getBase(), adaptor.getIndices());
+    rewriter.replaceOpWithNewOp<LLVM::StoreOp>(op, adaptor.getValueToStore(),
+                                               address, /*alignment=*/4,
+                                               /*isVolatile=*/true);
+    return success();
+  }
+};
+
+/// Keep the reduction accumulator in scalar SSA from the start. Reconstructing
+/// it from machine vector seed/destination registers after register allocation
+/// is unsafe on the NR target. Only the ordered f32 ADD surface is selected;
+/// other kinds/types and nonordered reductions retain their existing lowering.
+/// Ordered f32 ADD forms outside the checked surface fail closed when enabled.
+/// Compiler-generated vector operations retain the usual
+/// vstart=0 contract; no physical vector CSR or VLEN assumption is introduced.
+LogicalResult scalarizeF32OrderedReductions(ModuleOp module, bool rewrite) {
+  for (func::FuncOp function : module.getOps<func::FuncOp>()) {
+    if (function.isExternal())
+      continue;
+    SmallVector<vector::ReductionOp> reductions;
+    int64_t maxLanes = 0;
+    bool unsupported = false;
+    function.walk([&](vector::ReductionOp reduction) {
+      VectorType type = reduction.getVector().getType();
+      if (!type.getElementType().isF32() ||
+          reduction.getKind() != vector::CombiningKind::ADD ||
+          reduction.getFastmath() != arith::FastMathFlags::none)
+        return;
+      auto reject = [&](StringRef reason) {
+        reduction.emitOpError()
+            << "scalar-f32-ordered-reductions requires " << reason;
+        unsupported = true;
+      };
+      if (type.getRank() != 1 || type.isScalable() || !reduction.getAcc() ||
+          reduction.isMasked()) {
+        reject("an unmasked fixed rank-one vector and an explicit scalar "
+               "accumulator");
+        return;
+      }
+      // A single entry snapshot must not be shared by parallel invocations of
+      // the reduction. Unknown region semantics are deliberately rejected.
+      for (Operation *parent = reduction->getParentOp();
+           parent != function.getOperation(); parent = parent->getParentOp()) {
+        if (!isa<scf::ForOp, scf::WhileOp, scf::IfOp, scf::ExecuteRegionOp,
+                 scf::IndexSwitchOp>(parent)) {
+          reject("sequential func/SCF regions (parallel, async and unknown "
+                 "region semantics cannot share an entry snapshot)");
+          return;
+        }
+      }
+      reductions.push_back(reduction);
+      maxLanes = std::max(maxLanes, type.getDimSize(0));
+    });
+    if (unsupported)
+      return failure();
+    if (!rewrite || reductions.empty())
+      continue;
+    // One statically bounded entry allocation is shared by sequential
+    // reductions, including reductions nested inside loops. Never allocate
+    // another snapshot on each dynamic reduction invocation.
+    OpBuilder entryBuilder = OpBuilder::atBlockBegin(&function.front());
+    Value snapshot = memref::AllocaOp::create(
+        entryBuilder, function.getLoc(),
+        MemRefType::get({maxLanes}, entryBuilder.getF32Type()),
+        entryBuilder.getI64IntegerAttr(16));
+    for (vector::ReductionOp reduction : reductions) {
+      OpBuilder builder(reduction);
+      Location loc = reduction.getLoc();
+      Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+      Value lanes = arith::ConstantIndexOp::create(
+          builder, loc, reduction.getVector().getType().getDimSize(0));
+      Value one = arith::ConstantIndexOp::create(builder, loc, 1);
+      auto store = vector::StoreOp::create(builder, loc, reduction.getVector(),
+                                           snapshot, ValueRange{zero});
+      store->setAttr(kScalarOrderedSnapshot, builder.getUnitAttr());
+      auto loop = scf::ForOp::create(builder, loc, zero, lanes, one,
+                                     ValueRange{reduction.getAcc()});
+      {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(loop.getBody());
+        auto lane = memref::LoadOp::create(builder, loc, snapshot,
+                                           ValueRange{loop.getInductionVar()});
+        lane->setAttr(kScalarOrderedSnapshot, builder.getUnitAttr());
+        Value next = arith::AddFOp::create(
+            builder, loc, loop.getRegionIterArgs()[0], lane.getResult());
+        scf::YieldOp::create(builder, loc, next);
+      }
+      reduction.replaceAllUsesWith(loop.getResult(0));
+      reduction.erase();
+    }
+  }
+  return success();
+}
+
 /// Converter-agnostic preparation the standard lowering expects to have run:
 /// linalg to loops (there is no linalg-to-LLVM lowering), strided-metadata
 /// expansion, memref expansion and vector-to-SCF.  None of them looks at
@@ -590,7 +802,8 @@ void prepareVectorOps(ModuleOp module, MLIRContext &context) {
 /// The final conversion: BOSCAME / SPM / DMA / tile plus every standard dialect
 /// that still stands between the module and LLVM.
 LogicalResult convertToLLVM(ModuleOp module, MLIRContext &context,
-                            const TileLoweringOptions &tileOptions) {
+                            const TileLoweringOptions &tileOptions,
+                            bool scalarF32OrderedReductions) {
   DataLayoutAnalysis dataLayoutAnalysis(module);
   LowerToLLVMOptions options(&context, dataLayoutAnalysis.getAtOrAbove(module));
   LLVMTypeConverter converter(&context, options, &dataLayoutAnalysis);
@@ -610,8 +823,12 @@ LogicalResult convertToLLVM(ModuleOp module, MLIRContext &context,
   RewritePatternSet patterns(&context);
   patterns.add<BOSCAMEToIntrinsicLowering>(converter, &context);
   patterns.add<SpmViewOpConversion>(converter, &context);
+  patterns.add<DDRFrameConversion, DDRReleaseConversion>(converter, &context);
   patterns.add<DmaStartOpConversion>(converter, &context);
   patterns.add<DmaWaitOpConversion>(converter, &context);
+  if (scalarF32OrderedReductions)
+    patterns.add<ScalarOrderedSnapshotLoadLowering,
+                 ScalarOrderedSnapshotStoreLowering>(converter);
   // The tile patterns share this converter, this target and this pattern set;
   // they do not run a conversion of their own.
   populateBOSCAMETileLoweringPatterns(converter, patterns, tileOptions);
@@ -660,7 +877,56 @@ struct BOSCAMELoweringOptions {
   /// tile operations are not present yet (they may be introduced earlier in the
   /// same pipeline).
   bool requireFpgaContract = false;
+  /// Opt-in FPGA workaround: ordered f32 reductions keep scalar accumulators.
+  bool scalarF32OrderedReductions = false;
 };
+
+/// Policy transitions do not clobber RVV registers on the delivered NR target.
+/// Keeping them as ABI calls would spill live vectors using
+/// vlenb/whole-register instructions that this target does not implement. Run
+/// this only after the conservative call-based matrix/DMA check, while
+/// declaration provenance is still available; genuine runtime calls retain
+/// their ordinary ABI.
+LogicalResult inlineNrCpuDdrPolicies(ModuleOp module) {
+  auto target = module->getAttrOfType<StringAttr>("bosc_ame.target");
+  if (!target || target.getValue() != "nr-fpga")
+    return success();
+  SmallVector<func::CallOp> calls;
+  module.walk([&](func::CallOp call) {
+    if (call->hasAttr(buddy::boscame::lowering::kCpuDdrPolicy))
+      calls.push_back(call);
+  });
+  for (func::CallOp call : calls) {
+    StringRef name = call.getCallee();
+    bool write = name == "bosc_ame_ddr_write_begin";
+    auto function = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+        call, call.getCalleeAttr());
+    if ((!write && name != "bosc_ame_ddr_read_begin") || !function ||
+        !function.isExternal() || function.getNumArguments() ||
+        function.getNumResults() || call.getNumOperands() ||
+        call.getNumResults() ||
+        !call->getAttrOfType<UnitAttr>(buddy::boscame::lowering::kCpuDdrPolicy))
+      return call.emitOpError(
+          "compiler DDR policy transition requires a reserved external "
+          "() -> () helper and unit policy provenance");
+    OpBuilder builder(call);
+    // Same defaults as BOSC_AME_DMA_SHARED_READS/WRITES in the NR runtime.
+    // These target intrinsics deliberately do not use an overridable ABI call.
+    int64_t policy =
+        write ? INT64_C(0x0f0f0f0f0f0f0f0f) : INT64_C(0x0f0f000f000f000f);
+    Value value =
+        LLVM::ConstantOp::create(builder, call.getLoc(), builder.getI64Type(),
+                                 builder.getI64IntegerAttr(policy));
+    LLVM::InlineAsmOp::create(
+        builder, call.getLoc(), TypeRange{}, ValueRange{value},
+        "fence iorw, iorw\n\tcsrw 0xbc0, $0", "r,~{memory}",
+        /*has_side_effects=*/true, /*is_align_stack=*/false,
+        LLVM::TailCallKind::None, /*convergent=*/false, LLVM::AsmDialectAttr(),
+        ArrayAttr());
+    call.erase();
+  }
+  return success();
+}
 
 /// The single lowering body behind both `-lower-bosc-ame` and
 /// `-lower-bosc-ame-tile`; the two differ only in which contract they demand
@@ -685,12 +951,31 @@ LogicalResult runBOSCAMELowering(ModuleOp module, MLIRContext &context,
       return failure();
   }
   declareDmaRuntimeHelpers(module);
+  if (failed(declareFrameRuntimeHelpers(module)))
+    return failure();
 
   // Stage 2: preparation.
+  // Reject unsupported ordered forms before canonicalization can erase masks
+  // or supply implicit accumulators. Recheck after preparation, where other
+  // vector rewrites can introduce reductions that also need scalarization.
+  if (options.scalarF32OrderedReductions &&
+      failed(scalarizeF32OrderedReductions(module, /*rewrite=*/false)))
+    return failure();
   if (failed(runPreparationPipeline(module, context)))
     return failure();
   prepareVectorOps(module, context);
+  if (options.scalarF32OrderedReductions &&
+      failed(scalarizeF32OrderedReductions(module, /*rewrite=*/true)))
+    return failure();
   if (failed(buddy::boscame::lowering::emitCpuDdrPolicies(module)))
+    return failure();
+  // Policy helpers remain calls for this check: an otherwise legal CPU memory
+  // operation may lie inside an ACC lifetime. The NR rewrite below must not
+  // weaken the existing matrix/DMA lifetime boundary.
+  if (module->hasAttr(buddy::boscame::lowering::kCpuDdrPolicy) &&
+      failed(verifySpmDmaContract(module)))
+    return failure();
+  if (failed(inlineNrCpuDdrPolicies(module)))
     return failure();
 
   // Stage 3: the loop structure follows automatically from the type conversion
@@ -699,7 +984,8 @@ LogicalResult runBOSCAMELowering(ModuleOp module, MLIRContext &context,
   // that no fixed-vector bridge can survive between them.
 
   // Stage 4: the unified BOSCAME / SPM / DMA / standard conversion.
-  if (failed(convertToLLVM(module, context, tileOptions)))
+  if (failed(convertToLLVM(module, context, tileOptions,
+                           options.scalarF32OrderedReductions)))
     return failure();
   reconcileCasts(module);
   return success();
@@ -724,6 +1010,12 @@ struct LegalizeBOSCAMEForLLVMExport
   LegalizeBOSCAMEForLLVMExport() = default;
   LegalizeBOSCAMEForLLVMExport(const LegalizeBOSCAMEForLLVMExport &) {}
 
+  Option<bool> scalarF32OrderedReductions{
+      *this, "scalar-f32-ordered-reductions",
+      llvm::cl::desc("Lower fixed rank-one ordered f32 ADD reductions with an "
+                     "accumulator to sequential scalar loads/adds"),
+      llvm::cl::init(false)};
+
   void getDependentDialects(DialectRegistry &registry) const override {
     registry
         .insert<BOSCAMEDialect, LLVM::LLVMDialect, affine::AffineDialect,
@@ -734,7 +1026,9 @@ struct LegalizeBOSCAMEForLLVMExport
   }
 
   void runOnOperation() override {
-    if (failed(runBOSCAMELowering(getOperation(), getContext(), {})))
+    BOSCAMELoweringOptions options;
+    options.scalarF32OrderedReductions = scalarF32OrderedReductions;
+    if (failed(runBOSCAMELowering(getOperation(), getContext(), options)))
       signalPassFailure();
   }
 };
@@ -759,6 +1053,12 @@ struct LowerBOSCAMETileOps
   LowerBOSCAMETileOps() = default;
   LowerBOSCAMETileOps(const LowerBOSCAMETileOps &) {}
 
+  Option<bool> scalarF32OrderedReductions{
+      *this, "scalar-f32-ordered-reductions",
+      llvm::cl::desc("Lower fixed rank-one ordered f32 ADD reductions with an "
+                     "accumulator to sequential scalar loads/adds"),
+      llvm::cl::init(false)};
+
   void getDependentDialects(DialectRegistry &registry) const override {
     registry
         .insert<BOSCAMEDialect, LLVM::LLVMDialect, affine::AffineDialect,
@@ -771,6 +1071,7 @@ struct LowerBOSCAMETileOps
   void runOnOperation() override {
     BOSCAMELoweringOptions options;
     options.requireFpgaContract = true;
+    options.scalarF32OrderedReductions = scalarF32OrderedReductions;
     if (failed(runBOSCAMELowering(getOperation(), getContext(), options)))
       signalPassFailure();
   }

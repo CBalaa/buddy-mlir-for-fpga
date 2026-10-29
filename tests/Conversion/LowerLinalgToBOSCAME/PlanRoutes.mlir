@@ -1,5 +1,6 @@
-// RUN: buddy-opt %s --kernel-contract-annotate --bosc-ame-plan=plan-report=true --bosc-ame-plan-verify 2>&1 | FileCheck %s --check-prefix=RETRY
-// RUN: buddy-opt %s --kernel-contract-annotate --bosc-ame-plan --bosc-ame-emit | FileCheck %s --check-prefix=EMIT --implicit-check-not=bosc_ame.dma.start
+// RUN: buddy-opt %s --kernel-contract-annotate --bosc-ame-plan='plan-version=1 plan-report=true' --bosc-ame-plan-verify 2>&1 | FileCheck %s --check-prefix=RETRY
+// RUN: buddy-opt %s --kernel-contract-annotate --bosc-ame-plan=plan-version=1 --bosc-ame-emit | FileCheck %s --check-prefix=EMIT --implicit-check-not=bosc_ame.dma.start
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // A repeats across two N subtiles, so the traffic rule initially stages it.
 // Both banks are occupied by private values live across the matmul. Capacity

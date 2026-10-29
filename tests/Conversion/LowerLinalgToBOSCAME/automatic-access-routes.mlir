@@ -1,9 +1,10 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/direct.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=COPY
-// RUN: not buddy-opt %t/staged.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=COPY
-// RUN: buddy-opt %t/window.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/window.out 2>%t/window.plan
+// RUN: not buddy-opt %t/direct.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=COPY
+// RUN: not buddy-opt %t/staged.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga' 2>&1 | FileCheck %s --check-prefix=COPY
+// RUN: buddy-opt %t/window.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias target=nr-fpga plan-report=true' -o %t/window.out 2>%t/window.plan
 // RUN: FileCheck %s --check-prefix=WINDOW < %t/window.out
 // RUN: buddy-opt %t/window.out --bosc-ame-spm-dma-check --lower-bosc-ame -o /dev/null
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // Preserve the original functions. Independent external copies have no V1
 // recipe; the explicit SPM window retains its bank/offset and initialization.

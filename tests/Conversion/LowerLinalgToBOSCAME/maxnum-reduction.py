@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t buddy-opt buddy-translate llc
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Keep maxnum's initializer, NaNs and explicit masked padding on the target."""
 
 import math
@@ -95,7 +96,7 @@ def main():
                 binary,
                 source,
                 "--kernel-contract-annotate",
-                "--bosc-ame-plan",
+                "--bosc-ame-plan=plan-version=1",
                 "--bosc-ame-plan-verify",
             )
             assert 'strategy = "ordered-vector-maxnum"' in planned

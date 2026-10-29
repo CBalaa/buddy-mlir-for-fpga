@@ -119,6 +119,10 @@ class Buffer:
         name=None,
         spm_root=None,
         spm_window=None,
+        storage_kind=None,
+        private_frame=None,
+        private_window=None,
+        frame_accesses=None,
     ):
         self.data, self.element, self.shape = data, element, shape
         self.strides = strides or strides_for(shape)
@@ -127,6 +131,63 @@ class Buffer:
         # Preserve the declared SpmView identity through descriptor aliases.
         # A bank bytearray alone cannot prove independent logical windows.
         self.spm_root, self.spm_window = spm_root, spm_window
+        self.storage_kind = storage_kind or (
+            "spm"
+            if bank is not None
+            else "external"
+            if name is not None
+            else "private-allocation"
+        )
+        self.private_frame = private_frame
+        self.private_window = private_window
+        self.frame_accesses = frame_accesses
+        if private_frame is not None and shape:
+            first = base + offset * self.width
+            last = (
+                first
+                + self.width
+                + sum(
+                    (size - 1) * stride * self.width
+                    for size, stride in zip(shape, self.strides)
+                )
+            )
+            if (
+                private_window is None
+                or first < private_window[0]
+                or last > private_window[1]
+            ):
+                raise SimError(
+                    "private DDR descriptor exceeds parent frame view"
+                )
+            self.private_window = (first, last)
+
+    def check_address(self, address, size):
+        if address < 0 or address + size > len(self.data):
+            raise SimError("address outside backing storage")
+        if self.private_frame is not None:
+            if not self.private_frame["alive"]:
+                raise SimError("private DDR use after frame release")
+            begin, end = self.private_window
+            if address < begin or address + size > end:
+                raise SimError("private DDR access outside declared frame view")
+
+    def record_private(self, address, size, kind):
+        if self.private_frame is None or self.frame_accesses is None:
+            return
+        name = self.private_frame["name"]
+        entry = (name, address, address + size, kind)
+        if (
+            self.frame_accesses
+            and self.frame_accesses[-1][0] == name
+            and (
+                self.frame_accesses[-1][2] == address
+                and self.frame_accesses[-1][3] == kind
+            )
+        ):
+            previous = self.frame_accesses[-1]
+            self.frame_accesses[-1] = (name, previous[1], address + size, kind)
+        else:
+            self.frame_accesses.append(entry)
 
     def address(self, indices):
         if len(indices) != len(self.shape) or any(
@@ -138,12 +199,12 @@ class Buffer:
             + (self.offset + sum(i * s for i, s in zip(indices, self.strides)))
             * self.width
         )
-        if address < 0 or address + self.width > len(self.data):
-            raise SimError("address outside backing storage")
+        self.check_address(address, self.width)
         return address
 
     def load(self, indices):
         address = self.address(indices)
+        self.record_private(address, self.width, "read")
         if self.element.startswith("f"):
             return struct.unpack_from(
                 "<f" if self.width == 4 else "<d", self.data, address
@@ -166,8 +227,8 @@ class Buffer:
         model the hardware address calculation without silently replacing the
         descriptor's physical layout.
         """
-        if address < 0 or address + self.width > len(self.data):
-            raise SimError("address outside backing storage")
+        self.check_address(address, self.width)
+        self.record_private(address, self.width, "write")
         if self.element.startswith("f"):
             struct.pack_into(
                 "<f" if self.width == 4 else "<d", self.data, address, value
@@ -196,6 +257,14 @@ class Machine:
             bytearray([0x5A]) * (128 * 1024),
         ]
         self.accesses = []
+        self.private_poison = 0xA5
+        self.private_arena = bytearray([0xD3]) * 262144
+        self.private_top = 0
+        self.private_frames = []
+        self.frame_accesses = []
+        self.ame_frame_accesses = []
+        self.frame_log = []
+        self.launch_generation = 0
         # Keep endpoint names for structural checks.  A direct-DDR store must
         # never appear as a DMA destination; its destination is the user C
         # buffer and the operation is represented by a vector/AME store.
@@ -344,8 +413,10 @@ class Machine:
             ):
                 raise SimError("matrix copy exceeds valid endpoint rows")
             if endpoint.bank is None:
-                if endpoint.name is None:
-                    raise SimError("matrix DDR endpoint must be external")
+                if endpoint.storage_kind not in ("external", "private-frame"):
+                    raise SimError(
+                        "matrix DDR endpoint must be external or managed frame"
+                    )
             elif (
                 not 0 <= endpoint.bank < len(self.spm)
                 or endpoint.data is not self.spm[endpoint.bank]
@@ -359,6 +430,8 @@ class Machine:
                 for address in addresses
             ):
                 raise SimError("matrix copy exceeds backing storage")
+            for address in addresses:
+                endpoint.check_address(address, row_bytes)
             return addresses, (first_row, column)
 
         source_rows, source_origin = spans(
@@ -419,7 +492,17 @@ class Machine:
                 (source, src, "read"),
                 (target, dst, "write"),
             ):
-                if endpoint.bank is None:
+                if endpoint.private_frame is not None:
+                    endpoint.record_private(address, row_bytes, kind)
+                    self.ame_frame_accesses.append(
+                        (
+                            endpoint.private_frame["name"],
+                            address,
+                            address + row_bytes,
+                            kind,
+                        )
+                    )
+                elif endpoint.bank is None:
                     self.accesses.append(
                         (endpoint.name, address, address + row_bytes, kind)
                     )
@@ -716,6 +799,37 @@ class Machine:
                         minmax_number(value, lane, maximum=True), element
                     )
             self.result(op, [value])
+        elif name == "vector.from_elements":
+            shape, element = type_shape(types)
+            if len(shape) != 1 or shape[0] != len(operands):
+                raise SimError(
+                    "vector.from_elements requires exactly one scalar per lane"
+                )
+            values = [get(operand) for operand in operands]
+            if any(isinstance(value, list) for value in values):
+                raise SimError("vector.from_elements operands must be scalars")
+            self.result(op, [[rounded(value, element) for value in values]])
+        elif name == "vector.insert":
+            values = get(operands[1])
+            positions = re.search(r"\[(.*?)\]", body)
+            if positions is None:
+                raise SimError("vector insert requires an explicit position")
+            positions = _split_top_level(positions[1])
+            if len(positions) != 1 or not isinstance(values, list):
+                raise SimError(
+                    "only scalar insertion into a 1D vector is supported"
+                )
+            value = get(operands[0])
+            position = get(positions[0])
+            if (
+                isinstance(value, list)
+                or position < 0
+                or position >= len(values)
+            ):
+                raise SimError("vector insert index or source outside vector")
+            result = list(values)
+            result[position] = value
+            self.result(op, [result])
         elif name == "vector.extract":
             values = get(operands[0])
             positions = re.search(r"\[(.*?)\]", body)
@@ -730,6 +844,78 @@ class Machine:
             if position < 0 or position >= len(values):
                 raise SimError("vector extract index outside vector")
             self.result(op, [values[position]])
+        elif name == "bosc_ame.ddr.frame":
+            if self.live_matrix or self.pending:
+                raise SimError(
+                    "private frame acquisition inside device lifetime"
+                )
+            shape, element = type_shape(types)
+            if (
+                len(shape) != 1
+                or element != "i8"
+                or not shape[0]
+                or (shape[0] % 64 or shape[0] > 262016)
+            ):
+                raise SimError("invalid private DDR frame type")
+            byte_count = shape[0]
+            start = self.private_top
+            end = start + byte_count + 128
+            if end > len(self.private_arena):
+                raise SimError("private DDR arena exhausted")
+            begin = start + 64
+            self.private_arena[start:begin] = bytes([0xD3]) * 64
+            self.private_arena[begin : begin + byte_count] = (
+                bytes([self.private_poison]) * byte_count
+            )
+            self.private_arena[end - 64 : end] = bytes([0xD3]) * 64
+            frame = {
+                "name": f"private:{result_name(op.text)}:{self.launch_generation}",
+                "begin": begin,
+                "end": begin + byte_count,
+                "alive": True,
+                "guard_begin": start,
+                "guard_end": end,
+            }
+            self.private_top = end
+            self.private_frames.append(frame)
+            self.frame_log.append(
+                ("acquire", frame["name"], begin, begin + byte_count)
+            )
+            self.result(
+                op,
+                [
+                    Buffer(
+                        self.private_arena,
+                        "i8",
+                        shape,
+                        base=begin,
+                        storage_kind="private-frame",
+                        private_frame=frame,
+                        private_window=(begin, begin + byte_count),
+                        frame_accesses=self.frame_accesses,
+                    )
+                ],
+            )
+        elif name == "bosc_ame.ddr.release":
+            source = get(operands[0])
+            frame = source.private_frame
+            if (
+                self.live_matrix
+                or self.pending
+                or frame is None
+                or not frame["alive"]
+            ):
+                raise SimError("invalid private DDR frame release/lifetime")
+            if self.private_top != frame["guard_end"]:
+                raise SimError("private DDR frames must release in LIFO order")
+            for start in (frame["guard_begin"], frame["end"]):
+                if self.private_arena[start : start + 64] != bytes([0xD3]) * 64:
+                    raise SimError("private DDR frame guard overwritten")
+            frame["alive"] = False
+            self.private_top = frame["guard_begin"]
+            self.frame_log.append(
+                ("release", frame["name"], frame["begin"], frame["end"])
+            )
         elif name in ("memref.alloc", "memref.alloca"):
             shape, element = type_shape(types)
             if any(n is None for n in shape):
@@ -768,7 +954,8 @@ class Machine:
                 op,
                 [
                     Buffer(
-                        bytearray(elements * WIDTHS[element]),
+                        bytearray([self.private_poison])
+                        * (elements * WIDTHS[element]),
                         element,
                         shape,
                         strides,
@@ -824,6 +1011,10 @@ class Machine:
                         name=source.name,
                         spm_root=source.spm_root,
                         spm_window=source.spm_window,
+                        storage_kind=source.storage_kind,
+                        private_frame=source.private_frame,
+                        private_window=source.private_window,
+                        frame_accesses=source.frame_accesses,
                     )
                 ],
             )
@@ -845,6 +1036,10 @@ class Machine:
                         name=source.name,
                         spm_root=source.spm_root,
                         spm_window=source.spm_window,
+                        storage_kind=source.storage_kind,
+                        private_frame=source.private_frame,
+                        private_window=source.private_window,
+                        frame_accesses=source.frame_accesses,
                     )
                 ],
             )
@@ -878,6 +1073,10 @@ class Machine:
                         name=source.name,
                         spm_root=source.spm_root,
                         spm_window=source.spm_window,
+                        storage_kind=source.storage_kind,
+                        private_frame=source.private_frame,
+                        private_window=source.private_window,
+                        frame_accesses=source.frame_accesses,
                     )
                 ],
             )
@@ -914,6 +1113,10 @@ class Machine:
                         name=source.name,
                         spm_root=source.spm_root,
                         spm_window=source.spm_window,
+                        storage_kind=source.storage_kind,
+                        private_frame=source.private_frame,
+                        private_window=source.private_window,
+                        frame_accesses=source.frame_accesses,
                     )
                 ],
             )
@@ -933,6 +1136,10 @@ class Machine:
                         name=source.name,
                         spm_root=source.spm_root,
                         spm_window=source.spm_window,
+                        storage_kind=source.storage_kind,
+                        private_frame=source.private_frame,
+                        private_window=source.private_window,
+                        frame_accesses=source.frame_accesses,
                     )
                 ],
             )
@@ -947,6 +1154,10 @@ class Machine:
                 name=source.name,
                 spm_root=source.spm_root,
                 spm_window=source.spm_window,
+                storage_kind=source.storage_kind,
+                private_frame=source.private_frame,
+                private_window=source.private_window,
+                frame_accesses=source.frame_accesses,
             )
             self.result(
                 op, [base, source.offset, *source.shape, *source.strides]
@@ -1221,6 +1432,8 @@ class Machine:
                 (source, src, "read"),
                 (destination, dst, "write"),
             ):
+                buffer.check_address(address, length)
+                buffer.record_private(address, length, kind)
                 if buffer.name is not None:
                     self.accesses.append(
                         (buffer.name, address, address + length, kind)
@@ -1239,8 +1452,13 @@ class Machine:
             source = get(operands[0])
             shape, _ = type_shape(types.split(" -> ")[-1])
             direct = re.search(r"\bbosc_ame\.direct_ddr\b", op.text) is not None
-            if direct and source.bank is not None:
-                raise SimError("direct tile load must read external DDR")
+            if direct and source.storage_kind not in (
+                "external",
+                "private-frame",
+            ):
+                raise SimError(
+                    "direct tile load requires external DDR or managed private frame"
+                )
             if not direct and source.bank is None:
                 raise SimError("SPM tile load must read an SPM window")
             if (
@@ -1257,6 +1475,16 @@ class Machine:
                 raise SimError(
                     "tile load requires its physical contiguous axis"
                 )
+            if direct and source.private_frame is not None:
+                for i in range(shape[major]):
+                    indices = [0, 0]
+                    indices[major] = i
+                    begin = source.address(indices)
+                    end = begin + shape[minor] * source.width
+                    source.check_address(begin, end - begin)
+                    self.ame_frame_accesses.append(
+                        (source.private_frame["name"], begin, end, "read")
+                    )
             if direct and source.name is not None:
                 for i in range(shape[major]):
                     indices = [0, 0]
@@ -1318,8 +1546,13 @@ class Machine:
             if self.pending:
                 raise SimError("tile store before DMA wait")
             direct = re.search(r"\bbosc_ame\.direct_ddr\b", op.text) is not None
-            if direct and destination.bank is not None:
-                raise SimError("direct tile store must target external DDR")
+            if direct and destination.storage_kind not in (
+                "external",
+                "private-frame",
+            ):
+                raise SimError(
+                    "direct tile store requires external DDR or managed private frame"
+                )
             if direct and (
                 len(destination.shape) != 2
                 or len(matrix) > destination.shape[0]
@@ -1334,6 +1567,16 @@ class Machine:
                     row_bytes = len(row) * destination.width
                     if row_start + row_bytes > len(destination.data):
                         raise SimError("direct tile store exceeds destination")
+                    destination.check_address(row_start, row_bytes)
+                    if destination.private_frame is not None:
+                        self.ame_frame_accesses.append(
+                            (
+                                destination.private_frame["name"],
+                                row_start,
+                                row_start + row_bytes,
+                                "write",
+                            )
+                        )
                     for j, value in enumerate(row):
                         destination.store_address(
                             row_start + j * destination.width, value
@@ -1364,6 +1607,9 @@ class Machine:
 
     def launch(self, buffers, scalars=None):
         scalars = scalars or {}
+        if self.private_top:
+            raise SimError("previous launch leaked a private DDR frame")
+        self.launch_generation += 1
         self.values = {}
         signature = self.function.text.split("(", 1)[1].split(")", 1)[0]
         for part in _split_top_level(signature):
@@ -1407,5 +1653,7 @@ class Machine:
             else:
                 self.values[name] = scalars.get(name, 0)
         self.block(self.function.blocks[0])
-        if self.pending or self.live_matrix:
-            raise SimError("unfinished DMA or matrix values at return")
+        if self.pending or self.live_matrix or self.private_top:
+            raise SimError(
+                "unfinished DMA, matrix values or private frame at return"
+            )

@@ -48,7 +48,7 @@ def main():
         return invoke(
             path,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan=plan-report=true",
+            "--bosc-ame-plan=plan-version=1 plan-report=true",
             "--bosc-ame-plan-verify",
         )
 
@@ -63,7 +63,7 @@ def main():
             ROOT
             / "tests/Conversion/LowerLinalgToBOSCAME/Inputs/contracts"
             / f"{name}.contract.mlir",
-            "--bosc-ame-plan=plan-report=true",
+            "--bosc-ame-plan=plan-version=1 plan-report=true",
             "--bosc-ame-plan-verify",
         )
         assert result.returncode == 0, (name, result.stderr)

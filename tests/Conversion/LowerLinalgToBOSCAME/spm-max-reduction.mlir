@@ -1,17 +1,20 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/supported.mlir --linalg-to-boscame -o %t/supported.out
+// RUN: buddy-opt %t/supported.mlir --linalg-to-boscame='plan-version=1' -o %t/supported.out
 // RUN: FileCheck %s --check-prefix=SUPPORTED --implicit-check-not=linalg.reduce < %t/supported.out
 // RUN: FileCheck %s --check-prefix=SCALAR < %t/supported.out
-// RUN: not buddy-opt %t/unsupported.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=BAD-COMBINER
-// RUN: not buddy-opt %t/complex.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=COMPLEX
-// RUN: not buddy-opt %t/fast-maximum.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=FAST
-// RUN: not buddy-opt %t/fast-maxnum.mlir --linalg-to-boscame 2>&1 | FileCheck %s --check-prefix=FAST
+// RUN: not buddy-opt %t/unsupported.mlir --linalg-to-boscame='plan-version=1' 2>&1 | FileCheck %s --check-prefix=BAD-COMBINER
+// RUN: not buddy-opt %t/complex.mlir --linalg-to-boscame='plan-version=1' 2>&1 | FileCheck %s --check-prefix=COMPLEX
+// RUN: not buddy-opt %t/fast-maximum.mlir --linalg-to-boscame='plan-version=1' 2>&1 | FileCheck %s --check-prefix=FAST
+// RUN: not buddy-opt %t/fast-maxnum.mlir --linalg-to-boscame='plan-version=1' 2>&1 | FileCheck %s --check-prefix=FAST
 
-// RUN: buddy-opt %t/automatic.mlir --kernel-contract-annotate --bosc-ame-plan --bosc-ame-plan-verify -o %t/planned.mlir
+// RUN: buddy-opt %t/automatic.mlir --kernel-contract-annotate --bosc-ame-plan='plan-version=1' --bosc-ame-plan-verify -o %t/planned.mlir
 // RUN: FileCheck %s --check-prefix=PLAN < %t/planned.mlir
 // RUN: sed -e 's/ordered-scalar-max/ordered-vector-add/g' -e 's/vector_bytes = 4 : i64/vector_bytes = 64 : i64/g' %t/planned.mlir | not buddy-opt --bosc-ame-plan-verify 2>&1 | FileCheck %s --check-prefix=STRATEGY
-// RUN: buddy-opt %t/automatic.mlir --linalg-to-boscame | FileCheck %s --check-prefix=AUTO --implicit-check-not=linalg.reduce
-// RUN: buddy-opt %t/automatic.mlir --linalg-to-boscame --lower-bosc-ame -o /dev/null
+// RUN: buddy-opt %t/automatic.mlir --linalg-to-boscame='plan-version=1' | FileCheck %s --check-prefix=AUTO --implicit-check-not=linalg.reduce
+// RUN: buddy-opt %t/automatic.mlir --linalg-to-boscame='plan-version=1' --lower-bosc-ame -o /dev/null
+
+// Explicit V1 storage-policy compatibility; V2 defaults are covered by the
+// schedule and stream tests.
 
 // Read SPM through the vector port. maximumf retains the original scalar
 // operation and argument order: it must not silently become maxnumf/vfredmax,

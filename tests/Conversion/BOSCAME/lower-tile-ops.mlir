@@ -2,20 +2,19 @@
 // RUN: buddy-opt %s --lower-bosc-ame-tile | FileCheck %s --check-prefix=LOWER
 // RUN: buddy-opt %s --lower-bosc-ame | buddy-translate --buddy-to-llvmir | FileCheck %s --check-prefix=IR
 
-// Lowering of the five tile operations to the registered ptr FPGA intrinsics.
+// Lowering of the five tile operations to ordered LLVM target intrinsics.
 //
 // The problem is deliberately non-square (M=8, K=16, N=32) and the B operand is
 // pitched (K = 16 contiguous inside physical rows that are 24 bytes apart), so
 //
-//   * a swapped M/N/K shows up in the `msettile*` values,
+//   * a swapped M/N/K shows up in the configuration arguments,
 //   * using `strides[0]` for B instead of the physical row pitch shows up as a
 //     byte stride of 1 instead of 24,
 //   * the A row stride (16) differs from the B row pitch (24), which an
 //     M = N = K = 64 problem could never distinguish.
 //
-// The tile operations must lower directly to `bosc_ame.intr.*` with LLVM
-// pointers; the old memref-based AME assembly operations are not involved, and
-// `--lower-bosc-ame-tile` produces the same IR.
+// The tile operations lower directly to ordered `llvm.call_intrinsic` with
+// LLVM pointers; `--lower-bosc-ame-tile` produces the same IR.
 //
 // The LLVM IR is where the values are checkable: after translation the
 // configuration and the strides are literal operands of the calls,
@@ -40,44 +39,27 @@ module attributes {bosc_ame.target = "nr-fpga"} {
 
     // The accumulator load programs M = 8, N = 32 and the i32 accumulator
     // phase (0x10042 = 65602) before reading rows of 4 * 32 = 128 bytes from
-    // the accumulator.  The checks below pin that configuration, in that
-    // both sides of the load.
-    // IR: call i64 @llvm.riscv.bosc.msettilem.i64(i64 8)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettilen.i64(i64 32)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettype.i64(i64 65602)
-    // IR-NEXT: call <vscale x 32 x i32> @llvm.riscv.bosc.mlce32.m.nxv32i32.i64(ptr {{.*}}, i64 128)
+    // the accumulator. The check pins the complete load configuration.
+    // IR: call <vscale x 32 x i32> @llvm.riscv.bosc.ordered.load.acc.nxv32i32(ptr {{.*}}, i64 128, i64 8, i64 32, i64 65602)
     %acc0 = bosc_ame.tile.load_acc %c : memref<8x32xi32, #bosc_ame.spm<0>> -> vector<8x32xi32>
 
     // A: M = 8, K = 16, i8 phase (0x10010 = 65552), 16-byte row stride, and
     // the first tile of the MMA.
-    // IR: call i64 @llvm.riscv.bosc.msettilem.i64(i64 8)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettilek.i64(i64 16)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettype.i64(i64 65552)
-    // IR-NEXT: call <vscale x 128 x i8> @llvm.riscv.bosc.mlae8.m.nxv128i8.i64(ptr {{.*}}, i64 16)
+    // IR: call <vscale x 128 x i8> @llvm.riscv.bosc.ordered.load.a.nxv128i8(ptr {{.*}}, i64 16, i64 8, i64 16, i64 65552)
     %ta = bosc_ame.tile.load_a %a : memref<8x16xi8, strided<[16, 1], offset: 0>, #bosc_ame.spm<0>> -> vector<8x16xi8>
 
     // B: K = 16 and N = 32 come from the *logical* [K, N] shape, but the byte
     // stride is the physical row pitch 24, not strides[0] = 1.
-    // IR: call i64 @llvm.riscv.bosc.msettilen.i64(i64 32)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettilek.i64(i64 16)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettype.i64(i64 65552)
-    // IR-NEXT: call <vscale x 128 x i8> @llvm.riscv.bosc.mlbe8.m.nxv128i8.i64(ptr {{.*}}, i64 24)
+    // IR: call <vscale x 128 x i8> @llvm.riscv.bosc.ordered.load.b.nxv128i8(ptr {{.*}}, i64 24, i64 32, i64 16, i64 65552)
     %tb = bosc_ame.tile.load_b %b : memref<16x32xi8, strided<[1, 24], offset: 0>, #bosc_ame.spm<1>> -> vector<16x32xi8>
 
     // M = 8, N = 32, K = 16 and the compute phase for the MMA itself.
-    // IR: call i64 @llvm.riscv.bosc.msettilem.i64(i64 8)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettilen.i64(i64 32)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettilek.i64(i64 16)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettype.i64(i64 65552)
-    // IR-NEXT: call <vscale x 32 x i32> @llvm.riscv.bosc.mqma.b.mm.nxv32i32.nxv128i8(
+    // IR: call <vscale x 32 x i32> @llvm.riscv.bosc.ordered.mma.nxv32i32.nxv128i8({{.*}}, i64 8, i64 32, i64 16, i64 65552)
     %c1 = bosc_ame.tile.mma %acc0, %ta, %tb : vector<8x32xi32>, vector<8x16xi8>, vector<16x32xi8> -> vector<8x32xi32>
 
     // The write-back programs the accumulator phase again and stores rows of
     // 128 bytes from the accumulator.
-    // IR: call i64 @llvm.riscv.bosc.msettilem.i64(i64 8)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettilen.i64(i64 32)
-    // IR-NEXT: call i64 @llvm.riscv.bosc.msettype.i64(i64 65602)
-    // IR-NEXT: call void @llvm.riscv.bosc.msce32.m.nxv32i32.i64(<vscale x 32 x i32> {{.*}}, ptr {{.*}}, i64 128)
+    // IR: call void @llvm.riscv.bosc.ordered.store.acc.nxv32i32(<vscale x 32 x i32> {{.*}}, ptr {{.*}}, i64 128, i64 8, i64 32, i64 65602)
     bosc_ame.tile.store_acc %c1, %c : vector<8x32xi32>, memref<8x32xi32, #bosc_ame.spm<0>>
 
     // No tile operation may fall through to the generic BOSCAME lowering, and
@@ -91,9 +73,8 @@ module attributes {bosc_ame.target = "nr-fpga"} {
     // LOWER-NOT: "bosc_ame.msce32.m"
     // LOWER-NOT: "bosc_ame.mqma.b.mm"
 
-    // The FPGA register-file convention is selected on the lowered function, so
     // Register allocation stays with the backend: the lowering names no
-// register and does not annotate a subtarget feature.
-        return %c0_i32 : i32
+    // register and does not annotate a subtarget feature.
+    return %c0_i32 : i32
   }
 }

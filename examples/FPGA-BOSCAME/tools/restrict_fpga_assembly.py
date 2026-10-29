@@ -23,6 +23,23 @@ the immediate, and restores t6 and sp; no vector register is borrowed.
 Opt-in --order-vector-copies moves an independent scalar counter increment
 past a matching byte-vector store. NR can stall when that increment separates
 the load and store; both memory instructions retain their surrounding fences.
+Opt-in --expand-f32-scalar-moves replaces e32 vmv.s.x with allowed fmv.w.x
+and vfmv.s.f, preserving ft11 through a temporary 16-byte scalar stack slot.
+--expand-f32-sub also enables this bit-preserving scalar seed expansion for
+existing NR build recipes. The new slot increases peak stack use by 16 bytes;
+it stores one 64-bit scalar register and introduces no vector spill or buffer.
+The f32 expansions accept a vector configuration proved on every reachable
+control-flow path; unknown entry state, calls and opaque control flow cannot
+provide that proof. No physical VLEN is assumed or read.
+By default, unmasked fixed-AVL e32 vfredosum.vs is expanded into sequential
+scalar fadd.s in lane order, using a bounded stack snapshot of active lanes.
+All scratch registers are saved, and stack alignment and vector configuration
+are preserved. This checked compiler-output path assumes vstart=0. Unknown,
+dynamic, masked, fractional-LMUL and non-e32 forms fail closed. Diagnostic
+--allow-vector-ordered-reductions explicitly retains the vector instruction.
+Production recipes instead use --reject-vector-ordered-reductions after
+scalar SSA lowering: the legacy vector/FPR roundtrip expansion is retained
+for diagnosis and ISA regression, but is not reliable on the FPGA.
 Opt-in --order-vector-adds handles the verified e32/16/m4 integer-add loop:
 replace its independent counter increment with c.nop and emit the increment
 after the vector store's trailing fence. Vector arithmetic stays unchanged.
@@ -31,6 +48,7 @@ after the vector store's trailing fence. Vector arithmetic stays unchanged.
 import argparse
 import re
 import sys
+from collections import deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -239,6 +257,294 @@ def _expand_vector_merge(code):
     )
 
 
+def _proved_vector_sew(source_lines, *, full_config=False):
+    """Meet SEW or fixed-AVL configuration facts over the compiler CFG."""
+    nodes = []
+    labels = {}
+    entries = []
+    executable = True
+    previous = True
+    sections = []
+    function_entries = set()
+    for number, line in enumerate(source_lines):
+        code = line.split("#", 1)[0].strip()
+        if not code or code.startswith("//"):
+            continue
+        mnemonic = code.split()[0]
+        function = re.fullmatch(r"\.type\s+([\w.$]+)\s*,\s*[@%]function", code)
+        exported = re.fullmatch(r"\.(?:globl|global)\s+([\w.$]+)", code)
+        if function or exported:
+            function_entries.add((function or exported)[1])
+        if mnemonic in (".text", ".data", ".bss", ".rodata", ".sdata", ".sbss"):
+            previous, executable = executable, mnemonic == ".text"
+        elif mnemonic in (".section", ".pushsection"):
+            if mnemonic == ".pushsection":
+                sections.append(executable)
+            fields = code.split(None, 1)[1].split(",")
+            name = fields[0].strip().strip('"')
+            flags = fields[1].strip().strip('"') if len(fields) > 1 else ""
+            previous, executable = (
+                executable,
+                ("x" in flags or name == ".text" or name.startswith(".text.")),
+            )
+        elif mnemonic == ".popsection":
+            if not sections:
+                return {}
+            previous, executable = executable, sections.pop()
+        elif mnemonic == ".previous":
+            executable, previous = previous, executable
+        if not executable:
+            continue
+        label = re.match(r"^([\w.$]+):\s*(.*)$", code)
+        if label:
+            if label[1] in labels:
+                return {}
+            labels[label[1]] = len(nodes)
+            if not label[1].startswith(".L") or label[1] in function_entries:
+                entries.append(len(nodes))
+            code = label[2]
+        nodes.append((number, code))
+    if not nodes:
+        return {}
+    conditional = {
+        "beq",
+        "bne",
+        "blt",
+        "bge",
+        "bltu",
+        "bgeu",
+        "beqz",
+        "bnez",
+        "bltz",
+        "bgez",
+        "blez",
+        "bgtz",
+        "bgt",
+        "ble",
+        "bgtu",
+        "bleu",
+    }
+    edges = []
+    for i, (_, code) in enumerate(nodes):
+        mnemonic = code.split()[0] if code else ""
+        successor = [i + 1] if i + 1 < len(nodes) else []
+        if mnemonic in conditional | {"c.beqz", "c.bnez"} or mnemonic in (
+            "j",
+            "c.j",
+        ):
+            target = code.split(",")[-1].split()[-1]
+            if target not in labels:
+                return {}  # An opaque edge can enter a local block anywhere.
+            successor = ([] if mnemonic in ("j", "c.j") else successor) + [
+                labels[target]
+            ]
+        elif mnemonic in ("ret", "c.ret"):
+            successor = []
+        elif (
+            mnemonic == "tail"
+            or mnemonic
+            in (
+                "jr",
+                "jal",
+                "jalr",
+                "c.jr",
+                "c.jalr",
+                "c.jal",
+            )
+            or (
+                mnemonic
+                in (
+                    "mret",
+                    "sret",
+                    "uret",
+                    "dret",
+                    "ecall",
+                    "ebreak",
+                    "c.ebreak",
+                    "wfi",
+                    ".insn",
+                )
+                or mnemonic.startswith(("cm.j", "cm.popret"))
+                or mnemonic.startswith("c.b")
+                or mnemonic.startswith("j")
+                or (
+                    mnemonic.startswith("b")
+                    and mnemonic
+                    not in {
+                        "bclr",
+                        "bclri",
+                        "bext",
+                        "bexti",
+                        "binv",
+                        "binvi",
+                        "bset",
+                        "bseti",
+                    }
+                )
+            )
+        ):
+            return {}
+        words = _raw_words(code)
+        if words is not None and any(not is_ame(word) for word in words):
+            return {}
+        edges.append(successor)
+    incoming = [None] * len(nodes)  # None = unreachable; 0 = unknown SEW.
+    pending = deque()
+    for entry in {0, *entries}:
+        incoming[entry] = 0
+        pending.append(entry)
+    while pending:
+        i = pending.popleft()
+        _, code = nodes[i]
+        mnemonic = code.split()[0] if code else ""
+        state = incoming[i]
+        if mnemonic in ("vsetvli", "vsetivli"):
+            config = re.fullmatch(
+                r"vseti?vli\s+\w+\s*,\s*(\w+)\s*,\s*"
+                r"e(8|16|32|64)\s*,\s*(m(?:f[248]|[1248]))\s*,\s*"
+                r"(t[au])\s*,\s*(m[au])",
+                code,
+            )
+            state = 0
+            if config:
+                if not full_config:
+                    state = int(config[2])
+                elif mnemonic == "vsetivli":
+                    avl = config[1]
+                    if re.fullmatch(r"(?:0x[0-9a-fA-F]+|[0-9]+)", avl):
+                        avl = int(avl, 16 if "x" in avl else 10)
+                        if 0 <= avl <= 31:
+                            state = (
+                                avl,
+                                int(config[2]),
+                                *config.group(3, 4, 5),
+                            )
+        elif (
+            mnemonic in ("call", "vsetvl")
+            or mnemonic.startswith("csr")
+            or mnemonic.startswith(".")
+            and not mnemonic.startswith(
+                (
+                    ".cfi_",
+                    ".p2align",
+                    ".align",
+                    ".file",
+                    ".ident",
+                    ".type",
+                    ".size",
+                    ".globl",
+                    ".local",
+                    ".attribute",
+                    ".option",
+                )
+            )
+        ):
+            state = 0
+        for target in edges[i]:
+            old = incoming[target]
+            merged = state if old is None else old if old == state else 0
+            if old != merged:
+                incoming[target] = merged
+                pending.append(target)
+    return {
+        number: incoming[i]
+        for i, (number, _) in enumerate(nodes)
+        if incoming[i]
+    }
+
+
+def _expand_f32_scalar_move(code):
+    operands = re.fullmatch(
+        r"vmv\.s\.x\s+(v(?:[0-9]|[12][0-9]|3[01]))\s*,\s*(\w+)", code
+    )
+    if not operands:
+        raise ValueError("f32 scalar move expansion requires compiler operands")
+    destination, source = operands.groups()
+    source = canonical_gpr(source)
+    if source == "sp":
+        raise ValueError(
+            "f32 scalar move expansion cannot change its source sp"
+        )
+    return (
+        "\taddi\tsp, sp, -16",
+        "\tfsd\tft11, 0(sp)",
+        f"\tfmv.w.x\tft11, {source}",
+        f"\tvfmv.s.f\t{destination}, ft11",
+        "\tfld\tft11, 0(sp)",
+        "\taddi\tsp, sp, 16",
+    )
+
+
+def _expand_f32_ordered_reduction(code, configuration, label, insert_fences):
+    """Snapshot active f32 lanes and add in order with saved scalar scratch.
+
+    Normal compiler execution has vstart=0. Repeating the same fixed-AVL
+    configuration returns the same actual VL without reading vector CSRs.
+    AVL bounds the buffer independently of VLEN. VL=0 performs no FP work.
+    """
+    vector = r"(v(?:[0-9]|[12][0-9]|3[01]))"
+    operands = re.fullmatch(
+        r"vfredosum\.vs\s+"
+        + vector
+        + r"\s*,\s*"
+        + vector
+        + r"\s*,\s*"
+        + vector,
+        code,
+    )
+    if (
+        not configuration
+        or configuration[1] != 32
+        or configuration[2] not in {"m1", "m2", "m4", "m8"}
+        or not operands
+    ):
+        raise ValueError(
+            "ordered f32 scalar reduction requires a CFG-proved fixed-AVL "
+            "e32 integer-LMUL vsetivli and unmasked compiler operands; "
+            "use --allow-vector-ordered-reductions only for hardware diagnostics"
+        )
+    destination, source, seed = operands.groups()
+    avl, sew, lmul, tail, mask = configuration
+    if int(source[1:]) % int(lmul[1:]):
+        raise ValueError("ordered reduction source group is not LMUL-aligned")
+    size = 32 + ((4 * avl + 15) // 16) * 16
+    done, loop = label + "_done", label + "_loop"
+    lines = [
+        f"\taddi\tsp, sp, -{size}",
+        "\tsd\tt5, 0(sp)",
+        "\tsd\tt6, 8(sp)",
+        "\tfsd\tft10, 16(sp)",
+        "\tfsd\tft11, 24(sp)",
+        f"\tvsetivli\tt6, {avl}, e{sew}, {lmul}, {tail}, {mask}",
+        f"\tbeqz\tt6, {done}",
+        f"\tvfmv.f.s\tft10, {seed}",
+        "\taddi\tt5, sp, 32",
+    ]
+    if insert_fences:
+        lines.append("\tfence\trw, rw")
+    lines.append(f"\tvse32.v\t{source}, (t5)")
+    if insert_fences:
+        lines.append("\tfence\trw, rw")
+    lines.extend(
+        (
+            loop + ":",
+            "\tflw\tft11, 0(t5)",
+            "\tfadd.s\tft10, ft10, ft11",
+            "\taddi\tt5, t5, 4",
+            "\taddi\tt6, t6, -1",
+            f"\tbnez\tt6, {loop}",
+            f"\tvfmv.s.f\t{destination}, ft10",
+            done + ":",
+            "\tfld\tft11, 24(sp)",
+            "\tfld\tft10, 16(sp)",
+            "\tld\tt6, 8(sp)",
+            "\tld\tt5, 0(sp)",
+            f"\taddi\tsp, sp, {size}",
+        )
+    )
+    return lines
+
+
 def transform(
     source,
     coalesce_fences=False,
@@ -247,13 +553,15 @@ def transform(
     order_vector_adds=False,
     insert_fences=True,
     expand_vector_merges=False,
+    expand_f32_scalar_moves=False,
+    scalarize_f32_ordered_reductions=True,
+    reject_vector_ordered_reductions=False,
 ):
     output = []
     executable = True
     previous = True
     sections = []
     last_fence = False
-    local_sew = None
     deferred_adds = {}
 
     def emit(line):
@@ -281,6 +589,16 @@ def transform(
         last_fence = same_fence
 
     source_lines = source.splitlines()
+    proved_sew = _proved_vector_sew(source_lines)
+    proved_config = (
+        _proved_vector_sew(source_lines, full_config=True)
+        if scalarize_f32_ordered_reductions
+        else {}
+    )
+    # Avoid collisions even with forward references in the input.
+    reduction_prefix = ".Lnr_scalar_sum"
+    while reduction_prefix in source:
+        reduction_prefix += "_"
     for number, original_line in enumerate(source_lines, 1):
         try:
             line = original_line
@@ -291,7 +609,6 @@ def transform(
             # Do not let a same-line label hide raw instructions from checks.
             label = re.match(r"^([\w.$]+:)\s*(.*)$", code)
             if label:
-                local_sew = None
                 if not label[2] or not executable:
                     emit(line)
                     continue
@@ -333,16 +650,27 @@ def transform(
             elif mnemonic == ".previous":
                 executable, previous = previous, executable
             if not executable:
-                local_sew = None
                 emit(original_line)
                 continue
             if ";" in code:
                 raise ValueError(
                     "multiple assembly statements must be on separate lines"
                 )
-            if mnemonic in ("vsetvli", "vsetivli"):
-                width = re.search(r",\s*e(8|16|32|64)\s*,", code)
-                local_sew = int(width[1]) if width else None
+            if reject_vector_ordered_reductions and mnemonic == "vfredosum.vs":
+                raise ValueError(
+                    "ordered reduction reached FPGA assembly; enable "
+                    "lower-bosc-ame scalar-f32-ordered-reductions=true "
+                    "for a supported scalar SSA lowering"
+                )
+            if scalarize_f32_ordered_reductions and mnemonic == "vfredosum.vs":
+                for expanded_line in _expand_f32_ordered_reduction(
+                    code,
+                    proved_config.get(number - 1),
+                    f"{reduction_prefix}_{number}",
+                    insert_fences,
+                ):
+                    emit(expanded_line)
+                continue
             if expand_f32_sub and mnemonic == "vfsub.vf":
                 operands = re.fullmatch(
                     r"vfsub\.vf\s+(v(?:[12]?[0-9]|3[01])),\s*"
@@ -351,9 +679,9 @@ def transform(
                     r"fs(?:[0-9]|1[01])|fa[0-7])(,\s*v0\.t)?",
                     code,
                 )
-                if local_sew != 32 or not operands:
+                if proved_sew.get(number - 1) != 32 or not operands:
                     raise ValueError(
-                        "vfsub.vf expansion requires a local e32 vsetvli "
+                        "vfsub.vf expansion requires a proved e32 vsetvli "
                         "and compiler f32 operands"
                     )
                 destination, vector, scalar, mask = operands.groups()
@@ -368,27 +696,22 @@ def transform(
                 )
                 emit(f"\tfneg.s\t{scalar}, {scalar}")
                 continue
+            if (
+                expand_f32_scalar_moves or expand_f32_sub
+            ) and mnemonic == "vmv.s.x":
+                if proved_sew.get(number - 1) != 32:
+                    raise ValueError(
+                        "f32 scalar move requires a proved e32 configuration"
+                    )
+                for expanded_line in _expand_f32_scalar_move(code):
+                    emit(expanded_line)
+                continue
             if expand_vector_merges and mnemonic == "vmerge.vim":
                 for expanded_line in _expand_vector_merge(code):
                     emit(expanded_line)
                 continue
             if mnemonic.startswith("v") and mnemonic not in RVV_ALLOWED:
                 raise ValueError(f"RVV instruction not allowed: {code}")
-            if (
-                mnemonic.startswith(".")
-                or mnemonic
-                in (
-                    "call",
-                    "tail",
-                    "ret",
-                    "j",
-                    "jr",
-                    "jal",
-                    "jalr",
-                )
-                or mnemonic.startswith("b")
-            ):
-                local_sew = None
             if re.search(
                 r"\b(?:vlenb|vtype|vl)\b", code
             ) and mnemonic.startswith("csr"):
@@ -462,11 +785,31 @@ def transform(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    reduction_policy = parser.add_mutually_exclusive_group()
+    reduction_policy.add_argument(
+        "--reject-vector-ordered-reductions",
+        action="store_true",
+        help="production safeguard: require ordered reductions to be lowered "
+        "to scalar SSA before assembly; reject any residual vfredosum.vs",
+    )
+    reduction_policy.add_argument(
+        "--allow-vector-ordered-reductions",
+        action="store_true",
+        help="diagnostic opt-out: retain vfredosum.vs instead of the default "
+        "fixed-AVL f32 scalar workaround; requires matching ELF audit opt-out",
+    )
+    parser.add_argument(
+        "--expand-f32-scalar-moves",
+        action="store_true",
+        help="expand proved-e32 vmv.s.x through fmv.w.x and allowed vfmv.s.f; "
+        "preserve ft11 with a temporary 16-byte scalar stack slot",
+    )
     parser.add_argument(
         "--expand-f32-sub",
         action="store_true",
         help="expand compiler e32 vfsub.vf using scalar sign injection and "
-        "allowed vfadd.vf; requires a local e32 vector configuration",
+        "allowed vfadd.vf, and e32 vmv.s.x scalar seeds through vfmv.s.f; "
+        "requires a proved e32 vector configuration",
     )
     parser.add_argument(
         "--expand-vector-merges",
@@ -505,9 +848,12 @@ def main():
             coalesce_fences=args.coalesce_fences,
             expand_f32_sub=args.expand_f32_sub,
             expand_vector_merges=args.expand_vector_merges,
+            expand_f32_scalar_moves=args.expand_f32_scalar_moves,
             order_vector_copies=args.order_vector_copies,
             order_vector_adds=args.order_vector_adds,
             insert_fences=not args.no_fences,
+            scalarize_f32_ordered_reductions=not args.allow_vector_ordered_reductions,
+            reject_vector_ordered_reductions=args.reject_vector_ordered_reductions,
         )
     except ValueError as error:
         print(f"restrict_fpga_assembly: {error}", file=sys.stderr)

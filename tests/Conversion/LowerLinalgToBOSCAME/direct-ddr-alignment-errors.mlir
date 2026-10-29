@@ -1,6 +1,7 @@
-// RUN: buddy-opt %s --linalg-to-boscame='enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.emitted.mlir
+// RUN: buddy-opt %s --linalg-to-boscame='plan-version=1 enable-spm-dma=true enable-ame=true dma-abi=args_aligned64_nonalias target=nr-fpga' -o %t.emitted.mlir
 // RUN: FileCheck %s < %t.emitted.mlir
 // RUN: buddy-opt %t.emitted.mlir --bosc-ame-spm-dma-check --lower-bosc-ame -o /dev/null
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // A static descriptor offset of one i32 is four bytes. Direct AME compute
 // access is illegal, so the planner stages C through exact ACC32 copies.

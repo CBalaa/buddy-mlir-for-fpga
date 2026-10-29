@@ -157,10 +157,10 @@ def memory_cases(cases):
                 SCALAR_STORE
                 if name in {"waw", "disjoint_static_views"}
                 else SCALAR_LOAD,
-                "--bosc-ame-plan",
+                "--bosc-ame-plan=plan-version=1",
             )
         elif name == "read_read":
-            reject(output, SCALAR_LOAD, "--bosc-ame-plan")
+            reject(output, SCALAR_LOAD, "--bosc-ame-plan=plan-version=1")
         if name in {"caller", "multiblock_function"}:
             assert not records, output
     # An entry ABI can prove distinct descriptors independent. It is not
@@ -198,9 +198,11 @@ def memory_cases(cases):
     records = tasks(private_output)
     assert ids(records[1], "input_values") == ids(records[0], "output_values")
     assert ids(records[1], "predecessors") == [0]
-    reject(private_output, SCALAR_LOAD, "--bosc-ame-plan")
+    reject(private_output, SCALAR_LOAD, "--bosc-ame-plan=plan-version=1")
     planned = run(
-        output, "--bosc-ame-plan=plan-report=true", "--bosc-ame-plan-verify"
+        output,
+        "--bosc-ame-plan=plan-version=1 plan-report=true",
+        "--bosc-ame-plan-verify",
     )
     assert planned.returncode == 0, planned.stderr
     assert "plan.buffer" in planned.stdout and "plan.fill" in planned.stdout
@@ -242,7 +244,7 @@ def buffer_cases(cases):
             reject(
                 output,
                 "v1 has no independent DDR-to-DDR copy recipe",
-                "--bosc-ame-plan",
+                "--bosc-ame-plan=plan-version=1",
             )
             continue
         if name in selects:
@@ -276,7 +278,7 @@ def buffer_cases(cases):
             reject(
                 output,
                 SCALAR_LOAD if "," not in indices else HOST_SCALAR_LOAD,
-                "--bosc-ame-plan",
+                "--bosc-ame-plan=plan-version=1",
             )
         # Convert the first original load into a write, preserving its exact
         # descriptor/index/type. Unknown/dynamic/overflowing spans must fail

@@ -332,7 +332,9 @@ def supported(tool, filename, name, result):
             assert "func.call" not in chain
         lowered = invoke(tool, output, "--lower-bosc-ame")
         assert lowered.returncode == 0, lowered.stderr
-        assert lowered.stdout.count("mqma.b.mm") == (32 if large else 16)
+        assert lowered.stdout.count("llvm.riscv.bosc.ordered.mma") == (
+            32 if large else 16
+        )
     else:
         assert filename in {"aliasing", "vector-computations"}, (filename, name)
         assert "vector.load" in output and "vector.store" in output
@@ -382,7 +384,9 @@ def staged_dynamic_offset(tool, name, program):
         "    memref.copy %local, %out : memref<16xf32> to memref<16xf32>\n    return",
     )
     result = invoke(
-        tool, derived, "--linalg-to-boscame=dma-abi=args_aligned64_nonalias"
+        tool,
+        derived,
+        "--linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias",
     )
     check_result(
         result, "DDR view exceeds its statically known argument storage"
@@ -393,7 +397,9 @@ def staged_dynamic_offset(tool, name, program):
             "%offset = arith.constant 16 : index",
         )
         result = invoke(
-            tool, bounded, "--linalg-to-boscame=dma-abi=args_aligned64_nonalias"
+            tool,
+            bounded,
+            "--linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias",
         )
         check_result(result, None)
         assert result.stdout.count("bosc_ame.dma.start") == 2
@@ -478,7 +484,7 @@ def dma_roundtrip(tool, source, name, program):
             invoke(
                 tool,
                 initialized,
-                "--linalg-to-boscame=dma-abi=args_aligned64_nonalias",
+                "--linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias",
             ),
             "requires matching static rank-two SPM storage",
         )
@@ -492,7 +498,9 @@ def dma_roundtrip(tool, source, name, program):
         + derived[end:]
     )
     result = invoke(
-        tool, derived, "--linalg-to-boscame=dma-abi=args_aligned64_nonalias"
+        tool,
+        derived,
+        "--linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias",
     )
     check_result(result, None)
     assert result.stdout.count("bosc_ame.dma.start") == dma_count
@@ -547,7 +555,7 @@ def main():
         result = invoke(
             tool,
             program,
-            "--linalg-to-boscame=dma-abi=args_aligned64_nonalias plan-report=true",
+            "--linalg-to-boscame=plan-version=1 dma-abi=args_aligned64_nonalias plan-report=true",
         )
         if "--probe" in sys.argv:
             errors = re.findall(r"error: ([^\n]+)", result.stderr)

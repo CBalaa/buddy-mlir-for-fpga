@@ -1,28 +1,21 @@
 // RUN: buddy-opt %s --lower-bosc-ame | FileCheck %s --check-prefix=LOWER
 // RUN: buddy-opt %s --lower-bosc-ame | buddy-translate --buddy-to-llvmir | llc -mtriple=riscv64 -mattr=+m,+a,+f,+d,+c,-v,+xboscame -filetype=asm -o - | FileCheck %s --check-prefix=ASM
 
-// LOWER: llvm.inline_asm has_side_effects
-// LOWER-SAME: mwsub.h.mm $0, $0, $0
-// LOWER-SAME: ={acc0},r,r,r,~{memory}
-// LOWER-NOT: intr.mlce32
+// LOWER: llvm.call_intrinsic "llvm.riscv.bosc.ordered.zero.acc"
+// LOWER-NOT: llvm.inline_asm
+// LOWER-NOT: ordered.load.acc
 // ASM-LABEL: {{^}}zero_product:
 // ASM-NOT: mlce32.m
-// ASM: li {{[a-z0-9]+}}, 33
-// ASM: #APP
 // ASM: fence rw, rw
 // ASM: msettilem zero,
-// ASM: msettilen zero,
-// ASM: msettype zero,
-// ASM: mwsub.h.mm acc0, acc0, acc0
-// ASM: fence rw, rw
-// ASM: lui [[TYPE_BASE:[a-z0-9]+]], 16
-// ASM: addi [[TYPE_I8:[a-z0-9]+]], [[TYPE_BASE]], 16
-// ASM: msettype zero, [[TYPE_I8]]
-// ASM: mlae8.m
-// ASM: mlbe8.m
-// ASM: msettype zero, [[TYPE_I8]]
-// ASM: mqma.b.mm
-// ASM: msce32.m
+// ASM-NEXT: msettilen zero,
+// ASM-NEXT: msettype zero,
+// ASM-NEXT: mwsub.h.mm [[ACC:acc[0-7]]], [[ACC]], [[ACC]]
+// ASM-NEXT: fence rw, rw
+// ASM: mlae8.m [[A:tr[0-7]]],
+// ASM: mlbe8.m [[B:tr[0-7]]],
+// ASM: mqma.b.mm [[ACC]], [[A]], [[B]]
+// ASM: msce32.m [[ACC]],
 // ASM-NOT: mlce32.m
 module attributes {bosc_ame.target = "nr-fpga"} {
   func.func @zero_product() {

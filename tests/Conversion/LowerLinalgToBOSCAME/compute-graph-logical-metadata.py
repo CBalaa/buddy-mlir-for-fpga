@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s buddy-opt %S/buffer-placement-ame-metadata.mlir
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Rebuild legacy logical metadata; never let stale reverse users override IR."""
 
 import re
@@ -7,7 +8,7 @@ import sys
 from pathlib import Path
 
 OPTIONS = (
-    "--linalg-to-boscame=buffer-placement=true enable-spm-dma=true "
+    "--linalg-to-boscame=plan-version=1 buffer-placement=true enable-spm-dma=true "
     "enable-ame=true dma-abi=args_aligned64_nonalias "
 )
 ARGUMENT = (

@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check terminal forwarding, old outs and actual private window separation."""
 
 import re
@@ -102,7 +103,7 @@ def main():
             name,
             source(**options),
             "--kernel-contract-annotate",
-            "--bosc-ame-plan=plan-report=true",
+            "--bosc-ame-plan=plan-version=1 plan-report=true",
             "--bosc-ame-plan-verify",
         )
         assert ('action = "folded-store"' in planned) == folded, name
@@ -173,7 +174,7 @@ module {
         "sequential_regions",
         nested,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-plan-verify",
     )
     windows = re.findall(r"plan.buffer = \{([^}]*)\}", planned)
@@ -200,7 +201,7 @@ module {
             str(buddy_opt_path()),
             str(escaped_path),
             "--kernel-contract-annotate",
-            "--bosc-ame-plan",
+            "--bosc-ame-plan=plan-version=1",
         ],
         capture_output=True,
         text=True,

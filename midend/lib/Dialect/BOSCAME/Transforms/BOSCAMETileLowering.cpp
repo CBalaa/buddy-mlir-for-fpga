@@ -14,15 +14,16 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// `bosc_ame.tile.*` -> `bosc_ame.intr.*`, in one file, sharing the
+// `bosc_ame.tile.*` -> ordered LLVM target intrinsics, sharing the
 // LLVMTypeConverter and the conversion target of the unified BOSCAME pass.
 //
 // The lowering owns everything the high-level kernel deliberately does not say:
 //
 //   * the hardware *configuration*.  A tile load/store/mma carries shape and
-//     element type through its operands and results, so the pattern emits the
-//     register-form `msettilem/m/n/k` and `msettype` intrinsics it needs right
-//     before the instruction.  Configuration is repeated on purpose: the first
+//     element type through its operands and results, so the pattern bundles the
+//     configuration into the target intrinsic. The LLVM backend expands it
+//     after scheduling into register-form msettile*/msettype and the operation.
+//     Configuration is repeated on purpose: the first
 //     version favours "the hardware state is always correct here" over a
 //     configuration-elimination optimization, and a load must never depend on
 //     an `msettype` that only a later MMA would have executed.
@@ -34,7 +35,7 @@
 //     neither lost nor applied twice.
 //
 // Register allocation is *not* part of this lowering: the patterns emit the
-// same `bosc_ame.intr.*` operations the rest of the dialect uses, and the
+// ordered LLVM target intrinsics, and the
 // backend decides which tile and accumulator registers hold the values.  The
 // only value-level rule kept here is the first version's lack of a
 // matrix-value ABI (see `verifyBlockTileValues`).
@@ -77,27 +78,21 @@ using namespace buddy::boscame;
 namespace {
 
 //===----------------------------------------------------------------------===//
-// Hardware configuration
+// Configured, ordered target intrinsics
 //===----------------------------------------------------------------------===//
 
-/// Emit the register-form configuration of one datapath phase.  `m`, `n` and
-/// `k` are the tile extents the following instruction depends on; a `nullopt`
-/// extent is not programmed, because an unrelated extent of the previous
-/// instruction is still valid hardware state.
-void emitTileConfiguration(ConversionPatternRewriter &rewriter, Location loc,
-                           std::optional<int64_t> m, std::optional<int64_t> n,
-                           std::optional<int64_t> k, int64_t mtype) {
-  if (m)
-    buddy::boscame::detail::createConfigIntrinsic(rewriter, loc, "msettilem",
-                                                  *m);
-  if (n)
-    buddy::boscame::detail::createConfigIntrinsic(rewriter, loc, "msettilen",
-                                                  *n);
-  if (k)
-    buddy::boscame::detail::createConfigIntrinsic(rewriter, loc, "msettilek",
-                                                  *k);
-  buddy::boscame::detail::createConfigIntrinsic(rewriter, loc, "msettype",
-                                                mtype);
+/// Configuration and the consuming instruction must be one operation until
+/// the backend's late pseudo expansion. Independent mset* calls could otherwise
+/// be separated by scheduling, and a pure MMA could move past the next load.
+LLVM::CallIntrinsicOp
+createOrderedTileIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
+                           StringRef name, Type resultType,
+                           ValueRange operands) {
+  if (resultType)
+    return LLVM::CallIntrinsicOp::create(
+        rewriter, loc, resultType, rewriter.getStringAttr(name), operands);
+  return LLVM::CallIntrinsicOp::create(rewriter, loc,
+                                       rewriter.getStringAttr(name), operands);
 }
 
 //===----------------------------------------------------------------------===//
@@ -108,9 +103,8 @@ void emitTileConfiguration(ConversionPatternRewriter &rewriter, Location loc,
 /// otherwise fabricate a `bosc_ame.intr.tile.load_a` that does not exist.
 PatternBenefit tilePatternBenefit() { return PatternBenefit(3); }
 
-/// Shared part of the three loads: decode the SPM descriptor, emit the
-/// configuration the load depends on and replace the tile value by the
-/// intrinsic that selects the AME load instruction.
+/// Shared part of the three loads: decode the memory descriptor and replace
+/// the tile value by the configured intrinsic for the AME load instruction.
 class TileLoadPattern : public ConvertToLLVMPattern {
 public:
   TileLoadPattern(StringRef opName, StringRef intrinsicName, TileRole role,
@@ -127,7 +121,7 @@ public:
         computeTileStorageLayout(sourceType, role);
     if (!layout)
       return rewriter.notifyMatchFailure(
-          op, "the SPM operand has no layout the AME load can address");
+          op, "the memory operand has no layout the AME load can address");
     Type resultType = buddy::boscame::detail::getBOSCAMERegisterType(
         op->getResult(0).getType());
     if (!resultType)
@@ -138,28 +132,22 @@ public:
         rewriter, loc, operands[0], sourceType, *getTypeConverter());
     if (!base)
       return rewriter.notifyMatchFailure(
-          op, "cannot decode the SPM memref descriptor");
-
-    // The load reads whatever the tile registers currently describe, so its
-    // shape and its element type are programmed first - in this order.
-    if (role == TileRole::B)
-      emitTileConfiguration(rewriter, loc, std::nullopt, layout->cols(),
-                            layout->rows(), kFpgaMtypeMmaI8);
-    else
-      emitTileConfiguration(
-          rewriter, loc, layout->rows(),
-          role == TileRole::Accumulator ? layout->cols()
-                                        : std::optional<int64_t>(),
-          role == TileRole::A ? layout->cols() : std::optional<int64_t>(),
-          role == TileRole::Accumulator ? kFpgaMtypeAccumulatorI32
-                                        : kFpgaMtypeMmaI8);
+          op, "cannot decode the memory operand's memref descriptor");
 
     Value stride = buddy::boscame::detail::createI64Constant(
         rewriter, loc, layout->rowStrideBytes);
-    Operation *intrinsic = buddy::boscame::detail::createBOSCAMEIntrinsicOp(
-        rewriter, loc, intrinsicName, TypeRange{resultType},
-        ValueRange{base, stride});
-    rewriter.replaceOp(op, intrinsic->getResults());
+    SmallVector<Value> arguments{base, stride};
+    // B's logical shape is K x N, but its configured load needs N then K.
+    for (int64_t value :
+         {role == TileRole::B ? layout->cols() : layout->rows(),
+          role == TileRole::B ? layout->rows() : layout->cols(),
+          role == TileRole::Accumulator ? kFpgaMtypeAccumulatorI32
+                                        : kFpgaMtypeMmaI8})
+      arguments.push_back(
+          buddy::boscame::detail::createI64Constant(rewriter, loc, value));
+    auto intrinsic = createOrderedTileIntrinsic(rewriter, loc, intrinsicName,
+                                                resultType, arguments);
+    rewriter.replaceOp(op, intrinsic.getResults());
     return success();
   }
 
@@ -168,16 +156,17 @@ private:
   TileRole role;
 };
 
-/// `bosc_ame.tile.load_a` -> `bosc_ame.intr.mlae8.m`.
+/// `bosc_ame.tile.load_a` -> the ordered A-load intrinsic.
 class TileLoadAOpConversion : public TileLoadPattern {
 public:
   TileLoadAOpConversion(const LLVMTypeConverter &converter,
                         MLIRContext *context)
-      : TileLoadPattern(TileLoadAOp::getOperationName(), "bosc_ame.mlae8.m",
-                        TileRole::A, converter, context) {}
+      : TileLoadPattern(TileLoadAOp::getOperationName(),
+                        "llvm.riscv.bosc.ordered.load.a", TileRole::A,
+                        converter, context) {}
 };
 
-/// `bosc_ame.tile.load_b` -> `bosc_ame.intr.mlbe8.m`.
+/// `bosc_ame.tile.load_b` -> the ordered B-load intrinsic.
 ///
 /// The stride is the *physical* row stride of the operand.  B's storage is an
 /// `N x K` buffer with K contiguous, described logically as `[K, N]` with
@@ -187,22 +176,23 @@ class TileLoadBOpConversion : public TileLoadPattern {
 public:
   TileLoadBOpConversion(const LLVMTypeConverter &converter,
                         MLIRContext *context)
-      : TileLoadPattern(TileLoadBOp::getOperationName(), "bosc_ame.mlbe8.m",
-                        TileRole::B, converter, context) {}
+      : TileLoadPattern(TileLoadBOp::getOperationName(),
+                        "llvm.riscv.bosc.ordered.load.b", TileRole::B,
+                        converter, context) {}
 };
 
-/// `bosc_ame.tile.load_acc` -> `bosc_ame.intr.mlce32.m`.
+/// `bosc_ame.tile.load_acc` -> the ordered accumulator-load intrinsic.
 class TileLoadAccOpConversion : public TileLoadPattern {
 public:
   TileLoadAccOpConversion(const LLVMTypeConverter &converter,
                           MLIRContext *context)
-      : TileLoadPattern(TileLoadAccOp::getOperationName(), "bosc_ame.mlce32.m",
+      : TileLoadPattern(TileLoadAccOp::getOperationName(),
+                        "llvm.riscv.bosc.ordered.load.acc",
                         TileRole::Accumulator, converter, context) {}
 };
 
-/// No accumulator input or memory read is introduced. The output constraint
-/// makes the physical destination explicit to LLVM, and spelling the same
-/// output three times enforces the only board-verified subtraction subset.
+/// No accumulator input or memory read is introduced. The backend allocates
+/// the destination and expands to the board-verified defining self-subtract.
 class TileZeroAccOpConversion : public ConvertToLLVMPattern {
 public:
   TileZeroAccOpConversion(const LLVMTypeConverter &converter,
@@ -225,20 +215,15 @@ public:
          {type.getShape()[0], type.getShape()[1], int64_t(0x21)})
       arguments.push_back(buddy::boscame::detail::createI64Constant(
           rewriter, op->getLoc(), value));
-    auto clear = LLVM::InlineAsmOp::create(
-        rewriter, op->getLoc(), resultType, arguments,
-        "fence rw, rw\n\tmsettilem zero, $1\n\tmsettilen zero, $2\n\t"
-        "msettype zero, $3\n\tmwsub.h.mm $0, $0, $0\n\tfence rw, rw",
-        "={acc0},r,r,r,~{memory}",
-        /*has_side_effects=*/true, /*is_align_stack=*/false,
-        LLVM::TailCallKind::None, /*convergent=*/false, LLVM::AsmDialectAttr(),
-        ArrayAttr());
+    auto clear = createOrderedTileIntrinsic(rewriter, op->getLoc(),
+                                            "llvm.riscv.bosc.ordered.zero.acc",
+                                            resultType, arguments);
     rewriter.replaceOp(op, clear.getResults());
     return success();
   }
 };
 
-/// `bosc_ame.tile.mma` -> `bosc_ame.intr.mqma.b.mm`.
+/// `bosc_ame.tile.mma` -> the ordered MMA intrinsic.
 ///
 /// The accumulator is carried by SSA, so the MMA itself only has to guarantee
 /// that the tile shape and the compute datapath are programmed; which tile and
@@ -264,46 +249,20 @@ public:
     if (!resultType)
       return rewriter.notifyMatchFailure(op, "unsupported accumulator type");
 
-    if (op->hasAttr("bosc_ame.ordered")) {
-      // The independent emitter has one serial accumulator and consumes each
-      // A/B pair before loading the next pair. LLVM's existing pure MMA
-      // intrinsic cannot express its dependence on msettile*/msettype. A
-      // side-effecting assembly bundle keeps configuration and MMA together;
-      // its tied accumulator and memory clobber order both surrounding tile
-      // loads and the reduction. Named matrix constraints are understood by
-      // the existing backend and require no matrix moves for this schedule.
-      SmallVector<Value> arguments(operands);
-      for (int64_t value : {lhsType.getShape()[0], rhsType.getShape()[1],
-                            lhsType.getShape()[1], kFpgaMtypeMmaI8})
-        arguments.push_back(buddy::boscame::detail::createI64Constant(
-            rewriter, op->getLoc(), value));
-      auto ordered = LLVM::InlineAsmOp::create(
-          rewriter, op->getLoc(), resultType, arguments,
-          "msettilem zero, $4\n\tmsettilen zero, $5\n\t"
-          "msettilek zero, $6\n\tmsettype zero, $7\n\t"
-          "mqma.b.mm $0, $2, $3",
-          "={acc0},0,{tr0},{tr1},r,r,r,r,~{memory}",
-          /*has_side_effects=*/true, /*is_align_stack=*/false,
-          LLVM::TailCallKind::None, /*convergent=*/false,
-          LLVM::AsmDialectAttr(), ArrayAttr());
-      rewriter.replaceOp(op, ordered.getResults());
-      return success();
-    }
-
-    // M and N come from A and B, K is their shared inner dimension.
-    emitTileConfiguration(rewriter, op->getLoc(), lhsType.getShape()[0],
-                          rhsType.getShape()[1], lhsType.getShape()[1],
-                          kFpgaMtypeMmaI8);
-
-    Operation *intrinsic = buddy::boscame::detail::createBOSCAMEIntrinsicOp(
-        rewriter, op->getLoc(), "bosc_ame.mqma.b.mm", TypeRange{resultType},
-        operands);
-    rewriter.replaceOp(op, intrinsic->getResults());
+    SmallVector<Value> arguments(operands);
+    for (int64_t value : {lhsType.getShape()[0], rhsType.getShape()[1],
+                          lhsType.getShape()[1], kFpgaMtypeMmaI8})
+      arguments.push_back(buddy::boscame::detail::createI64Constant(
+          rewriter, op->getLoc(), value));
+    auto intrinsic = createOrderedTileIntrinsic(rewriter, op->getLoc(),
+                                                "llvm.riscv.bosc.ordered.mma",
+                                                resultType, arguments);
+    rewriter.replaceOp(op, intrinsic.getResults());
     return success();
   }
 };
 
-/// `bosc_ame.tile.store_acc` -> `bosc_ame.intr.msce32.m`.
+/// `bosc_ame.tile.store_acc` -> the ordered accumulator-store intrinsic.
 ///
 /// The write-back stores raw i32, so the accumulator phase of `mtype` is
 /// programmed first and the row stride is the leading stride in bytes.
@@ -323,22 +282,24 @@ public:
         computeTileStorageLayout(destType, TileRole::Accumulator);
     if (!layout)
       return rewriter.notifyMatchFailure(
-          op, "the SPM operand has no layout the AME store can address");
+          op, "the memory operand has no layout the AME store can address");
 
     Location loc = op->getLoc();
     Value base = buddy::boscame::detail::extractPointerFromDescriptor(
         rewriter, loc, operands[1], destType, *getTypeConverter());
     if (!base)
       return rewriter.notifyMatchFailure(
-          op, "cannot decode the SPM memref descriptor");
+          op, "cannot decode the memory operand's memref descriptor");
 
-    emitTileConfiguration(rewriter, loc, layout->rows(), layout->cols(),
-                          std::nullopt, kFpgaMtypeAccumulatorI32);
     Value stride = buddy::boscame::detail::createI64Constant(
         rewriter, loc, layout->rowStrideBytes);
-    buddy::boscame::detail::createBOSCAMEIntrinsicOp(
-        rewriter, loc, "bosc_ame.msce32.m", TypeRange(),
-        ValueRange{operands[0], base, stride});
+    SmallVector<Value> arguments{operands[0], base, stride};
+    for (int64_t value :
+         {layout->rows(), layout->cols(), kFpgaMtypeAccumulatorI32})
+      arguments.push_back(
+          buddy::boscame::detail::createI64Constant(rewriter, loc, value));
+    createOrderedTileIntrinsic(
+        rewriter, loc, "llvm.riscv.bosc.ordered.store.acc", Type(), arguments);
     rewriter.eraseOp(op);
     return success();
   }

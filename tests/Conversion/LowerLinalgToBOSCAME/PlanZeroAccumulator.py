@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Check deferred zero initialization through planning, emission and execution.
 
 The production planner must prove that the private C has no observable zero
@@ -167,7 +168,7 @@ def main():
         result = invoke(
             text,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan=plan-report=true",
+            "--bosc-ame-plan=plan-version=1 plan-report=true",
             "--bosc-ame-plan-verify",
         )
         assert result.returncode == 0, (name, result.stderr)
@@ -331,7 +332,9 @@ def main():
     incomplete = invoke(incomplete_source, "--kernel-contract-annotate")
     assert incomplete.returncode == 0, incomplete.stderr
     assert "complete = false" in incomplete.stdout
-    incomplete_plan = invoke(incomplete.stdout, "--bosc-ame-plan")
+    incomplete_plan = invoke(
+        incomplete.stdout, "--bosc-ame-plan=plan-version=1"
+    )
     if incomplete_plan.returncode == 0:
         assert "initialization =" not in incomplete_plan.stdout
         assert 'kind = "deferred-zero"' not in incomplete_plan.stdout

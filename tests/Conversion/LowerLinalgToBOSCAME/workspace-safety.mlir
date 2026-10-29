@@ -1,11 +1,12 @@
 // RUN: split-file %s %t
-// RUN: not buddy-opt %t/spm-input.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM-INPUT
-// RUN: not buddy-opt %t/spm-result.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM-RESULT
-// RUN: not buddy-opt %t/parallel.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
-// RUN: not buddy-opt %t/forall.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
-// RUN: not buddy-opt %t/async.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=ASYNC
-// RUN: not buddy-opt %t/parallel-call.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
-// RUN: not buddy-opt %t/serial.mlir --linalg-to-boscame='enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/spm-input.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM-INPUT
+// RUN: not buddy-opt %t/spm-result.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=SPM-RESULT
+// RUN: not buddy-opt %t/parallel.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/forall.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/async.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=ASYNC
+// RUN: not buddy-opt %t/parallel-call.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// RUN: not buddy-opt %t/serial.mlir --linalg-to-boscame='plan-version=1 enable-spm-dma=true dma-abi=args_aligned64_nonalias' 2>&1 | FileCheck %s --check-prefix=FILL
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // Preserve each original source. Physical SPM formals/results do not have
 // neutral private-root ownership, async tokens are outside the contract,

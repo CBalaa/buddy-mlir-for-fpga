@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Fuse private i32 products before selecting direct or SPM accumulator routes."""
 
 import re
@@ -96,7 +97,7 @@ def main():
             name,
             text,
             "--kernel-contract-annotate",
-            "--bosc-ame-plan",
+            "--bosc-ame-plan=plan-version=1",
             "--bosc-ame-plan-verify",
             "--mlir-print-ir-after-failure",
         )

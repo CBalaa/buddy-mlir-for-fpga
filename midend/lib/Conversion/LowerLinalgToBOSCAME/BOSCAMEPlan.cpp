@@ -8,11 +8,18 @@
 //===----------------------------------------------------------------------===//
 
 #include "Analysis/KernelContract.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEAccumulatorPlacement.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEDDRPlan.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEFloatSchedule.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEHotAccumulator.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPlanIR.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEPointwise.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMERegisterSchedule.h"
+#include "Conversion/LowerLinalgToBOSCAME/BOSCAMEStreamPlan.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMETargetInfo.h"
 #include "Conversion/LowerLinalgToBOSCAME/BOSCAMEZeroInit.h"
 #include "Dialect/BOSCAME/DmaAlignment.h"
+#include "Dialect/BOSCAME/Endpoint.h"
 #include "Dialect/BOSCAME/MatrixTransfer.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -259,6 +266,9 @@ private:
   LogicalResult transfer(memref::CopyOp op);
   LogicalResult internalTransfer(memref::CopyOp op, DictionaryAttr source,
                                  DictionaryAttr target);
+  LogicalResult placeLegacyBlock(Block &block, std::array<int64_t, 2> cursors,
+                                 std::array<int64_t, 2> &highWater,
+                                 bool commit = true);
   std::array<int64_t, 2> reserved(func::FuncOp function) const;
 };
 
@@ -309,15 +319,11 @@ bool Planner::directLegal(Value value, unsigned role) const {
                             : AmeTileLayout::MxNWithNContiguous;
   if (!hasAmeTileLayout(type, layout))
     return false;
-  SmallVector<int64_t> strides;
-  int64_t offset;
-  if (failed(type.getStridesAndOffset(strides, offset)))
-    return false;
-  int major = role == 1 ? 1 : 0;
-  int64_t pitch;
-  return strides[major] > 0 &&
-         !llvm::MulOverflow(strides[major], elementBytes(value), pitch) &&
-         pitch % 64 == 0;
+  auto storage =
+      computeTileStorageLayout(type, role == 0   ? TileRole::A
+                                     : role == 1 ? TileRole::B
+                                                 : TileRole::Accumulator);
+  return storage && storage->rowStrideBytes % 64 == 0;
 }
 
 bool Planner::sourceStable(Value source, Operation *begin,
@@ -511,6 +517,8 @@ void Planner::flattenPointwise() {
   SmallVector<linalg::GenericOp> candidates;
   module.walk([&](linalg::GenericOp op) { candidates.push_back(op); });
   for (auto op : candidates) {
+    if (isFloatScheduleMember(op) || isRegisterScheduleMember(op))
+      continue;
     if (!op.hasPureBufferSemantics() || op.getNumDpsInits() != 1 ||
         !nonCapturingMemoryUse(op) || op.getNumLoops() != 2 ||
         !llvm::all_of(op.getIteratorTypesArray(),
@@ -581,6 +589,8 @@ void Planner::forwardTerminalStores() {
            (type.getRank() == 1 || strides[0] == type.getDimSize(1));
   };
   for (auto op : candidates) {
+    if (isFloatScheduleMember(op) || isRegisterScheduleMember(op))
+      continue;
     if (!op.hasPureBufferSemantics() || op.getNumDpsInits() != 1 ||
         !nonCapturingMemoryUse(op) || op.getNumLoops() != 1 ||
         op.getNumParallelLoops() != 1 ||
@@ -764,8 +774,10 @@ LogicalResult Planner::forwardSnapshots(linalg::MatmulOp op, const Geometry &g,
     // The footprint already includes all K slices. A repeats across N tiles;
     // B repeats across M tiles. Do not multiply either by K tile count.
     int64_t repeats = role == 0 ? g.n / g.tn : 1;
-    if (!capacityFallback && role != 2 && repeats != 1)
+    if (options.version == 1 && !capacityFallback && role != 2 && repeats != 1)
       continue;
+    // Repetition alone is not a proof that SPM is profitable. Reuse is
+    // handled by the register schedule or a future measured reuse cost model.
     SmallVector<Operation *> allowed{load, op};
     if (role == 2) {
       auto store = stores.front();
@@ -826,8 +838,8 @@ LogicalResult Planner::stageExternalOperands(linalg::MatmulOp op,
     if (privateRoot(value))
       continue;
     bool direct = directLegal(value, role);
-    bool traffic = role == 0 && g.n / g.tn > 1;
-    if (direct && !traffic)
+    bool legacyTraffic = options.version == 1 && role == 0 && g.n / g.tn > 1;
+    if (direct && !legacyTraffic)
       continue;
     auto type = cast<MemRefType>(value.getType());
     int64_t minor = role == 1 ? 0 : 1;
@@ -912,9 +924,10 @@ LogicalResult Planner::stageExternalOperands(linalg::MatmulOp op,
   return success();
 }
 
-LogicalResult Planner::placeBlock(Block &block, std::array<int64_t, 2> cursors,
-                                  std::array<int64_t, 2> &highWater,
-                                  bool commit) {
+LogicalResult Planner::placeLegacyBlock(Block &block,
+                                        std::array<int64_t, 2> cursors,
+                                        std::array<int64_t, 2> &highWater,
+                                        bool commit) {
   for (Operation &op : block) {
     if (isa<memref::AllocOp, memref::AllocaOp>(op)) {
       Value root = op.getResult(0);
@@ -968,6 +981,112 @@ LogicalResult Planner::placeBlock(Block &block, std::array<int64_t, 2> cursors,
         decision =
             a.d({a.s("level", "spm"), a.i("bank", bank), a.i("offset", offset),
                  a.i("capacity", *size), a.s("role", "private")});
+      }
+      if (commit) {
+        placements[root] = decision;
+        op.setAttr("plan.buffer", decision);
+      }
+      continue;
+    }
+    if (isa<linalg::LinalgOp>(op))
+      continue;
+    bool shareArms = false;
+    if (auto branch = dyn_cast<scf::IfOp>(op)) {
+      SmallVector<Value> arms[2];
+      for (auto [index, region] : llvm::enumerate(branch->getRegions()))
+        region.walk([&](Operation *nested) {
+          if (isa<memref::AllocOp, memref::AllocaOp>(nested)) {
+            auto type = dyn_cast<MemRefType>(nested->getResult(0).getType());
+            if (type && type.getRank() != 0)
+              arms[index].push_back(nested->getResult(0));
+          }
+        });
+      shareArms = llvm::all_of(arms[0], [&](Value first) {
+        return llvm::all_of(arms[1], [&](Value second) {
+          return canShareExclusiveSPMWindow(first, second);
+        });
+      });
+    }
+    if (shareArms) {
+      if (commit)
+        sharedBranches.insert(&op);
+      std::array<int64_t, 2> branchEnd = cursors;
+      for (Region &region : op.getRegions())
+        for (Block &nested : region) {
+          std::array<int64_t, 2> armEnd = cursors;
+          if (failed(placeLegacyBlock(nested, cursors, armEnd, commit)))
+            return failure();
+          for (unsigned bank = 0; bank != 2; ++bank)
+            branchEnd[bank] = std::max(branchEnd[bank], armEnd[bank]);
+        }
+      for (unsigned bank = 0; bank != 2; ++bank) {
+        cursors[bank] = branchEnd[bank];
+        highWater[bank] = std::max(highWater[bank], cursors[bank]);
+      }
+      continue;
+    }
+    for (Region &region : op.getRegions())
+      for (Block &nested : region) {
+        std::array<int64_t, 2> nestedEnd = cursors;
+        if (failed(placeLegacyBlock(nested, cursors, nestedEnd, commit)))
+          return failure();
+        for (unsigned bank = 0; bank != 2; ++bank) {
+          cursors[bank] = nestedEnd[bank];
+          highWater[bank] = std::max(highWater[bank], cursors[bank]);
+        }
+      }
+  }
+  return success();
+}
+
+LogicalResult Planner::placeBlock(Block &block, std::array<int64_t, 2> cursors,
+                                  std::array<int64_t, 2> &highWater,
+                                  bool commit) {
+  if (options.version == 1)
+    return placeLegacyBlock(block, cursors, highWater, commit);
+  for (Operation &op : block) {
+    if (isa<memref::AllocOp, memref::AllocaOp>(op)) {
+      Value root = op.getResult(0);
+      auto size = storageBytes(root);
+      if (!size) {
+        if (commit)
+          op.emitError(
+              "automatic placement requires a bounded static private root");
+        return failure();
+      }
+      DictionaryAttr decision;
+      auto fixed = fixedBuffers.find(root);
+      if (isStreamVirtual(root) || isRegisterScheduleVirtual(&op) ||
+          isFloatScheduleVirtual(&op)) {
+        decision = a.d({a.s("level", "virtual"), a.i("capacity", *size),
+                        a.s("role", "logical-value")});
+      } else if (fixed != fixedBuffers.end()) {
+        const auto &window = fixed->second;
+        decision =
+            a.d({a.s("level", "spm"), a.i("bank", window.bank),
+                 a.i("offset", window.offset), a.i("capacity", window.capacity),
+                 a.s("role", "fixed-input")});
+        highWater[window.bank] =
+            std::max(highWater[window.bank], window.offset + window.capacity);
+      } else {
+        decision = a.d({a.s("level", "ddr"), a.i("capacity", *size),
+                        a.i("alignment", 64), a.s("role", "workspace"),
+                        a.s("reason", "reuse-benefit-unproven")});
+        // Exact complete-adapter measurements qualify only the closed source
+        // signature and bank0/offset0 envelope. Every fixed window has already
+        // contributed to cursors, including windows later in source order.
+        auto fixedEnds = reserved(op.getParentOfType<func::FuncOp>());
+        if (auto hot = getHotAccumulatorPlacement(
+                root, options.automaticPlacement,
+                cursors[0] == 0 && fixedEnds[0] == 0 && fixedEnds[1] == 0)) {
+          decision = hot;
+          if (hot.getAs<StringAttr>("level").getValue() == "spm") {
+            cursors[0] = *size;
+            highWater[0] = std::max(highWater[0], *size);
+          }
+        }
+        if (commit)
+          op.setAttr("alignment", a.b.getI64IntegerAttr(64));
       }
       if (commit) {
         placements[root] = decision;
@@ -1191,22 +1310,48 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
     return op.emitError("DMA planning requires ranked endpoint views");
   auto srcPlacement = placements.lookup(storageRoot(source));
   auto dstPlacement = placements.lookup(storageRoot(target));
-  if (srcPlacement && dstPlacement)
+  auto isSPM = [](DictionaryAttr p) {
+    auto level = p ? p.getAs<StringAttr>("level") : StringAttr();
+    return level && level.getValue() == "spm";
+  };
+  bool srcSPM = isSPM(srcPlacement), dstSPM = isSPM(dstPlacement);
+  if ((srcSPM && dstSPM) ||
+      (options.version == 1 && srcPlacement && dstPlacement))
     return internalTransfer(op, srcPlacement, dstPlacement);
-  bool load = !srcPlacement && dstPlacement;
-  bool store = srcPlacement && !dstPlacement;
-  if (!srcPlacement && !dstPlacement)
-    return op.emitError("v1 has no independent DDR-to-DDR copy recipe; a "
-                        "boundary copy requires a planned private endpoint");
-  if (!load && !store)
-    return op.emitError(
-        "v1 planned copy requires exactly one external DDR endpoint");
+  bool load = !srcSPM && dstSPM;
+  bool store = srcSPM && !dstSPM;
+  if (!load && !store) {
+    if (options.version == 1)
+      return op.emitError("v1 has no independent DDR-to-DDR copy recipe; a "
+                          "boundary copy requires a planned private endpoint");
+    return op.emitError("no legal boundary route: boundary copy requires "
+                        "exactly one SPM endpoint");
+  }
   Value external = load ? source : target, local = load ? target : source;
   auto placement = load ? dstPlacement : srcPlacement;
+  auto ddrPlacement = load ? srcPlacement : dstPlacement;
+  bool privateDDR =
+      options.version == 2 && ddrPlacement &&
+      ddrPlacement.getAs<StringAttr>("level").getValue() == "ddr" &&
+      classifyEndpoint(external) == EndpointKind::PrivateAllocation;
+  if (privateDDR && failed(verifyPrivateEndpoint(op, external)))
+    return failure();
+  auto ddrRootAligned = [&](int64_t alignment = 64) {
+    return privateDDR
+               ? ddrPlacement.getAs<IntegerAttr>("alignment").getInt() >=
+                         alignment &&
+                     ddrPlacement.getAs<IntegerAttr>("alignment").getInt() %
+                             alignment ==
+                         0
+               : alignedRoot(external, alignment);
+  };
+  auto ddrAligned = [&](int64_t alignment = 64) {
+    return ddrRootAligned(alignment) &&
+           spmdma::isEndpointPointerAlignmentProven(external, alignment);
+  };
   int64_t element = spmdma::getSpmElementByteWidth(src.getElementType());
   if (!element || src.getElementType() != dst.getElementType() ||
-      placement.getAs<StringAttr>("level").getValue() != "spm" ||
-      !alignedArgument(external, element) ||
+      !ddrAligned(element) ||
       !spmdma::isEndpointPointerAlignmentProven(local, element))
     return op.emitError(
         "no legal boundary route: natural endpoint alignment, element type, "
@@ -1248,7 +1393,7 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
   auto chunks = a.d({a.i("count", count), a.i("bytes", width),
                      a.i("ddr_stride", load ? sourceStride : targetStride),
                      a.i("spm_stride", load ? targetStride : sourceStride)});
-  if (width % 64 || !alignedArgument(external) ||
+  if (width % 64 || !ddrAligned() ||
       !spmdma::isEndpointPointerAlignmentProven(local, 64) ||
       (count > 1 && (sourceStride % 64 || targetStride % 64))) {
     // Ordinary ACC32 memory instructions have their own natural-alignment
@@ -1268,7 +1413,7 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
       matrixRejection = "matrix-requires-exact-four-byte-rows-and-pitches";
       if (width % 4 == 0 && sourceStride % 4 == 0 && targetStride % 4 == 0) {
         matrixRejection = "matrix-effective-four-byte-alignment-unproven";
-        if (alignedArgument(external, 4) &&
+        if (ddrAligned(4) &&
             spmdma::isEndpointPointerAlignmentProven(local, 4)) {
           auto layout = [&](MemRefType type, ArrayRef<int64_t> strides,
                             int64_t offset, int64_t pitch) {
@@ -1332,7 +1477,7 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
     auto sourceResidue = spmdma::getEndpointByteRemainder(source);
     auto targetResidue = spmdma::getEndpointByteRemainder(target);
     // A weaker naturally aligned ABI permits RVV but cannot authorize DMA.
-    if (!alignedRoot(external)) {
+    if (!ddrRootAligned()) {
       if (load)
         sourceResidue.reset();
       else
@@ -1413,6 +1558,14 @@ LogicalResult Planner::transfer(memref::CopyOp op) {
 
 LogicalResult Planner::decisions(func::FuncOp function) {
   WalkResult status = function.walk([&](Operation *op) -> WalkResult {
+    if (isStreamMember(op) || isRegisterScheduleMember(op) ||
+        isFloatScheduleMember(op))
+      return WalkResult::advance();
+    if (auto recipe = getDDRRecipe(op);
+        options.version == 2 && succeeded(recipe)) {
+      op->setAttr("plan.cpu", *recipe);
+      return WalkResult::advance();
+    }
     if (auto copy = dyn_cast<memref::CopyOp>(op))
       return failed(transfer(copy)) ? WalkResult::interrupt()
                                     : WalkResult::advance();
@@ -1460,7 +1613,16 @@ LogicalResult Planner::decisions(func::FuncOp function) {
       if (auto init = getZeroAccumulatorInit(matmul)) {
         NamedAttrList route(op->getAttrOfType<DictionaryAttr>("plan.route"));
         auto task = init->fill->getAttrOfType<DictionaryAttr>("contract.task");
-        if (task && op->hasAttr("contract.task")) {
+        // The fill and consumer share one execution decision. In particular,
+        // V2 may already have selected a real CPU DDR fill above; its source
+        // zero proof does not authorize silently deferring that selected fill.
+        auto fillPlan = init->fill->getAttrOfType<DictionaryAttr>("plan.fill");
+        auto engine =
+            fillPlan ? fillPlan.getAs<StringAttr>("engine") : StringAttr();
+        auto kind =
+            fillPlan ? fillPlan.getAs<StringAttr>("kind") : StringAttr();
+        if (task && op->hasAttr("contract.task") && engine && kind &&
+            engine.getValue() == "ame" && kind.getValue() == "deferred-zero") {
           route.set(
               "initialization",
               a.d({a.s("kind", init->loop ? "first-iteration-zero" : "zero"),
@@ -1698,6 +1860,8 @@ LogicalResult Planner::decisions(func::FuncOp function) {
 }
 
 LogicalResult Planner::run() {
+  if (options.version != 1 && options.version != 2)
+    return module.emitError("BOSCAME planner supports plan-version=1 or 2");
   WalkResult modules = module.walk([&](ModuleOp nested) -> WalkResult {
     if (nested != module) {
       nested.emitError(
@@ -1768,8 +1932,20 @@ LogicalResult Planner::run() {
   module.walk([&](linalg::MatmulOp op) { matmuls.push_back(op); });
   for (auto op : matmuls)
     (void)fuseAccumulator(op);
+  SmallVector<Value> fixedRoots;
+  for (const auto &fixed : fixedInputs)
+    fixedRoots.push_back(fixed.root);
+  if (options.version == 2 && failed(analyzeFloatSchedules(module, fixedRoots)))
+    return failure();
+  // Match the complete integer reduction and its terminal rank-two epilogue
+  // before flattening can hide that ownership relationship.
+  if (options.version == 2 &&
+      failed(analyzeRegisterSchedules(module, fixedRoots)))
+    return failure();
   flattenPointwise();
   for (auto op : matmuls) {
+    if (isRegisterScheduleMember(op) || isFloatScheduleMember(op))
+      continue;
     auto lhs = dyn_cast<MemRefType>(op.getInputs()[0].getType());
     auto rhs = dyn_cast<MemRefType>(op.getInputs()[1].getType());
     auto output = dyn_cast<MemRefType>(op.getOutputs()[0].getType());
@@ -1800,45 +1976,48 @@ LogicalResult Planner::run() {
         preferredBank[storageRoot(op->getOperand(role))] = role == 2 ? 0 : 1;
   }
   forwardTerminalStores();
-  // Capacity is a legality constraint, not a reason to demand a user policy.
-  // Retry one proven direct alternative at a time in source order. A may read
-  // more DDR bytes directly across N subtiles, but avoids its staging window.
-  for (;;) {
-    bool fits = true;
-    for (auto function : module.getOps<func::FuncOp>()) {
-      if (function.isExternal())
-        continue;
-      auto cursors = reserved(function);
-      std::array<int64_t, 2> highWater = cursors;
-      if (failed(placeBlock(function.getBody().front(), cursors, highWater,
-                            /*commit=*/false))) {
-        fits = false;
-        break;
-      }
-    }
-    if (fits)
-      break;
-    bool changed = false;
-    for (auto op : matmuls) {
-      if (orderedMatmuls.contains(op))
-        continue;
-      if (failed(forwardSnapshots(op, geometries.find(op)->second,
-                                  /*capacityFallback=*/true, &changed)))
-        return failure();
-      if (changed)
-        break;
-    }
-    if (!changed) {
+  if (options.version == 1) {
+    // Capacity is a legality constraint, not a reason to demand a user policy.
+    // Retry one proven direct alternative at a time in source order. A may read
+    // more DDR bytes directly across N subtiles, but avoids its staging window.
+    for (;;) {
+      bool fits = true;
       for (auto function : module.getOps<func::FuncOp>()) {
         if (function.isExternal())
           continue;
         auto cursors = reserved(function);
         std::array<int64_t, 2> highWater = cursors;
-        if (failed(placeBlock(function.getBody().front(), cursors, highWater)))
-          return failure();
+        if (failed(placeBlock(function.getBody().front(), cursors, highWater,
+                              /*commit=*/false))) {
+          fits = false;
+          break;
+        }
       }
-      return module.emitError(
-          "no legal storage route satisfies the SPM workspace capacity");
+      if (fits)
+        break;
+      bool changed = false;
+      for (auto op : matmuls) {
+        if (orderedMatmuls.contains(op))
+          continue;
+        if (failed(forwardSnapshots(op, geometries.find(op)->second,
+                                    /*capacityFallback=*/true, &changed)))
+          return failure();
+        if (changed)
+          break;
+      }
+      if (!changed) {
+        for (auto function : module.getOps<func::FuncOp>()) {
+          if (function.isExternal())
+            continue;
+          auto cursors = reserved(function);
+          std::array<int64_t, 2> highWater = cursors;
+          if (failed(
+                  placeBlock(function.getBody().front(), cursors, highWater)))
+            return failure();
+        }
+        return module.emitError(
+            "no legal storage route satisfies the SPM workspace capacity");
+      }
     }
   }
   StringRef producer = "buddy-neutral";
@@ -1847,8 +2026,28 @@ LogicalResult Planner::run() {
   if (failed(::buddy::contract::annotateKernelContract(module, producer,
                                                        /*planned=*/true)))
     return failure();
-  module->setAttr("plan.version", a.b.getI32IntegerAttr(1));
+  if (options.version == 2 &&
+      failed(analyzeRegisterSchedules(module, fixedRoots)))
+    return failure();
+  if (options.version == 2 &&
+      (failed(analyzeFloatSchedules(module, fixedRoots)) ||
+       failed(analyzeStreams(module, fixedRoots))))
+    return failure();
+  module->setAttr("plan.version", a.b.getI32IntegerAttr(options.version));
   module->setAttr("plan.target_profile", a.b.getStringAttr("nr-fpga"));
+  if (options.version == 2) {
+    module->setAttr("plan.automatic_spm",
+                    a.b.getBoolAttr(options.automaticPlacement));
+    // Preserve explicit physical-input constraints independently of the
+    // chosen placement, so verification reconstructs all reservations first.
+    for (const auto &entry : fixedBuffers) {
+      const auto &window = entry.second;
+      window.root.getDefiningOp()->setAttr(
+          "plan.fixed_input",
+          a.d({a.i("bank", window.bank), a.i("offset", window.offset),
+               a.i("capacity", window.capacity)}));
+    }
+  }
   for (auto function : module.getOps<func::FuncOp>()) {
     if (function.isExternal())
       continue;
@@ -1896,6 +2095,11 @@ public:
       *this, "plan-report",
       llvm::cl::desc("Print explicit access decisions and workspace"),
       llvm::cl::init(false)};
+  Option<int64_t> version{
+      *this, "plan-version",
+      llvm::cl::desc(
+          "Plan version (1: frozen compatibility, 2: DDR/register default)"),
+      llvm::cl::init(2)};
   StringRef getArgument() const override { return "bosc-ame-plan"; }
   StringRef getDescription() const override {
     return "Plan neutral kernel contracts into explicit BOSCAME storage routes";
@@ -1905,7 +2109,7 @@ public:
                     memref::MemRefDialect, scf::SCFDialect>();
   }
   void runOnOperation() override {
-    if (failed(planBOSCAME(getOperation()))) {
+    if (failed(planBOSCAME(getOperation(), {}, PlanOptions{true, version}))) {
       signalPassFailure();
       return;
     }
@@ -1924,9 +2128,11 @@ LogicalResult planBOSCAME(ModuleOp module,
 
 void printBOSCAMEPlan(ModuleOp module, llvm::raw_ostream &stream) {
   module.walk([&](Operation *op) {
-    for (StringRef attr : {"plan.budget", "plan.route", "plan.compute",
-                           "plan.transfer", "plan.buffer", "plan.vector",
-                           "plan.reduce", "plan.fill", "plan.scalar"})
+    for (StringRef attr :
+         {"plan.budget", "plan.route", "plan.compute", "plan.transfer",
+          "plan.buffer", "plan.vector", "plan.reduce", "plan.fill",
+          "plan.scalar", "plan.cpu", "plan.stream", "plan.register_schedule",
+          "plan.float_schedule"})
       if (Attribute decision = op->getAttr(attr))
         stream << op->getName() << " " << attr << "=" << decision << "\n";
   });

@@ -1,4 +1,5 @@
-// RUN: not buddy-opt %s --linalg-to-boscame='dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1
+// RUN: not buddy-opt %s --linalg-to-boscame='plan-version=1 dma-abi=args_aligned64_nonalias' -o /dev/null 2>&1 | FileCheck %s --check-prefix=V1
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // Retain the historical source case as a precise v1 compatibility boundary.
 // The independent DDR copy has no execution recipe. New contract task/version,

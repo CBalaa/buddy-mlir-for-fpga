@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Keep scalar constants in vector registers without allocating zero matrices."""
 
 import re
@@ -120,7 +121,7 @@ def main():
             planned = invoke(
                 source,
                 "--kernel-contract-annotate",
-                "--bosc-ame-plan",
+                "--bosc-ame-plan=plan-version=1",
                 "--bosc-ame-plan-verify",
             )
             assert planned.returncode == 0, planned.stderr
@@ -214,7 +215,7 @@ def main():
     explicit = invoke(
         dynamic,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-plan-verify",
     )
     assert explicit.returncode == 0, explicit.stderr
@@ -252,7 +253,7 @@ def main():
             planned = invoke(
                 direct_yield(literal, dead_operation),
                 "--kernel-contract-annotate",
-                "--bosc-ame-plan",
+                "--bosc-ame-plan=plan-version=1",
                 "--bosc-ame-plan-verify",
             )
             assert planned.returncode == 0, planned.stderr

@@ -1,12 +1,13 @@
 // RUN: split-file %s %t
-// RUN: buddy-opt %t/success.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/success.out 2>%t/success.plan
+// RUN: buddy-opt %t/success.mlir --linalg-to-boscame='plan-version=1 buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/success.out 2>%t/success.plan
 // RUN: FileCheck %s --check-prefix=SUCCESS < %t/success.plan
-// RUN: not buddy-opt %t/group-capacity.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/capacity.out 2>%t/capacity.plan
+// RUN: not buddy-opt %t/group-capacity.mlir --linalg-to-boscame='plan-version=1 buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/capacity.out 2>%t/capacity.plan
 // RUN: FileCheck %s --check-prefix=CAPACITY < %t/capacity.plan
-// RUN: buddy-opt %t/staging-capacity.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/staging.out 2>%t/staging.plan
+// RUN: buddy-opt %t/staging-capacity.mlir --linalg-to-boscame='plan-version=1 buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/staging.out 2>%t/staging.plan
 // RUN: FileCheck %s --check-prefix=STAGING < %t/staging.plan
-// RUN: not buddy-opt %t/computation-legality.mlir --linalg-to-boscame='buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/legality.out 2>%t/legality.plan
+// RUN: not buddy-opt %t/computation-legality.mlir --linalg-to-boscame='plan-version=1 buffer-placement=true enable-spm-dma=true dma-abi=args_aligned64_nonalias plan-report=true' -o %t/legality.out 2>%t/legality.plan
 // RUN: FileCheck %s --check-prefix=LEGALITY < %t/legality.plan
+// Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 
 // SUCCESS-COUNT-2: memref.alloc plan.buffer=
 // SUCCESS: high_water = array<i64: 64, 64>

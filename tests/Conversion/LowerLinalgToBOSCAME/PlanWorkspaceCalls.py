@@ -1,4 +1,5 @@
 # RUN: %PYTHON %s %t
+# Explicit V1 storage-policy compatibility; V2 defaults are tested by the schedule/stream tests.
 """Reject calls that can introduce physical aliases across SPM workspaces."""
 
 import subprocess
@@ -95,7 +96,7 @@ def main():
         "callee_private_workspace",
         NESTED_WORKSPACE,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
     )
     opaque = PRIVATE_WORKSPACE.replace(
         "  func.func @workspace",
@@ -108,7 +109,7 @@ def main():
         "opaque_callee",
         opaque,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
     )
     indirect = PRIVATE_WORKSPACE.replace(
         "  func.func @workspace",
@@ -122,7 +123,7 @@ def main():
         "indirect_callee",
         indirect,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
     )
 
     # Physical input adapters must obey the same rule for existing windows.
@@ -135,7 +136,10 @@ def main():
         "outs(%a : memref<64xi32, #bosc_ame.spm<0>>)",
     )
     fixed = fixed.replace("memref.dealloc %a : memref<64xi32>", "")
-    for entry in ("--linalg-to-boscame", "--lower-linalg-to-boscame"):
+    for entry in (
+        "--linalg-to-boscame=plan-version=1",
+        "--lower-linalg-to-boscame=plan-version=1",
+    ):
         rejected("fixed_" + entry[2:], fixed, entry)
 
     # An explicitly supplied plan cannot bypass the check at verify or emit.
@@ -143,7 +147,7 @@ def main():
         "private_workspace",
         PRIVATE_WORKSPACE,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
     )
     assert baseline.returncode == 0, baseline.stderr
     # A DDR-only caller can invoke the SPM callee concurrently even though it
@@ -184,8 +188,16 @@ def main():
     }
     for name, caller in callers.items():
         text = PRIVATE_WORKSPACE.rsplit("}", 1)[0] + caller + "}\n"
-        referenced(name, text, "--kernel-contract-annotate", "--bosc-ame-plan")
-        for entry in ("--linalg-to-boscame", "--lower-linalg-to-boscame"):
+        referenced(
+            name,
+            text,
+            "--kernel-contract-annotate",
+            "--bosc-ame-plan=plan-version=1",
+        )
+        for entry in (
+            "--linalg-to-boscame=plan-version=1",
+            "--lower-linalg-to-boscame=plan-version=1",
+        ):
             referenced(name + entry[2:], text, entry)
     addressed_plan = baseline.stdout.replace(
         "    memref.dealloc",
@@ -224,7 +236,7 @@ module {
         "ddr_only",
         ddr_only,
         "--kernel-contract-annotate",
-        "--bosc-ame-plan",
+        "--bosc-ame-plan=plan-version=1",
         "--bosc-ame-plan-verify",
         "--bosc-ame-emit",
     )
